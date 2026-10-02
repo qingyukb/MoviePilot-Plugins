@@ -2,7 +2,7 @@
 
 个人 MoviePilot 插件集合，按官方仓库规范组织，可直接在 MoviePilot 中通过「添加插件仓库」安装。
 
-仓库地址填入：`https://github.com/<你的用户名>/MoviePilot-Plugins`
+仓库地址填入：`https://github.com/qingyu/MoviePilot-Plugins`
 
 ## 插件列表
 

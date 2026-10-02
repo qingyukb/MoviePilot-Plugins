@@ -46,9 +46,9 @@ class MTeamAutoLogin(_PluginBase):
     # 插件图标
     plugin_icon = "Moviepilot_A.png"
     # 插件版本
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.1"
     # 插件作者
-    plugin_author = "local"
+    plugin_author = "qingyu"
     # 作者主页
     author_url = ""
     # 插件配置项 ID 前缀
@@ -67,6 +67,9 @@ class MTeamAutoLogin(_PluginBase):
         "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
     )
     _CHARSET = "abcdefghijklmnopqrstuvwxyz0123456789"
+    # 站点会校验网页端版本号，缺失或过低会直接拒绝登录（返回"網頁端版本過低"）
+    _DEFAULT_VERSION = "1.1.4"
+    _DEFAULT_WEB_VERSION = "1140"
 
     def __init__(self):
         """初始化插件运行时变量。"""
@@ -95,6 +98,7 @@ class MTeamAutoLogin(_PluginBase):
         self._did: str = ""
         self._visitor_id: str = ""
         self._running: bool = False
+        self._last_error: str = ""
 
     # ------------------------------------------------------------------ #
     # 生命周期
@@ -117,8 +121,8 @@ class MTeamAutoLogin(_PluginBase):
         self._referer = str(config.get("referer") or "https://kp.m-team.cc/").strip()
         self._proxy = str(config.get("proxy") or "").strip()
         self._ua = str(config.get("ua") or "").strip() or self._DEFAULT_UA
-        self._version = str(config.get("version") or "").strip()
-        self._web_version = str(config.get("web_version") or "").strip()
+        self._version = str(config.get("version") or "").strip() or self._DEFAULT_VERSION
+        self._web_version = str(config.get("web_version") or "").strip() or self._DEFAULT_WEB_VERSION
         self._random_delay = int(config.get("random_delay") or 0)
         self._keep_alive = bool(config.get("keep_alive", True))
         self._force_login = bool(config.get("force_login"))
@@ -387,8 +391,10 @@ class MTeamAutoLogin(_PluginBase):
                                         "component": "VTextField",
                                         "props": {
                                             "model": "version",
-                                            "label": "version 请求头（可选）",
-                                            "placeholder": "如 1.1.2",
+                                            "label": "version 请求头",
+                                            "placeholder": "1.1.4",
+                                            "hint": "站点会校验，过低会拒绝登录；站点升级后需同步更新",
+                                            "persistent-hint": True,
                                         },
                                     },
                                     md=3,
@@ -398,8 +404,10 @@ class MTeamAutoLogin(_PluginBase):
                                         "component": "VTextField",
                                         "props": {
                                             "model": "web_version",
-                                            "label": "webversion 请求头（可选）",
-                                            "placeholder": "如 1120",
+                                            "label": "webversion 请求头",
+                                            "placeholder": "1140",
+                                            "hint": "与 version 对应，如 1.1.4 对应 1140",
+                                            "persistent-hint": True,
                                         },
                                     },
                                     md=3,
@@ -441,8 +449,8 @@ class MTeamAutoLogin(_PluginBase):
                 "referer": "https://kp.m-team.cc/",
                 "proxy": "",
                 "ua": "",
-                "version": "",
-                "web_version": "",
+                "version": "1.1.4",
+                "web_version": "1140",
                 "random_delay": 0,
                 "keep_alive": True,
                 "force_login": False,
@@ -634,7 +642,7 @@ class MTeamAutoLogin(_PluginBase):
             # 2. 真实登录
             token = self._real_login(session)
             if not token:
-                self._after_failure("登录失败，请检查账号密码与动态验证码密钥")
+                self._after_failure(self._last_error or "登录失败，请检查账号密码与动态验证码密钥")
                 return False
             self._token = token
             self.save_data("token", token)
@@ -656,6 +664,25 @@ class MTeamAutoLogin(_PluginBase):
             if once:
                 self.update_config({**self._current_config(), "run_once": False})
 
+    @staticmethod
+    def describe_login_error(result: Optional[dict]) -> str:
+        """把服务端返回的错误翻译成可操作的中文提示。"""
+        result = result or {}
+        message = str(result.get("message") or "")
+        code = int(result.get("code") or 0)
+
+        if "版本" in message:
+            return (
+                f"站点校验网页端版本号（服务端返回：{message}）"
+                "——请在浏览器打开站点，按 F12 → Network，任选一个 /api/ 请求，"
+                "把请求头 version 与 webversion 的值填入本插件的同名配置项后重试"
+            )
+        if code == 1001:
+            return "账号开启了二次验证，服务端要求提交动态验证码"
+        if message and message != "SUCCESS":
+            return f"服务端返回：{message}"
+        return "未收到有效响应"
+
     def _real_login(self, session) -> str:
         """调用 /api/login 完成真实登录，返回服务端令牌。
 
@@ -663,6 +690,7 @@ class MTeamAutoLogin(_PluginBase):
         则说明账号开启了二次验证，此时使用 TOTP 密钥生成验证码重试。
         """
         username, password = self._username, self._password
+        self._last_error = ""
 
         # 第一次尝试：不带动态验证码
         resp = self._post(session, "/api/login", {
@@ -672,7 +700,8 @@ class MTeamAutoLogin(_PluginBase):
         })
         result = self._parse(resp)
         if result is None:
-            logger.error("M-Team 自动登录：登录接口无有效响应")
+            self._last_error = "登录接口无有效响应，可能被 Cloudflare 拦截（可安装 curl_cffi 或配置代理）"
+            logger.error(f"M-Team 自动登录：{self._last_error}")
             return ""
 
         if result.get("message") == "SUCCESS":
@@ -681,17 +710,18 @@ class MTeamAutoLogin(_PluginBase):
         # 需要二次验证
         if int(result.get("code") or 0) == 1001:
             if not self._totp_secret:
-                logger.error(
-                    "M-Team 自动登录：账号开启了二次验证，服务端要求提交动态验证码，"
-                    "但未配置 TOTP 密钥。可选处理："
+                self._last_error = (
+                    "账号已开启二次验证，服务端要求提交动态验证码。可选处理："
                     "① 填写 TOTP 密钥；② 在站点关闭二次验证后留空此字段；"
-                    "③ 改用「手动令牌」模式，从浏览器复制 Authorization 粘贴。"
+                    "③ 改用「手动令牌」模式，从浏览器复制 Authorization 粘贴"
                 )
+                logger.error(f"M-Team 自动登录：{self._last_error}")
                 return ""
             try:
                 otp = self._generate_totp(self._totp_secret)
             except Exception as err:
-                logger.error(f"M-Team 自动登录：TOTP 密钥解析失败 - {err}")
+                self._last_error = f"TOTP 密钥无法解析：{err}"
+                logger.error(f"M-Team 自动登录：{self._last_error}")
                 return ""
             logger.info("M-Team 自动登录：站点要求二次验证，使用动态验证码重试")
             resp = self._post(session, "/api/login", {
@@ -703,9 +733,14 @@ class MTeamAutoLogin(_PluginBase):
             result = self._parse(resp)
             if result and result.get("message") == "SUCCESS":
                 return self._extract_token(resp)
-            logger.error(f"M-Team 自动登录：带验证码登录失败 - {result}")
+            self._last_error = (
+                "带动态验证码登录失败，请检查 TOTP 密钥是否正确、"
+                f"运行 MoviePilot 的设备时间是否准确（服务端返回：{(result or {}).get('message')}）"
+            )
+            logger.error(f"M-Team 自动登录：{self._last_error}")
             return ""
 
+        self._last_error = self.describe_login_error(result)
         logger.error(f"M-Team 自动登录：登录失败 - {result}")
         return ""
 

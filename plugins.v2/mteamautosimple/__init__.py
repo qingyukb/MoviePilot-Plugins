@@ -45,9 +45,9 @@ class MTeamAutoSimple(_PluginBase):
     # 插件图标
     plugin_icon = "mteamautosimple.png"
     # 插件版本
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.1"
     # 插件作者
-    plugin_author = "local"
+    plugin_author = "qingyu"
     # 作者主页
     author_url = ""
     # 插件配置项 ID 前缀
@@ -66,6 +66,9 @@ class MTeamAutoSimple(_PluginBase):
         "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
     )
     _CHARSET = "abcdefghijklmnopqrstuvwxyz0123456789"
+    # 站点会校验网页端版本号，缺失或过低会直接拒绝登录（返回"網頁端版本過低"）
+    _DEFAULT_VERSION = "1.1.4"
+    _DEFAULT_WEB_VERSION = "1140"
 
     def __init__(self):
         """初始化插件运行时变量。"""
@@ -78,10 +81,13 @@ class MTeamAutoSimple(_PluginBase):
         self._proxy: str = ""
         self._random_delay: int = 0
         self._run_once: bool = False
+        self._version: str = self._DEFAULT_VERSION
+        self._web_version: str = self._DEFAULT_WEB_VERSION
         self._token: str = ""
         self._did: str = ""
         self._visitor_id: str = ""
         self._running: bool = False
+        self._last_error: str = ""
 
     # ------------------------------------------------------------------ #
     # 生命周期
@@ -101,6 +107,9 @@ class MTeamAutoSimple(_PluginBase):
         self._proxy = str(config.get("proxy") or "").strip()
         self._random_delay = int(config.get("random_delay") or 0)
         self._run_once = bool(config.get("run_once"))
+        self._version = str(config.get("version") or "").strip() or self._DEFAULT_VERSION
+        self._web_version = (str(config.get("web_version") or "").strip()
+                             or self._DEFAULT_WEB_VERSION)
 
         self._token = self.get_data("token") or ""
         self._did = self.get_data("did") or ""
@@ -249,6 +258,37 @@ class MTeamAutoSimple(_PluginBase):
                                 ),
                             ],
                         },
+                        {
+                            "component": "VRow",
+                            "content": [
+                                self._col(
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "version",
+                                            "label": "version 请求头",
+                                            "placeholder": "1.1.4",
+                                            "hint": "站点会校验，过低会被拒绝登录；站点升级后需同步更新",
+                                            "persistent-hint": True,
+                                        },
+                                    },
+                                    md=6,
+                                ),
+                                self._col(
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "web_version",
+                                            "label": "webversion 请求头",
+                                            "placeholder": "1140",
+                                            "hint": "与 version 对应，如 1.1.4 对应 1140",
+                                            "persistent-hint": True,
+                                        },
+                                    },
+                                    md=6,
+                                ),
+                            ],
+                        },
                     ],
                 }
             ],
@@ -260,6 +300,8 @@ class MTeamAutoSimple(_PluginBase):
                 "login_cron": "0 */6 * * *",
                 "proxy": "",
                 "random_delay": 0,
+                "version": "1.1.4",
+                "web_version": "1140",
                 "run_once": False,
             },
         )
@@ -430,13 +472,7 @@ class MTeamAutoSimple(_PluginBase):
             result_code = {"value": 0}
             token = self._real_login(session, result_code)
             if not token:
-                if result_code["value"] == 1001:
-                    self._after_failure(
-                        "账号已开启二次验证，服务端要求提交动态验证码。"
-                        "请关闭站点二次验证，或改用完整版插件「M-Team 自动登录」"
-                    )
-                else:
-                    self._after_failure("登录失败，请检查用户名与密码")
+                self._after_failure(self._last_error or "登录失败，请检查用户名与密码")
                 return False
             self._token = token
             self.save_data("token", token)
@@ -458,8 +494,28 @@ class MTeamAutoSimple(_PluginBase):
             if once:
                 self.update_config({**self._current_config(), "run_once": False})
 
+    @staticmethod
+    def describe_login_error(result: Optional[dict]) -> str:
+        """把服务端返回的错误翻译成可操作的中文提示。"""
+        result = result or {}
+        message = str(result.get("message") or "")
+        code = int(result.get("code") or 0)
+
+        if "版本" in message:
+            return (
+                f"站点校验网页端版本号（服务端返回：{message}）"
+                "——请在浏览器打开站点，按 F12 → Network，任选一个 /api/ 请求，"
+                "把请求头 version 与 webversion 的值填入本插件的同名配置项后重试"
+            )
+        if code == 1001:
+            return "账号开启了二次验证，服务端要求提交动态验证码"
+        if message and message != "SUCCESS":
+            return f"服务端返回：{message}"
+        return "未收到有效响应"
+
     def _real_login(self, session, code_out: Optional[dict] = None) -> str:
         """调用 /api/login 完成真实登录，返回服务端令牌。"""
+        self._last_error = ""
         resp = self._post(session, "/api/login", {
             "username": self._username,
             "password": self._password,
@@ -467,7 +523,9 @@ class MTeamAutoSimple(_PluginBase):
         })
         result = self._parse(resp)
         if result is None:
-            logger.error("M-Team 免验证码登录：登录接口无有效响应")
+            self._last_error = ("登录接口无有效响应，可能被 Cloudflare 拦截"
+                                "（可安装 curl_cffi 或配置代理）")
+            logger.error(f"M-Team 免验证码登录：{self._last_error}")
             return ""
 
         if code_out is not None:
@@ -475,11 +533,14 @@ class MTeamAutoSimple(_PluginBase):
 
         if result.get("message") != "SUCCESS":
             if code_out is not None and code_out["value"] == 1001:
-                logger.error(
-                    "M-Team 免验证码登录：服务端要求二次验证，本插件不处理验证码，"
-                    "请关闭站点二次验证或改用完整版插件"
+                self._last_error = (
+                    "账号已开启二次验证，服务端要求提交动态验证码。"
+                    "本插件不处理验证码，请关闭站点二次验证，"
+                    "或改用完整版插件「M-Team 自动登录」"
                 )
+                logger.error(f"M-Team 免验证码登录：{self._last_error}")
             else:
+                self._last_error = self.describe_login_error(result)
                 logger.error(f"M-Team 免验证码登录：登录失败 - {result}")
             return ""
 
@@ -568,6 +629,8 @@ class MTeamAutoSimple(_PluginBase):
             "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
             "Accept": "application/json;charset=UTF-8",
             "Ts": str(int(time.time())),
+            "version": self._version,
+            "webversion": self._web_version,
             "Did": self._did or self._random_string(16),
             "visitorid": self._visitor_id or self._ensure_visitor_id(),
         }
@@ -641,6 +704,8 @@ class MTeamAutoSimple(_PluginBase):
             "login_cron": self._login_cron,
             "proxy": self._proxy,
             "random_delay": self._random_delay,
+            "version": self._version,
+            "web_version": self._web_version,
             "run_once": False,
         }
 

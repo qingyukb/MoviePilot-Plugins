@@ -3,11 +3,12 @@
     "name": "M-Team 自动登录（免验证码）",
     "description": "只用账号密码真实登录 M-Team（kp.m-team.cc）并刷新最后访问时间保活，适用于未开启二次验证的账号。",
     "labels": "站点",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "icon": "mteamautosimple.png",
-    "author": "local",
+    "author": "qingyu",
     "level": 1,
     "history": {
+      "v1.0.1": "作者信息更新为 qingyu",
       "v1.0.0": "首次发布：仅账号密码的真实登录 + 令牌复用 + 最后访问时间保活；登录周期可配置"
     }
   },
@@ -15,11 +16,12 @@
     "name": "M-Team 自动登录",
     "description": "定时使用账号密码 + 动态验证码真实登录 M-Team（kp.m-team.cc），登录后刷新最后访问时间保活。登录走站点真实接口，由服务端签发令牌。",
     "labels": "站点",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "icon": "mteamautologin.png",
-    "author": "local",
+    "author": "qingyu",
     "level": 1,
     "history": {
+      "v1.0.1": "作者信息更新为 qingyu",
       "v1.0.0": "首次发布：真实登录（/api/login + TOTP 二次验证）+ 令牌复用 + 最后访问时间保活；支持手动令牌模式、预热访问、通知、代理"
     }
   }
