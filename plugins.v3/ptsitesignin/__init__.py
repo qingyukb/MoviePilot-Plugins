@@ -13,10 +13,9 @@
 
 from __future__ import annotations
 
-import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
-from threading import Thread
+from threading import Event, Lock, Thread, Timer
 from typing import Any, Dict, List, Optional, Tuple
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -52,7 +51,7 @@ class PTSiteSignIn(_PluginBase):
     plugin_name = "PT站点签到"
     plugin_desc = "双引擎 PT 签到：HTTP 直连签到接口，或经 Browserless 完成验证码 / Cloudflare / Turnstile 挑战。"
     plugin_icon = "signin.png"
-    plugin_version = "1.0.2"
+    plugin_version = "1.0.3"
     plugin_author = "qingyu"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "ptsignin_"
@@ -76,8 +75,20 @@ class PTSiteSignIn(_PluginBase):
     _run_once = False
     _run_once_scheduler: Optional[BackgroundScheduler] = None
 
+    # 进程级互斥：Cron 与「保存后立即执行一次」可能同时触发，避免同一轮重复签到 /
+    # 并发覆盖 latest、history 数据。失败重试由后台 Timer 延迟执行，不再阻塞执行线程。
+    _run_lock: Lock = Lock()
+    _history_days = 30
+    _stop_event: Optional[Event] = None
+    _retry_timer: Optional[Timer] = None
+    _run_id = 0
+
     def init_plugin(self, config: Optional[dict] = None) -> None:
         self.stop_service()
+        self._stop_event = Event()
+        self._retry_timer = None
+        # 新生命周期会让上一轮尚未触发的重试全部失效。
+        self._run_id = getattr(self, "_run_id", 0) + 1
         config = config or {}
         self._enabled = bool(config.get("enabled", False))
         self._notify_mode = self._parse_notify_mode(config)
@@ -120,7 +131,7 @@ class PTSiteSignIn(_PluginBase):
         logger.info("PT站点签到：保存后立即执行一次，将在 3 秒后于后台开始")
 
     def _run_once_task(self) -> None:
-        """后台任务：只跑一遍签到，跳过失败重试的等待。"""
+        """后台任务：只跑一遍签到，跳过失败重试。"""
         try:
             self.run_sign_in(allow_retry=False)
         except Exception:
@@ -427,7 +438,23 @@ class PTSiteSignIn(_PluginBase):
             return list(executor.map(lambda info: self._sign_one(info, rules, signer), infos))
 
     def run_sign_in(self, allow_retry: bool = True) -> None:
-        """执行一轮签到。allow_retry=False 时跳过失败重试的等待（手动触发用）。"""
+        """执行一轮签到。
+
+        Cron 与「保存后立即执行一次」可能同时触发，用进程级互斥锁保证同一时间
+        只有一轮在跑；失败重试交给后台 Timer，等待期间不再占用执行线程。
+        allow_retry=False 时跳过失败重试（保存后立即执行用）。
+        """
+        if not PTSiteSignIn._run_lock.acquire(blocking=False):
+            logger.warning("PT站点签到：上一轮仍在执行，本次跳过，避免重复签到")
+            return
+        try:
+            self._run_sign_in_locked(allow_retry)
+        finally:
+            PTSiteSignIn._run_lock.release()
+
+    def _run_sign_in_locked(self, allow_retry: bool) -> None:
+        self._run_id += 1
+        run_id = self._run_id
         try:
             all_sites = {site.id: site for site in SiteOper().list_order_by_pri()}
         except Exception as error:
@@ -463,33 +490,133 @@ class PTSiteSignIn(_PluginBase):
         results = self._run_batch(infos, rules, signer)
         result_by_key = {r.get("state_key") or r.get("site"): r for r in results}
         retry_times = self._retry_count if allow_retry else 0
-        for attempt in range(1, retry_times + 1):
-            failed_infos = [info for info, result in zip(infos, results)
-                            if result.get("status") == "failed"]
+        failed_infos = [info for info, result in zip(infos, results)
+                        if result.get("status") == "failed"]
+        if not failed_infos or retry_times <= 0:
+            self._finish(list(result_by_key.values()))
+            return
+        # 先落盘首轮结果；重试完成后以最终结果覆盖同一天历史并统一通知。
+        self._save_results(list(result_by_key.values()))
+        self._schedule_retry(1, run_id, infos, rules, signer, result_by_key)
+
+    def _schedule_retry(self, attempt: int, run_id: int, infos: List[Dict[str, Any]],
+                        rules: Dict[str, Dict[str, Any]], signer: Optional[BrowserlessSigner],
+                        result_by_key: Dict[str, Dict[str, str]]) -> None:
+        """用后台 Timer 延迟执行下一轮失败重试，避免 sleep 占用执行线程。"""
+        if attempt > self._retry_count:
+            self._finish(list(result_by_key.values()))
+            return
+        old_timer = getattr(self, "_retry_timer", None)
+        if old_timer is not None:
+            try:
+                old_timer.cancel()
+            except Exception:
+                pass
+        delay = max(1, self._retry_delay_minutes) * 60
+        logger.info("PT站点签到：失败站点将在 %s 分钟后重试（第 %s/%s 次）",
+                    self._retry_delay_minutes, attempt, self._retry_count)
+        timer = Timer(delay, self._retry_task,
+                      args=(attempt, run_id, infos, rules, signer, result_by_key))
+        timer.daemon = True
+        self._retry_timer = timer
+        timer.start()
+
+    def _retry_task(self, attempt: int, run_id: int, infos: List[Dict[str, Any]],
+                    rules: Dict[str, Dict[str, Any]], signer: Optional[BrowserlessSigner],
+                    result_by_key: Dict[str, Dict[str, str]]) -> None:
+        event = getattr(self, "_stop_event", None)
+        if event is not None and event.is_set():
+            return
+        if run_id != getattr(self, "_run_id", run_id):
+            logger.info("PT站点签到：本轮重试已被更新的任务取代，跳过")
+            return
+        # 重试是后台线程；若刚好有新一轮在跑，最多等 5 分钟再决定是否放弃。
+        if not PTSiteSignIn._run_lock.acquire(timeout=300):
+            logger.warning("PT站点签到：执行线程繁忙，跳过第 %s 次失败重试", attempt)
+            return
+        try:
+            if run_id != getattr(self, "_run_id", run_id) or (event is not None and event.is_set()):
+                logger.info("PT站点签到：任务已停止或被新一轮取代，取消重试")
+                return
+            logger.info("PT站点签到：开始第 %s/%s 次失败重试（%s 个站点）",
+                        attempt, self._retry_count,
+                        sum(1 for info in infos
+                            if result_by_key.get(site_state_key(info), {}).get("status") == "failed"))
+            failed_infos = [info for info in infos
+                            if result_by_key.get(site_state_key(info), {}).get("status") == "failed"]
             if not failed_infos:
-                break
-            logger.info("PT站点签到：%s 个失败站点将在 %s 分钟后重试（第 %s/%s 次）",
-                        len(failed_infos), self._retry_delay_minutes, attempt, self._retry_count)
-            time.sleep(self._retry_delay_minutes * 60)
-            for info, result in zip(failed_infos, self._run_batch(failed_infos, rules, signer)):
+                self._finish(list(result_by_key.values()))
+                return
+            for result in self._run_batch(failed_infos, rules, signer):
                 result_by_key[result.get("state_key") or result.get("site")] = result
-        self._finish(list(result_by_key.values()))
+            still_failed = any(result_by_key.get(site_state_key(info), {}).get("status") == "failed"
+                               for info in infos)
+            if still_failed and attempt < self._retry_count:
+                self._save_results(list(result_by_key.values()))
+                self._schedule_retry(attempt + 1, run_id, infos, rules, signer, result_by_key)
+                return
+            self._finish(list(result_by_key.values()))
+        except Exception:
+            logger.exception("PT站点签到：失败重试出现未预期错误")
+            try:
+                self._finish(list(result_by_key.values()))
+            except Exception:
+                logger.exception("PT站点签到：重试异常后保存结果失败")
+        finally:
+            PTSiteSignIn._run_lock.release()
 
     @staticmethod
     def _now() -> str:
         return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     def _finish(self, results: List[Dict[str, str]]) -> None:
-        ran_at = self._now()
-        results = [dict(item, ran_at=item.get("ran_at") or ran_at)
-                   for item in results if isinstance(item, dict)]
-        self.save_data("latest", results)
-        self.save_data("history_" + datetime.now().strftime("%Y%m%d"), results)
+        results = self._save_results(results)
         signed = sum(item.get("status") == "success" for item in results)
         already = sum(item.get("status") == "already" for item in results)
         failed = len(results) - signed - already
         logger.info("PT站点签到：完成，新签到 %s，今日已签到 %s，失败 %s", signed, already, failed)
         self._notify(results, signed, already, failed)
+
+    def _save_results(self, results: List[Dict[str, str]]) -> List[Dict[str, str]]:
+        """保存最新结果与当天历史（重试期间先落盘，最终结果会覆盖同一天）。"""
+        ran_at = self._now()
+        results = [dict(item, ran_at=item.get("ran_at") or ran_at)
+                   for item in results if isinstance(item, dict)]
+        self.save_data("latest", results)
+        today_key = "history_" + datetime.now().strftime("%Y%m%d")
+        self.save_data(today_key, results)
+        self._prune_history(today_key)
+        return results
+
+    def _prune_history(self, today_key: str) -> None:
+        """history_YYYYMMDD 只保留最近 _history_days 天，避免插件数据无限增长。"""
+        index = self.get_data("history_index") or []
+        keys = [str(key) for key in index if isinstance(key, str)] if isinstance(index, list) else []
+        if today_key not in keys:
+            keys.append(today_key)
+        cutoff = datetime.now() - timedelta(days=self._history_days)
+        keep: List[str] = []
+        stale: List[str] = []
+        for key in keys:
+            try:
+                day = datetime.strptime(key, "history_%Y%m%d")
+            except ValueError:
+                continue
+            (keep if day >= cutoff else stale).append(key)
+        for key in stale:
+            self._delete_data(key)
+        self.save_data("history_index", sorted(set(keep)))
+
+    def _delete_data(self, key: str) -> None:
+        """兼容不同 MoviePilot 版本：优先 del_data，缺失时至少清空数据体。"""
+        remover = getattr(self, "del_data", None)
+        if callable(remover):
+            try:
+                remover(key)
+                return
+            except Exception:
+                logger.warning("PT站点签到：删除历史数据 %s 失败，将改为清空", key)
+        self.save_data(key, None)
 
     def _notify(self, results: List[Dict[str, str]], signed: int, already: int,
                 failed: int) -> None:
@@ -510,8 +637,18 @@ class PTSiteSignIn(_PluginBase):
                           text=f"{head}\n\n{detail}")
 
     def stop_service(self) -> None:
-        """插件停用 / 重载时清理自有的「立即执行」调度器。"""
-        scheduler, self._run_once_scheduler = self._run_once_scheduler, None
+        """插件停用 / 重载时停止重试，并清理自有的「立即执行」调度器。"""
+        event = getattr(self, "_stop_event", None)
+        if event is not None:
+            event.set()
+        timer = getattr(self, "_retry_timer", None)
+        if timer is not None:
+            try:
+                timer.cancel()
+            except Exception:
+                logger.warning("PT站点签到：取消失败重试定时器时出错")
+            self._retry_timer = None
+        scheduler, self._run_once_scheduler = getattr(self, "_run_once_scheduler", None), None
         if scheduler is not None:
             try:
                 scheduler.remove_all_jobs()

@@ -146,14 +146,19 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
     # ---- 纯 HTTP 直连站点（无需浏览器交互）----
     # GET 打开签到页即完成签到，判定文案取自站点实际页面：
     #   签到成功 -> 「签到成功」；已签到 -> 「您今天已经签到过了」
+    # already 只保留上述「已签到」原文案：签到成功页往往同时带「已签到 N 天」「您已连续
+    # 签到 N 天」之类的状态行，一旦把裸「已签到」写进 already，新签到就会被误判成
+    # 「今日已签到」（观众 Audiences 就是这个坑）。
     # 该站偶发 Cloudflare 挑战时，可在自定义规则中改为
     # {"engine": "browserless", "mode": "cloudflare", "path": "/attendance.php"}
+    # 若站点改版后 GET 不再直接完成签到（只返回表单），在自定义规则里加
+    # {"engine": "http", "path": "/attendance.php", "method": "POST"} 手动改成 POST 即可。
     "audiences.me": {
         "engine": "http",
         "path": "/attendance.php",
-        "success": r"(签到成功|簽到成功)",
-        "already": r"(您今天已经签到过了|今天已签到|今日已签到|已签到)",
-        "bonus": r"(签到已得\s*[\d,]+|已签到\s*\+[\d,]+|签到成功[^。<]{0,30}?(获得[^。<，,]{0,40}))",
+        "success": r"(签到成功|簽到成功|打卡成功|成功签到|签到已成功)",
+        "already": r"(您今天已经签到过了|您今天已经签到|今天已经签到过了|今日已经签到|明天再来|明日再来)",
+        "bonus": r"((?:签到已得|簽到已得)\s*[\d,]+(?:\s*(?:个|粒|枚|点|個|顆))?|(?:已签到|已簽到)\s*\+?\s*[\d,]+(?:\s*(?:个|粒|枚|点|個|顆))?|(?:获得|獲得|獲取)\s*[\d,]+(?:\.\d+)?\s*(?:个|粒|枚|点|個|顆)?\s*(?:魔力值|爆米花|积分|做种积分|金币|金幣|奖励|獎勵)|签到成功[^。<]{0,30}?(获得[^。<，,]{0,40}))",
     },
 }
 
@@ -366,12 +371,17 @@ def judge_http(content: str, rule: Mapping[str, Any]) -> SignResult:
         return SignResult("failed", "Cookie 无效或已过期")
     already = str(rule.get("already") or DEFAULT_ALREADY_PATTERN)
     success = str(rule.get("success") or DEFAULT_SUCCESS_PATTERN)
-    if re.search(already, text, re.IGNORECASE):
-        bonus = extract_bonus(text, rule)
-        return SignResult("already", f"今日已签到（{bonus}）" if bonus else "今日已签到")
-    if re.search(success, text, re.IGNORECASE):
+    # 判定文案只在去掉标签 / script/style 的可见正文上匹配，避免命中页面 JS 里的
+    # 签到分支字符串。
+    visible = plain_text(text)
+    # 先判「签到成功」再判「今日已签到」：多数 NexusPHP 的成功页同时含「签到成功」与
+    # 「已签到 N 天」，顺序反了就会把刚完成的签到误报成「今日已签到」。
+    if re.search(success, visible, re.IGNORECASE):
         bonus = extract_bonus(text, rule)
         return SignResult("success", f"签到成功（{bonus}）" if bonus else "签到成功")
+    if re.search(already, visible, re.IGNORECASE):
+        bonus = extract_bonus(text, rule)
+        return SignResult("already", f"今日已签到（{bonus}）" if bonus else "今日已签到")
     # NexusPHP JSON 返回
     try:
         data = json.loads(text.strip())
@@ -379,12 +389,18 @@ def judge_http(content: str, rule: Mapping[str, Any]) -> SignResult:
         data = None
     if isinstance(data, Mapping):
         state = str(data.get("state") or data.get("status") or "").lower()
+        message = str(data.get("sign") or data.get("msg") or data.get("message") or "签到成功")
         if state in {"success", "ok", "true", "1"}:
             bonus = extract_bonus(text, rule)
-            message = str(data.get("sign") or data.get("msg") or "签到成功")
             return SignResult("success", f"{message}（{bonus}）" if bonus else message)
         if state in {"false", "fail", "failed", "error"}:
-            return SignResult("failed", str(data.get("msg") or data.get("error") or "站点返回签到失败"))
+            return SignResult("failed", str(data.get("msg") or data.get("message")
+                                            or data.get("error") or "站点返回签到失败"))
+    # 少数站点把结果只放在 <script> 里的 state 字段；此时才回退到原始文本。
+    # 上面已经先排除了可见的「已签到」，不会把已签到页面脚本里的成功分支误判为新签到。
+    if re.search(success, text, re.IGNORECASE):
+        bonus = extract_bonus(text, rule)
+        return SignResult("success", f"签到成功（{bonus}）" if bonus else "签到成功")
     if re.search(CAPTCHA_PATTERN, text, re.IGNORECASE):
         return SignResult("failed", "页面要求填写验证码", challenge="captcha")
     return SignResult("failed", f"未匹配到签到成功标志；{page_hint(text)}")
