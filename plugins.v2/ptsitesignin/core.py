@@ -21,6 +21,13 @@ DEFAULT_ALREADY_PATTERN = r"(今日已签|已连续签到|已经签到|已签到
 COOKIE_INVALID_PATTERN = r"(用户登录|會員登入|请先登录|请登录|login\.php)"
 # Cloudflare 挑战页特征（出现即说明请求未穿透盾，需改用 Browserless）
 CLOUDFLARE_PATTERN = r"(just a moment|cf-chl-widget|cf_chl_opt|challenge-platform)"
+# Cloudflare「Just a moment...」交互挑战的专属特征：这类挑战会在真实浏览器里自动执行 JS
+# 并放行，只要留够等待时间即可，无需人工点击。注意不能用 challenge-platform /
+# cf-chl-widget 判断——正常的 Turnstile 组件页也会带这些标记；挑战放行后页面会换成新
+# 文档，_cf_chl_opt / chl_page 随之消失。
+CF_INTERSTITIAL_PATTERN = r"(just a moment|_cf_chl_opt|chl_page)"
+# 等待 Cloudflare 交互挑战自动放行的默认秒数，可用站点规则字段 cloudflare_wait 覆盖。
+DEFAULT_CLOUDFLARE_WAIT = 10
 # 图片验证码 / 人机校验特征（HTTP 直连拿不到结果，需改用 Browserless）
 CAPTCHA_PATTERN = (
     r"(captcha\.php|<img[^>]+captcha"
@@ -149,8 +156,10 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
     # already 只保留上述「已签到」原文案：签到成功页往往同时带「已签到 N 天」「您已连续
     # 签到 N 天」之类的状态行，一旦把裸「已签到」写进 already，新签到就会被误判成
     # 「今日已签到」（观众 Audiences 就是这个坑）。
-    # 该站偶发 Cloudflare 挑战时，可在自定义规则中改为
-    # {"engine": "browserless", "mode": "cloudflare", "path": "/attendance.php"}
+    # 该站常驻 Cloudflare「Just a moment...」交互挑战：HTTP 直连会被盾挡下，插件会自动
+    # 回退到 Browserless 的 cloudflare 模式，在页面上等待挑战自动放行（默认 10 秒）。等待
+    # 不够可在自定义规则里调大，例如
+    # {"engine": "http", "path": "/attendance.php", "cloudflare_wait": 20}
     # 若站点改版后 GET 不再直接完成签到（只返回表单），在自定义规则里加
     # {"engine": "http", "path": "/attendance.php", "method": "POST"} 手动改成 POST 即可。
     "audiences.me": {
@@ -286,6 +295,10 @@ def fallback_rule(rule: Mapping[str, Any], challenge: str) -> Dict[str, Any]:
     }
     if rule.get("route_fragment"):
         fallback["route_fragment"] = rule["route_fragment"]
+    # 让用户在 HTTP 规则里写的等待参数（如 cloudflare_wait）对自动回退同样生效
+    for name in ("cloudflare_wait", "wait", "preflight_wait"):
+        if rule.get(name) is not None:
+            fallback[name] = rule[name]
     return validate_rule(fallback)
 
 
@@ -560,6 +573,35 @@ def page_text(html: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", visible)).strip()
 
 
+def cloudflare_pending(html: str) -> bool:
+    """页面是否仍停留在 Cloudflare 交互挑战页（自动放行后即不再命中）。"""
+    return bool(re.search(CF_INTERSTITIAL_PATTERN, html or "", re.IGNORECASE))
+
+
+def cloudflare_wait_ms(rule: Mapping[str, Any]) -> int:
+    """Cloudflare 模式下停留在页面等待挑战自动放行的毫秒数（3~45 秒，可规则覆盖）。"""
+    try:
+        seconds = float(rule.get("cloudflare_wait") or DEFAULT_CLOUDFLARE_WAIT)
+    except (TypeError, ValueError):
+        seconds = DEFAULT_CLOUDFLARE_WAIT
+    return int(max(3.0, min(seconds, 45.0)) * 1000)
+
+
+def navigation_ok(mode: str, status: Any, html: str) -> bool:
+    """这次导航是否拿到了可用页面。
+
+    Cloudflare 交互挑战以 403 / 503 返回挑战页，等它自动放行后才加载真实页面，而 goto
+    记录的仍是挑战页的状态码，因此 cloudflare 模式下不能只看状态码。
+    """
+    try:
+        code = int(status)
+    except (TypeError, ValueError):
+        return False
+    if 200 <= code < 400:
+        return True
+    return str(mode) == "cloudflare" and code in {403, 503} and not cloudflare_pending(html)
+
+
 def _bonus_message(prefix: str, text: str, rule: Mapping[str, Any]) -> str:
     """成功 / 已签消息只带奖励数字，不再粘贴整页文字。"""
     bonus = extract_bonus(text, rule)
@@ -630,25 +672,34 @@ class BrowserlessSigner:
         if not cookies:
             return SignResult("failed", "站点 Cookie 格式无效")
         user_agent = str(site.get("ua") or "").strip()
+        mode = str(rule.get("mode") or "open_page")
+        # Cloudflare 交互挑战需要在真实浏览器里等它自己跑完 JS 才放行，这里给出等待预算
+        page_wait = cloudflare_wait_ms(rule) if mode == "cloudflare" else 2000
         # 先读页面：可能已签到或按钮已消失，两种情况都应当直接判定
         preflight_target = target_url(base_url, str(rule.get("preflight_path") or rule["path"]))
         preflight_variables: Dict[str, Any] = {"cookies": cookies, "url": preflight_target}
         if user_agent:
             preflight_variables["userAgent"] = user_agent
-        preflight_wait = max(1000, min(int(rule.get("preflight_wait") or 2000), 15000))
+        preflight_wait = max(1000, min(int(rule.get("preflight_wait") or page_wait), 15000))
         preflight = self._request(preflight_variables, "CheckInPreflight",
                                   build_preflight_query(user_agent, preflight_wait))
         if isinstance(preflight, SignResult):
             return preflight
-        if preflight.get("goto", {}).get("status") not in range(200, 400):
-            return SignResult("failed", "打开签到页失败")
-        initial = classify(str((preflight.get("before") or {}).get("html") or ""), rule)
-        if initial.status in {"already", "success"}:
-            return initial
+        preflight_html = str((preflight.get("before") or {}).get("html") or "")
+        if cloudflare_pending(preflight_html):
+            # 挑战还没放行：不要把挑战页的 403 当成「打开失败」，交给下面等待更久的主流程
+            pass
+        else:
+            if not navigation_ok(mode, preflight.get("goto", {}).get("status"), preflight_html):
+                return SignResult("failed", "打开签到页失败")
+            initial = classify(preflight_html, rule)
+            if initial.status in {"already", "success"}:
+                return initial
 
         submit_method = str(rule.get("submit_method") or "click")
         variables: Dict[str, Any] = {"cookies": cookies, "url": target,
-                                     "beforeWait": 2000, "wait": int(rule.get("wait") or 3500)}
+                                     "beforeWait": page_wait,
+                                     "wait": int(rule.get("wait") or 3500)}
         if submit_method == "click":
             variables["selector"] = rule["submit_selector"]
         else:
@@ -674,7 +725,13 @@ class BrowserlessSigner:
         data = self._request(variables, "CheckIn", build_query(rule, user_agent))
         if isinstance(data, SignResult):
             return data
-        if data.get("goto", {}).get("status") not in range(200, 400):
+        after_html = str((data.get("after") or {}).get("html") or "")
+        # 已经等满预算却仍卡在挑战页：给出可操作的提示，而不是笼统的「打开签到页失败」
+        if mode == "cloudflare" and cloudflare_pending(after_html):
+            return SignResult("failed",
+                              f"Cloudflare 挑战在 {page_wait // 1000} 秒内未自动放行；"
+                              "可在该站规则里调大 cloudflare_wait 后重试")
+        if not navigation_ok(mode, data.get("goto", {}).get("status"), after_html):
             return SignResult("failed", "打开签到页失败")
         solve = data.get("solve") or {}
         if rule["mode"] in {"image", "trigger_image"} and not solve.get("found"):
@@ -694,7 +751,7 @@ class BrowserlessSigner:
             return SignResult("failed", "首页未显示签到成功标记，未确认签到成功")
         if ajax_result:
             return ajax_result
-        result = classify(str((data.get("after") or {}).get("html") or ""), rule)
+        result = classify(after_html, rule)
         if result.status == "failed":
             before = classify(str((data.get("before") or {}).get("html") or ""), rule)
             if before.status == "already":

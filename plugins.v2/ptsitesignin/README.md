@@ -43,7 +43,7 @@ ptsitesignin/
 
 | 站点 | path | 说明 |
 |---|---|---|
-| Audiences (`audiences.me`) | `/attendance.php` | GET 即完成签到；成功判定「签到成功」，已签到判定「您今天已经签到过了」；成功页同时含「您已连续签到 N 天」时优先判成功。被 Cloudflare 拦截时会自动回退到浏览器引擎 |
+| Audiences (`audiences.me`) | `/attendance.php` | GET 即完成签到；成功判定「签到成功」，已签到判定「您今天已经签到过了」；成功页同时含「您已连续签到 N 天」时优先判成功。该站常驻 Cloudflare「Just a moment...」交互挑战，会自动回退到浏览器引擎并在页面上等待挑战自动放行（默认 10 秒）|
 
 ## 并发与失败重试
 
@@ -63,6 +63,18 @@ ptsitesignin/
 - 每个站点每轮只回退一次，且仅在 HTTP 判定为失败时触发；需要已填写 Browserless Token，未填写时结果会明确提示。
 - 可在插件设置中用「遇验证码 / CF 自动用浏览器」开关整体关闭。
 - 只有你在**自定义规则**里显式写了 `"engine": "http"` 的站点不回退（尊重手工配置）；内置预设的 HTTP 站点（如 Audiences）仍会自动回退。
+
+### Cloudflare「Just a moment...」交互挑战
+
+观众（Audiences）这类站点用的是 Cloudflare 的 **JS 交互挑战**（页面标题 `Just a moment...`，正文带 `_cf_chl_opt` / `chl_page`）。它**不需要人工点击**：真实浏览器只要在页面上等几秒，挑战会自己跑完 JS 并跳到真实页面。插件为此做了三件事：
+
+- `mode=cloudflare` 时会在页面停留等待挑战自动放行，默认 **10 秒**；可用站点规则字段 `cloudflare_wait`（秒，范围 3–45）调整。
+- Cloudflare 挑战页是以 **403 / 503** 返回的，挑战放行后 `goto` 记录的仍是挑战页状态码，所以不能只看状态码；插件改为「状态码 + 页面是否仍带挑战特征」一起判断。
+- 等待超时且页面仍是挑战页时，结果会明确提示「Cloudflare 挑战在 N 秒内未自动放行」，而不是含糊的「未匹配到签到成功标志」。
+
+> 判断「是否还卡在挑战页」只认 `just a moment` / `_cf_chl_opt` / `chl_page` 这些交互挑战**专属**标记；正常页面里的 Turnstile 组件（带 `challenge-platform` / `cf-turnstile`）不会被误判。
+
+> 云节点 / 机房 IP 更容易被反复挑战。同一站点长期过不去时，优先换节点或住宅代理，而不是一味调大 `cloudflare_wait`。
 
 > 图片验证码场景走 `open_page`：真实浏览器打开签到页后，部分站点不再要求验证码或可直接完成签到。
 > 若该站确实需要填图片验证码，请在自定义规则中配置 `mode=image` 与 `captcha_selector` / `captcha_input_selector`。
@@ -126,9 +138,9 @@ ptsitesignin/
 | HTTP 超时 | 秒 | 30 |
 | 失败重试次数 / 等待分钟 | 额外重试次数与间隔；重试由后台 Timer 延迟执行，不占用执行线程 | 1 次 / 10 分钟 |
 | HTTP 引擎使用代理 | 复用 MoviePilot 全局代理 | 关 |
-| 遇验证码 / CF 自动用浏览器 | 未声明引擎的站点 HTTP 撞上 CF / 验证码时自动换浏览器重试 | 开 |
+| 遇验证码 / CF 自动用浏览器 | 内置预设或未声明引擎的站点 HTTP 撞上 CF / 验证码时自动换浏览器重试（手工写了 engine 的除外） | 开 |
 | Browserless 地址 / Token / 超时 | Browserless 连接参数 | 官方地址 / 空 / 100 秒 |
-| 自定义站点规则 | JSON | 空 |
+| 自定义站点规则 | JSON；Cloudflare 交互挑战可用 `cloudflare_wait`（秒）覆盖默认 10 秒等待 | 空 |
 
 ## 自定义规则示例
 
@@ -141,6 +153,7 @@ HTTP 站点：
     "success": "(签到成功|state[\"']?\\s*:\\s*[\"']?success)",
     "already": "(已签到|今日已签)"
   },
+  "audiences.me": { "path": "/attendance.php", "cloudflare_wait": 20 },
   "5": { "path": "/signin.php", "method": "POST" }
 }
 ```

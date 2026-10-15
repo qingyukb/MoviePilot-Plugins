@@ -51,7 +51,7 @@ class PTSiteSignIn(_PluginBase):
     plugin_name = "PT站点签到"
     plugin_desc = "双引擎 PT 签到：HTTP 直连签到接口，或经 Browserless 完成验证码 / Cloudflare / Turnstile 挑战。"
     plugin_icon = "signin.png"
-    plugin_version = "1.0.3"
+    plugin_version = "1.0.4"
     plugin_author = "qingyu"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "ptsignin_"
@@ -207,7 +207,7 @@ class PTSiteSignIn(_PluginBase):
                 {"component": "VCol", "props": {"cols": 12, "md": 3},
                  "content": [{"component": "VSwitch", "props": {"model": "fallback_browserless",
                              "label": "遇验证码 / CF 自动用浏览器",
-                             "hint": "仅对未声明引擎的站点生效，需填写 Browserless Token", "persistent-hint": True}}]},
+                             "hint": "内置预设或未声明引擎的站点遇盾时生效；手工在规则里写了 engine 则不生效，需填写 Browserless Token", "persistent-hint": True}}]},
                 {"component": "VCol", "props": {"cols": 12, "md": 3},
                  "content": [{"component": "VSwitch", "props": {"model": "run_once", "label": "保存后立即执行一次"}}]},
             ]},
@@ -245,7 +245,7 @@ class PTSiteSignIn(_PluginBase):
             ]},
             {"component": "VDivider", "props": {"class": "my-4"}},
             {"component": "VAlert", "props": {"type": "info", "variant": "tonal", "density": "compact"},
-             "content": [{"component": "span", "text": "引擎按站点规则自动判定：需要图片验证码、Cloudflare / Turnstile 挑战、弹窗签到或 Altcha 的站点自动走 Browserless（内置预设已声明，也可在下方自定义规则中用 engine 指定），其余站点一律走 HTTP 直连、不消耗额度；未声明引擎的站点若 HTTP 直连撞上 Cloudflare 或验证码，会自动改用浏览器引擎重试一次（可在上方关闭）。首次使用 Browserless 请先 "},
+             "content": [{"component": "span", "text": "引擎按站点规则自动判定：需要图片验证码、Cloudflare / Turnstile 挑战、弹窗签到或 Altcha 的站点自动走 Browserless（内置预设已声明，也可在下方自定义规则中用 engine 指定），其余站点一律走 HTTP 直连、不消耗额度；HTTP 直连撞上 Cloudflare 或验证码时会自动改用浏览器引擎重试一次（手工在自定义规则里写了 engine 的站点除外，可在上方关闭）；内置的 Cloudflare「Just a moment...」交互挑战会在浏览器里等待自动放行，默认 10 秒。首次使用 Browserless 请先 "},
                          {"component": "a", "props": {"href": "https://www.browserless.io/signup/email?plan=free",
                                                       "target": "_blank", "rel": "noopener noreferrer"},
                           "text": "注册 Browserless 账号"},
@@ -275,7 +275,8 @@ class PTSiteSignIn(_PluginBase):
                  "content": [{"component": "VTextarea", "props": {"model": "site_rules",
                              "label": "自定义站点规则 JSON（可留空）", "rows": 10,
                              "hint": '键为域名或站点 ID。HTTP：{"path":"/attendance.php","success":"正则","already":"正则"}；'
-                                     'Browserless：{"engine":"browserless","mode":"cloudflare|image|trigger_image|altcha|open_page", ...}',
+                                     'Browserless：{"engine":"browserless","mode":"cloudflare|image|trigger_image|altcha|open_page", ...}；'
+                                     'Cloudflare「Just a moment...」交互挑战默认在页面等待 10 秒自动放行，可用 {"cloudflare_wait": 20} 调大',
                              "persistent-hint": True}}]},
             ]},
         ]}], self._config()
