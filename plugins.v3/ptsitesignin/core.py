@@ -1,0 +1,674 @@
+"""PT 签到核心逻辑：HTTP 引擎 + Browserless(BrowserQL) 引擎。
+
+本模块不含任何 MoviePilot 依赖，方便单独测试与复用。
+Browserless 相关实现参考 tmzg0000/moviepilot-plugins 的 captchasignin 插件
+（AGPL/MIT 见原仓库），在其基础上精简并与 HTTP 引擎合并为双引擎结构。
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import urllib.error
+import urllib.parse
+import urllib.request
+from dataclasses import dataclass
+from typing import Any, Dict, List, Mapping, Optional
+
+DEFAULT_HTTP_PATH = "/attendance.php"
+DEFAULT_SUCCESS_PATTERN = r"(state['\"]?\s*[:=]\s*['\"]?success|签到成功|簽到成功|签到 成功)"
+DEFAULT_ALREADY_PATTERN = r"(今日已签|已连续签到|已经签到|已签到|已簽到|already)"
+COOKIE_INVALID_PATTERN = r"(用户登录|會員登入|请先登录|请登录|login\.php)"
+# Cloudflare 挑战页特征（出现即说明请求未穿透盾，需改用 Browserless）
+CLOUDFLARE_PATTERN = r"(just a moment|cf-chl-widget|cf_chl_opt|challenge-platform)"
+# 签到奖励提取：按「获得 22 粒爆米花」「魔力值 +30」「签到已得 22」等常见文案取第一个命中（含繁体）
+BONUS_PATTERNS = (
+    r"((?:获得|獲得|獲取)\s*[\d,]+(?:\.\d+)?\s*(?:个|粒|枚|点|個|顆)?\s*(?:魔力值|爆米花|积分|做种积分|金币|奖励))",
+    r"([\d,]+(?:\.\d+)?\s*(?:个|粒|枚|点|個|顆)\s*(?:魔力值|爆米花|积分|做种积分|金币))",
+    r"((?:魔力值|爆米花|积分|做种积分|金币)\s*[:：]?\s*\+?\s*[\d,]+(?:\.\d+)?)",
+    r"\+([\d,]+(?:\.\d+)?)\s*(?:魔力值|爆米花|积分|做种积分|金币)",
+    r"(?:签到已得|簽到已得)\s*([\d,]+)",
+)
+DEFAULT_USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
+
+SUCCESS_WORDS = ("签到成功", "簽到成功", "成功签到", "打卡成功")
+ALREADY_WORDS = ("已签到", "已经签到", "今日已签", "今天已签", "已打卡", "already")
+LOGIN_WORDS = ("用户登录", "會員登入", "login")
+
+DEFAULT_BROWSERLESS_URL = "https://production-sfo.browserless.io"
+
+# ---------------------------------------------------------------- 内置站点规则
+# mode 仅对 Browserless 引擎有效：
+#   http          直接 HTTP 请求签到接口（默认引擎，轻量、不消耗 Browserless 额度）
+#   open_page     打开页面并点击签到按钮（无需验证码）
+#   cloudflare    打开页面并自动通过 Cloudflare / Turnstile 挑战
+#   image         图片验证码签到
+#   trigger_image 先点开弹窗再处理图片验证码（HDSky 类）
+#   altcha        需先完成 Altcha 人机验证再点击提交（YemaPT 类）
+DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
+    # ---- 以下为需要浏览器交互的站点预设（来自 captchasignin 参考实现）----
+    "open.cd": {
+        "engine": "browserless",
+        "mode": "image",
+        "path": "/plugin_sign-in.php",
+        "preflight_path": "/",
+        "verify_success_path": "/",
+        "captcha_selector": "#frmSignin img",
+        "captcha_input_selector": "#imagestring",
+        "submit_selector": "#ok",
+        "submit_method": "ajax",
+        "success_json": {"field": "/state", "values": ["success"]},
+        "already_keywords": ["查看簽到記錄"],
+        "strict_status_keywords": True,
+    },
+    "p.t-baozi.cc": {
+        "engine": "browserless",
+        "mode": "image",
+        "path": "/attendance.php",
+        "captcha_selector": "form:has(input[name='imagestring']) img",
+        "captcha_input_selector": "input[name='imagestring']",
+        "submit_selector": "input[type='submit']",
+        "already_keywords": ["签到成功"],
+    },
+    "pt.muxuege.org": {
+        "engine": "browserless",
+        "mode": "open_page",
+        "path": "/attendance.php",
+        "submit_selector": "input[type='submit'], button[type='submit']",
+        "submit_text": "立即签到",
+    },
+    "oshen.win": {
+        "engine": "browserless",
+        "mode": "image",
+        "path": "/attendance.php",
+        "captcha_selector": "form:has(input[name='imagestring']) img[alt='CAPTCHA']",
+        "captcha_input_selector": "form input[name='imagestring']",
+        "submit_selector": "form input[type='submit'][value='立即签到']",
+        "submit_method": "ajax",
+    },
+    "pt.luckpt.de": {
+        "engine": "browserless",
+        "mode": "open_page",
+        "path": "/medal_collection.php",
+        "submit_selector": ".claim-bar button.claim-reward[data-type='bonus_daily']",
+        "submit_method": "confirm_click",
+        "submit_text": "领取 幸运星 ×1000",
+        "success_keywords": ["奖励领取成功"],
+        "already_keywords": ["今日已领取", "已经领取", "已领取"],
+    },
+    "yemapt.org": {
+        "engine": "browserless",
+        "mode": "altcha",
+        "path": "/",
+        "route_fragment": "#/user/growth?tab=checkIn",
+        "altcha_checkbox_selector": "altcha-widget input[type='checkbox']",
+        "altcha_payload_selector": "altcha-widget .altcha[data-state='verified'] input[name='altchaPayload']",
+        "submit_selector": "button.ant-btn-primary.ant-btn-lg.ant-btn-block:not([disabled])",
+        "submit_method": "altcha_click",
+        "submit_text": "立即签到",
+        "already_keywords": ["已签到，明日继续", "你的今日状态：已签到"],
+        "preflight_wait": 8000,
+        "wait": 5000,
+    },
+    "hdsky.me": {
+        "engine": "browserless",
+        "mode": "trigger_image",
+        "path": "/index.php",
+        "trigger_selector": "#showup",
+        "captcha_selector": "#showupimg",
+        "captcha_input_selector": "#imagestring",
+        "submit_selector": "#showupbutton",
+        "submit_method": "dom_click",
+        "submit_text": "Let's Go",
+        "success_keywords": ["已签到"],
+    },
+    "dstudio.me": {"engine": "browserless", "mode": "cloudflare", "path": "/attendance.php"},
+    "mua.xloli.cc": {
+        "engine": "browserless",
+        "mode": "cloudflare",
+        "path": "/attendance.php",
+        "submit_selector": "form[action*='attendance.php'] input[type='submit']",
+    },
+    "share.ilolicon.com": {
+        "engine": "browserless",
+        "mode": "cloudflare",
+        "path": "/attendance.php",
+        "submit_selector": "form[action*='attendance.php'] input[type='submit']",
+    },
+    # ---- 纯 HTTP 直连站点（无需浏览器交互）----
+    # GET 打开签到页即完成签到，判定文案取自站点实际页面：
+    #   签到成功 -> 「签到成功」；已签到 -> 「您今天已经签到过了」
+    # 该站偶发 Cloudflare 挑战时，可在自定义规则中改为
+    # {"engine": "browserless", "mode": "cloudflare", "path": "/attendance.php"}
+    "audiences.me": {
+        "engine": "http",
+        "path": "/attendance.php",
+        "success": r"(签到成功|簽到成功)",
+        "already": r"(您今天已经签到过了|今天已签到|今日已签到|已签到)",
+        "bonus": r"(签到已得\s*[\d,]+|已签到\s*\+[\d,]+|签到成功[^。<]{0,30}?(获得[^。<，,]{0,40}))",
+    },
+}
+
+
+@dataclass(frozen=True)
+class SignResult:
+    status: str   # success / already / failed
+    message: str
+
+
+# ------------------------------------------------------------------ 公共工具
+
+def normalize_host(url: str) -> str:
+    return (urllib.parse.urlparse(url).hostname or "").lower().removeprefix("www.").rstrip(".")
+
+
+def target_url(base_url: str, path: str, route_fragment: Optional[str] = None) -> str:
+    target = urllib.parse.urljoin(base_url.rstrip("/") + "/", str(path).lstrip("/"))
+    return target.split("#", 1)[0] + (route_fragment or "")
+
+
+def site_state_key(site: Mapping[str, Any]) -> str:
+    site_id = str(site.get("id") or "").strip()
+    if site_id:
+        return "id:" + site_id
+    host = urllib.parse.urlparse(str(site.get("url") or "")).hostname
+    return "host:" + host.lower() if host else ""
+
+
+def parse_rules(raw: Any) -> Dict[str, Dict[str, Any]]:
+    """解析自定义规则；键为域名或站点 ID。"""
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"站点规则必须是有效 JSON：{error}") from error
+    if not isinstance(value, Mapping):
+        raise ValueError("站点规则必须是以域名或站点 ID 为键的 JSON 对象")
+    result: Dict[str, Dict[str, Any]] = {}
+    for key, rule in value.items():
+        if isinstance(key, str) and isinstance(rule, Mapping):
+            result[key.lower().strip()] = dict(rule)
+    return result
+
+
+def resolve_rule(site: Mapping[str, Any], custom_rules: Mapping[str, Mapping[str, Any]],
+                 default_engine: str = "http") -> Dict[str, Any]:
+    host = normalize_host(str(site.get("url") or ""))
+    custom = (custom_rules.get(str(site.get("id"))) or custom_rules.get(host)
+              or custom_rules.get("www." + host) or {})
+    preset = DEFAULT_RULES.get(host)
+    if preset is None and host.endswith(".open.cd"):
+        preset = DEFAULT_RULES["open.cd"]
+    rule = dict(preset or {})
+    rule.update(custom)
+    rule["engine"] = str(rule.get("engine") or default_engine or "http").lower()
+    if rule["engine"] not in {"http", "browserless"}:
+        raise ValueError("签到引擎只能是 http 或 browserless")
+    if rule["engine"] == "http":
+        rule.setdefault("path", DEFAULT_HTTP_PATH)
+        rule.setdefault("success", DEFAULT_SUCCESS_PATTERN)
+        rule.setdefault("already", DEFAULT_ALREADY_PATTERN)
+    else:
+        rule.setdefault("mode", "open_page")
+        rule.setdefault("path", "/attendance.php")
+        rule.setdefault("submit_selector", "input[type='submit']")
+        rule.setdefault("already_keywords", [])
+    return validate_rule(rule)
+
+
+def validate_rule(rule: Mapping[str, Any]) -> Dict[str, Any]:
+    result = dict(rule)
+    if result["engine"] == "http":
+        path = str(result.get("path") or "")
+        if not path.startswith("/") or path.startswith("//"):
+            raise ValueError("签到路径必须是以 / 开头的站内路径")
+        return result
+    mode = result.get("mode")
+    if mode not in {"open_page", "cloudflare", "image", "trigger_image", "altcha"}:
+        raise ValueError("Browserless 签到方式必须为 open_page、cloudflare、image、trigger_image 或 altcha")
+    path = str(result.get("path") or "")
+    if not path.startswith("/") or path.startswith("//") or "\\" in path or "#" in path:
+        raise ValueError("签到路径必须是以 / 开头的站内路径")
+    route_fragment = str(result.get("route_fragment") or "")
+    if route_fragment and (not route_fragment.startswith("#/") or "\\" in route_fragment):
+        raise ValueError("路由片段必须以 #/ 开头")
+    if mode in {"image", "trigger_image"}:
+        for name in ("captcha_selector", "captcha_input_selector", "submit_selector"):
+            if not str(result.get(name) or "").strip():
+                raise ValueError("图片验证码规则缺少 " + name)
+    if mode == "trigger_image" and not str(result.get("trigger_selector") or "").strip():
+        raise ValueError("弹窗图片验证码规则缺少 trigger_selector")
+    if mode == "altcha":
+        for name in ("altcha_checkbox_selector", "altcha_payload_selector", "submit_selector"):
+            if not str(result.get(name) or "").strip():
+                raise ValueError("Altcha 规则缺少 " + name)
+    # cloudflare / turnstile：仅允许自动检测，不允许手工指定 solve 类型
+    return result
+
+
+# =============================================================== HTTP 引擎
+
+def http_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: int = 30,
+              proxies: Optional[Dict[str, str]] = None) -> SignResult:
+    """直接 HTTP 请求签到接口（NexusPHP attendance.php 等）。"""
+    import requests
+
+    base_url = str(site.get("url") or "").rstrip("/")
+    cookie = str(site.get("cookie") or "").strip()
+    if not base_url or not cookie:
+        return SignResult("failed", "站点地址或 Cookie 为空")
+    url = target_url(base_url, str(rule.get("path") or DEFAULT_HTTP_PATH))
+    headers = {
+        "User-Agent": str(site.get("ua") or "").strip() or DEFAULT_USER_AGENT,
+        "Referer": f"{base_url}/index.php",
+        "Cookie": cookie,
+        "Accept": "application/json, text/javascript, text/html, */*",
+        "X-Requested-With": "XMLHttpRequest",
+    }
+    try:
+        method = str(rule.get("method") or "GET").upper()
+        if method == "POST":
+            response = requests.post(url, headers=headers, timeout=timeout,
+                                     allow_redirects=True, proxies=proxies)
+        else:
+            response = requests.get(url, headers=headers, timeout=timeout,
+                                    allow_redirects=True, proxies=proxies)
+    except Exception as error:
+        return SignResult("failed", f"请求异常：{error}")
+    content = response.text or ""
+    if response.status_code >= 400:
+        return SignResult("failed", f"请求失败（HTTP {response.status_code}）")
+    return judge_http(content, rule)
+
+
+def plain_text(content: str) -> str:
+    """去掉注释、script/style 与 HTML 标签并压缩空白，便于按文案匹配。"""
+    text = re.sub(r"<!--.*?-->", " ", content, flags=re.DOTALL)
+    text = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<[^>]+>", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def extract_bonus(content: str, rule: Mapping[str, Any]) -> str:
+    """提取签到奖励描述（如「获得 22 粒爆米花」）。规则里的 bonus 字段可覆盖默认模板。"""
+    custom = str(rule.get("bonus") or "").strip()
+    patterns = (custom,) if custom else BONUS_PATTERNS
+    for candidate in (content, plain_text(content)):
+        for pattern in patterns:
+            try:
+                found = re.search(pattern, candidate, re.IGNORECASE)
+            except re.error:
+                continue
+            if not found:
+                continue
+            values = [group for group in found.groups() if group]
+            text = values[-1] if values else found.group(0)
+            return re.sub(r"\s+", " ", text).strip()
+    return ""
+
+
+def page_hint(content: str) -> str:
+    """截取响应摘要，便于判断站点到底返回了什么页面。"""
+    title = re.search(r"<title[^>]*>(.*?)</title>", content, re.IGNORECASE | re.DOTALL)
+    body = plain_text(content)
+    parts = []
+    if title:
+        parts.append("标题「" + re.sub(r"\s+", " ", title.group(1)).strip()[:60] + "」")
+    if body:
+        parts.append("正文「" + body[:120] + "」")
+    return "；".join(parts) or "响应为空"
+
+
+def judge_http(content: str, rule: Mapping[str, Any]) -> SignResult:
+    # 完整页面匹配：Audiences 等站的判定文案位于页面较后位置，按 20000 字符截断会漏掉
+    text = content[:200000]
+    if re.search(CLOUDFLARE_PATTERN, text, re.IGNORECASE):
+        return SignResult("failed", "站点返回 Cloudflare 验证页，请在自定义站点规则中用 "
+                                    '{"engine":"browserless","mode":"cloudflare","path":"/attendance.php"} 覆盖')
+    if re.search(COOKIE_INVALID_PATTERN, text, re.IGNORECASE) and "logout" not in text.lower():
+        return SignResult("failed", "Cookie 无效或已过期")
+    already = str(rule.get("already") or DEFAULT_ALREADY_PATTERN)
+    success = str(rule.get("success") or DEFAULT_SUCCESS_PATTERN)
+    if re.search(already, text, re.IGNORECASE):
+        bonus = extract_bonus(text, rule)
+        return SignResult("already", f"今日已签到（{bonus}）" if bonus else "今日已签到")
+    if re.search(success, text, re.IGNORECASE):
+        bonus = extract_bonus(text, rule)
+        return SignResult("success", f"签到成功（{bonus}）" if bonus else "签到成功")
+    # NexusPHP JSON 返回
+    try:
+        data = json.loads(text.strip())
+    except (ValueError, TypeError):
+        data = None
+    if isinstance(data, Mapping):
+        state = str(data.get("state") or data.get("status") or "").lower()
+        if state in {"success", "ok", "true", "1"}:
+            bonus = extract_bonus(text, rule)
+            message = str(data.get("sign") or data.get("msg") or "签到成功")
+            return SignResult("success", f"{message}（{bonus}）" if bonus else message)
+        if state in {"false", "fail", "failed", "error"}:
+            return SignResult("failed", str(data.get("msg") or data.get("error") or "站点返回签到失败"))
+    return SignResult("failed", f"未匹配到签到成功标志；{page_hint(text)}")
+
+
+# =========================================================== Browserless 引擎
+
+def cookie_objects(cookie_header: str, target: str) -> List[Dict[str, Any]]:
+    parsed = urllib.parse.urlparse(target)
+    domain = parsed.hostname
+    if not domain:
+        return []
+    cookies: List[Dict[str, Any]] = []
+    for item in cookie_header.split(";"):
+        if "=" not in item:
+            continue
+        name, value = item.strip().split("=", 1)
+        if name:
+            cookies.append({"name": name.strip(), "value": value.strip(), "domain": domain,
+                            "path": "/", "secure": parsed.scheme == "https", "url": target})
+    return cookies
+
+
+def bql_endpoint(address: str, token: str) -> str:
+    address, token = address.strip(), token.strip()
+    if not address or not token:
+        raise ValueError("Browserless 地址和 Token 都不能为空")
+    parsed = urllib.parse.urlparse(address)
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError("Browserless 地址必须以 http:// 或 https:// 开头")
+    path = parsed.path.rstrip("/")
+    if not path.endswith("/bql"):
+        path = (path + "/bql") if path.endswith("/stealth") else (path + "/stealth/bql")
+    query = dict(urllib.parse.parse_qsl(parsed.query, keep_blank_values=True))
+    query["token"] = token
+    return urllib.parse.urlunparse((parsed.scheme, parsed.netloc, path, "",
+                                    urllib.parse.urlencode(query), ""))
+
+
+def _submit_script(selector: str, method: str, captcha_input: Optional[str] = None,
+                   submit_text: Optional[str] = None) -> str:
+    selector_json = json.dumps(selector)
+    input_json = json.dumps(captcha_input or "")
+    text_json = json.dumps(submit_text or "")
+    target_script = """(() => { const wanted = %s.trim();
+      if (wanted) { const matches = [...document.querySelectorAll('input, button, a')];
+        const found = matches.find((node) => ((node.value || node.textContent || '').trim().includes(wanted)));
+        if (found) return found; }
+      return document.querySelector(%s);
+    })()""" % (text_json, selector_json)
+    if method in {"click", "dom_click", "confirm_click"}:
+        confirm = "" if method != "confirm_click" else """
+          await new Promise((resolve) => setTimeout(resolve, 150));
+          const confirm = [...document.querySelectorAll('.layui-layer-btn0, .layui-layer-btn a')]
+            .find((node) => node.offsetParent !== null && /确定|确认/.test((node.textContent || '').trim()));
+          if (!confirm) return false; confirm.click();"""
+        return """(async () => { const input = %s ? document.querySelector(%s) : null;
+          if (input && !input.value.trim()) return false;
+          const button = %s; if (!button) return false; button.click(); %s return true;
+        })()""" % (input_json, input_json, target_script, confirm)
+    return """(async () => {
+      const input = %s ? document.querySelector(%s) : null; if (input && !input.value.trim()) return false;
+      const target = %s; const form = target && (target.form || target);
+      if (!(form instanceof HTMLFormElement)) throw new Error('未找到签到表单');
+      const action = new URL(form.action, location.href);
+      if (action.origin !== location.origin) throw new Error('只允许同源提交');
+      const data = new FormData(form); if (target.name && !target.disabled) data.append(target.name, target.value);
+      const response = await fetch(action.href, {method: form.method || 'POST', credentials:'same-origin', body:data});
+      window.__ptsignin_response = {status:response.status, text:await response.text()}; return response.status;
+    })()""" % (input_json, input_json, target_script)
+
+
+def _altcha_submit_script(rule: Mapping[str, Any]) -> str:
+    payload = json.dumps(str(rule["altcha_payload_selector"]))
+    submit = _submit_script(str(rule["submit_selector"]), "dom_click", submit_text=rule.get("submit_text"))
+    return """(async () => {
+      const ready = () => { const input = document.querySelector(%s); return input && input.value.trim() ? input : null; };
+      const deadline = Date.now() + 30000;
+      while (!ready() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 250));
+      if (!ready()) return false;
+      return await %s;
+    })()""" % (payload, submit)
+
+
+def _trigger_script(selector: str) -> str:
+    return """(() => { const trigger = document.querySelector(%s);
+      if (!trigger) return false; trigger.click(); return true;
+    })()""" % json.dumps(selector)
+
+
+def build_query(rule: Mapping[str, Any], user_agent: Optional[str] = None) -> str:
+    """构造一次签到的 BrowserQL mutation。
+
+    Cloudflare / Turnstile 使用 ``solve:solve``（不限制类型）以支持自动检测，
+    包括页面内嵌 iframe / shadow DOM 中的 Turnstile 复选框挑战。
+    """
+    image = rule["mode"] in {"image", "trigger_image"}
+    triggered_image = rule["mode"] == "trigger_image"
+    altcha = rule["mode"] == "altcha"
+    verifies_success = bool(rule.get("verify_success_path"))
+    needs_solver = rule["mode"] in {"image", "trigger_image", "cloudflare"}
+    native_click = str(rule.get("submit_method") or "click") == "click"
+    solve = ("solve:solveImageCaptcha(captchaSelector:$captchaSelector,inputSelector:$captchaInputSelector,timeout:$solveTimeout){found solved time}"
+             if image else "solve:solve(timeout:$solveTimeout){found solved time}" if rule["mode"] == "cloudflare"
+             else "solve:evaluate(content:\"'skipped'\"){value}")
+    extra = "$captchaSelector:String! $captchaInputSelector:String!" if image else ""
+    set_user_agent = "userAgent(userAgent:$userAgent){time}" if user_agent else ""
+    user_agent_variable = " $userAgent:String!" if user_agent else ""
+    variable_suffix = (" $solveTimeout:Float!" if needs_solver else "")
+    variable_suffix += " $selector:String!" if native_click else " $submit:String!"
+    if triggered_image:
+        variable_suffix += " $trigger:String! $triggerWait:Float!"
+    if altcha:
+        variable_suffix += " $altchaSelector:String!"
+    if verifies_success:
+        variable_suffix += " $verifyUrl:String!"
+    if extra:
+        variable_suffix += " " + extra
+    variable_suffix += user_agent_variable
+    return """mutation CheckIn($cookies:[CookieInput!]! $url:String! $beforeWait:Float! $wait:Float!%s) {
+      %s
+      cookies(cookies:$cookies){cookies{name}}
+      goto(url:$url,waitUntil:domContentLoaded){status}
+      waitBefore:waitForTimeout(time:$beforeWait){time}
+      before:html{html}
+      %s
+      %s
+      %s
+      %s
+      waitAfter:waitForTimeout(time:$wait){time}
+      response:evaluate(content:"JSON.stringify(window.__ptsignin_response || null)"){value}
+      %s
+      after:html{html}
+    }""" % (variable_suffix, set_user_agent,
+            "trigger:evaluate(content:$trigger){value}\n      waitForTrigger:waitForTimeout(time:$triggerWait){time}" if triggered_image else "",
+            "altcha:click(selector:$altchaSelector){selector time}" if altcha else "",
+            solve,
+            "submit:click(selector:$selector){selector time}" if native_click else "submit:evaluate(content:$submit){value}",
+            "verify:goto(url:$verifyUrl,waitUntil:domContentLoaded){status}\n      verifyPage:html{html}" if verifies_success else "")
+
+
+def build_preflight_query(user_agent: Optional[str] = None, wait: int = 2000) -> str:
+    set_user_agent = "userAgent(userAgent:$userAgent){time}" if user_agent else ""
+    user_agent_variable = " $userAgent:String!" if user_agent else ""
+    return """mutation CheckInPreflight($cookies:[CookieInput!]! $url:String!%s) {
+      %s
+      cookies(cookies:$cookies){cookies{name}}
+      goto(url:$url,waitUntil:domContentLoaded){status}
+      waitForTimeout(time:%s){time}
+      before:html{html}
+    }""" % (user_agent_variable, set_user_agent, max(1000, min(int(wait), 15000)))
+
+
+def page_text(html: str) -> str:
+    visible = re.sub(r"<(script|style)\b[^>]*>.*?</\1\s*>", " ", html or "",
+                     flags=re.IGNORECASE | re.DOTALL)
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", visible)).strip()
+
+
+def _bonus_message(prefix: str, text: str, rule: Mapping[str, Any]) -> str:
+    """成功 / 已签消息只带奖励数字，不再粘贴整页文字。"""
+    bonus = extract_bonus(text, rule)
+    return f"{prefix}（{bonus}）" if bonus else prefix
+
+
+def classify(html: str, rule: Mapping[str, Any]) -> SignResult:
+    full_text = page_text(html)
+    lower = full_text.lower()
+    if any(word.lower() in lower for word in LOGIN_WORDS) and "logout" not in lower:
+        return SignResult("failed", "Cookie 无效或已过期")
+    if any(word.lower() in lower for word in rule.get("success_keywords", [])):
+        return SignResult("success", _bonus_message("签到成功", full_text, rule))
+    if any(word.lower() in lower for word in rule.get("already_keywords", [])):
+        return SignResult("already", _bonus_message("今日已经签到", full_text, rule))
+    if not rule.get("strict_status_keywords") and any(word in lower for word in SUCCESS_WORDS):
+        return SignResult("success", _bonus_message("签到成功", full_text, rule))
+    if not rule.get("strict_status_keywords") and any(word in lower for word in ALREADY_WORDS):
+        return SignResult("already", _bonus_message("今日已经签到", full_text, rule))
+    return SignResult("failed", "未识别到签到成功结果；" + page_hint(html))
+
+
+def classify_ajax_response(value: Any, rule: Mapping[str, Any]) -> Optional[SignResult]:
+    if not value or value == "null":
+        return None
+    try:
+        response = json.loads(str(value))
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(response, Mapping):
+        return None
+    status = response.get("status")
+    if isinstance(status, int) and not 200 <= status < 400:
+        return SignResult("failed", f"签到请求失败（HTTP {status}）")
+    text = str(response.get("text") or "")
+    success_json = rule.get("success_json") or {}
+    if success_json:
+        try:
+            body = json.loads(text)
+            current: Any = body
+            for key in str(success_json.get("field") or "").lstrip("/").split("/"):
+                current = current[key]
+            if str(current) in {str(item) for item in success_json.get("values", [])}:
+                message = str(body.get("sign") or body.get("msg") or "签到成功")
+                bonus = extract_bonus(text, rule)
+                if bonus and bonus not in message:
+                    message = f"{message}（{bonus}）"
+                return SignResult("success", message)
+        except (KeyError, TypeError, ValueError):
+            pass
+    return classify(text, rule)
+
+
+class BrowserlessSigner:
+    """通过 Browserless BrowserQL 执行一次签到。"""
+
+    def __init__(self, address: str, token: str, timeout: int = 100):
+        self.endpoint = bql_endpoint(address, token)
+        self.timeout = max(15, min(int(timeout), 300))
+
+    def sign(self, site: Mapping[str, Any], rule: Mapping[str, Any]) -> SignResult:
+        base_url = str(site.get("url") or "").rstrip("/")
+        cookie = str(site.get("cookie") or "").strip()
+        if not base_url or not cookie:
+            return SignResult("failed", "站点地址或 Cookie 为空")
+        target = target_url(base_url, str(rule["path"]), rule.get("route_fragment"))
+        cookies = cookie_objects(cookie, target)
+        if not cookies:
+            return SignResult("failed", "站点 Cookie 格式无效")
+        user_agent = str(site.get("ua") or "").strip()
+        # 先读页面：可能已签到或按钮已消失，两种情况都应当直接判定
+        preflight_target = target_url(base_url, str(rule.get("preflight_path") or rule["path"]))
+        preflight_variables: Dict[str, Any] = {"cookies": cookies, "url": preflight_target}
+        if user_agent:
+            preflight_variables["userAgent"] = user_agent
+        preflight_wait = max(1000, min(int(rule.get("preflight_wait") or 2000), 15000))
+        preflight = self._request(preflight_variables, "CheckInPreflight",
+                                  build_preflight_query(user_agent, preflight_wait))
+        if isinstance(preflight, SignResult):
+            return preflight
+        if preflight.get("goto", {}).get("status") not in range(200, 400):
+            return SignResult("failed", "打开签到页失败")
+        initial = classify(str((preflight.get("before") or {}).get("html") or ""), rule)
+        if initial.status in {"already", "success"}:
+            return initial
+
+        submit_method = str(rule.get("submit_method") or "click")
+        variables: Dict[str, Any] = {"cookies": cookies, "url": target,
+                                     "beforeWait": 2000, "wait": int(rule.get("wait") or 3500)}
+        if submit_method == "click":
+            variables["selector"] = rule["submit_selector"]
+        else:
+            variables["submit"] = (_altcha_submit_script(rule) if submit_method == "altcha_click"
+                                   else _submit_script(rule["submit_selector"], submit_method,
+                                                       rule.get("captcha_input_selector"),
+                                                       rule.get("submit_text")))
+        if submit_method == "altcha_click":
+            variables["altchaSelector"] = rule["altcha_checkbox_selector"]
+        if rule["mode"] == "trigger_image":
+            variables["trigger"] = _trigger_script(str(rule["trigger_selector"]))
+            variables["triggerWait"] = int(rule.get("trigger_wait") or 500)
+        if rule["mode"] != "open_page":
+            variables["solveTimeout"] = 60000
+        if rule["mode"] in {"image", "trigger_image"}:
+            variables.update({"captchaSelector": rule["captcha_selector"],
+                              "captchaInputSelector": rule["captcha_input_selector"]})
+        if rule.get("verify_success_path"):
+            variables["verifyUrl"] = target_url(base_url, str(rule["verify_success_path"]))
+        if user_agent:
+            variables["userAgent"] = user_agent
+
+        data = self._request(variables, "CheckIn", build_query(rule, user_agent))
+        if isinstance(data, SignResult):
+            return data
+        if data.get("goto", {}).get("status") not in range(200, 400):
+            return SignResult("failed", "打开签到页失败")
+        solve = data.get("solve") or {}
+        if rule["mode"] in {"image", "trigger_image"} and not solve.get("found"):
+            return SignResult("failed", "未找到图片验证码；请检查验证码图片选择器")
+        if rule["mode"] != "open_page" and solve.get("found") and not solve.get("solved"):
+            return SignResult("failed", "找到验证码但未能完成验证（Turnstile/Cloudflare 可能未通过）")
+        submitted = (data.get("submit") or {}).get("value")
+        if rule["mode"] in {"image", "trigger_image"} and submitted in (False, "false"):
+            return SignResult("failed", "验证码未自动填入输入框，未发送签到请求")
+        ajax_result = classify_ajax_response((data.get("response") or {}).get("value"), rule)
+        if rule.get("verify_success_path"):
+            if (data.get("verify") or {}).get("status") not in range(200, 400):
+                return SignResult("failed", "无法打开页面确认签到记录")
+            verified = classify(str((data.get("verifyPage") or {}).get("html") or ""), rule)
+            if verified.status in {"success", "already"}:
+                return SignResult("success", "已在首页确认签到记录")
+            return SignResult("failed", "首页未显示签到成功标记，未确认签到成功")
+        if ajax_result:
+            return ajax_result
+        result = classify(str((data.get("after") or {}).get("html") or ""), rule)
+        if result.status == "failed":
+            before = classify(str((data.get("before") or {}).get("html") or ""), rule)
+            if before.status == "already":
+                return before
+        return result
+
+    def _request(self, variables: Mapping[str, Any], operation: str, query: str) -> Any:
+        payload = json.dumps({"query": query, "operationName": operation,
+                              "variables": variables}).encode()
+        request = urllib.request.Request(self.endpoint, data=payload,
+                                         headers={"Content-Type": "application/json"},
+                                         method="POST")
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                value = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            if exc.code in {401, 403}:
+                return SignResult("failed", f"Browserless 鉴权失败（HTTP {exc.code}），请检查 Token")
+            if exc.code == 429:
+                return SignResult("failed", "Browserless 额度不足或请求过于频繁（HTTP 429）")
+            return SignResult("failed", f"Browserless HTTP {exc.code}")
+        except (urllib.error.URLError, TimeoutError, ValueError) as exc:
+            return SignResult("failed", f"Browserless 请求失败：{exc}")
+        errors = value.get("errors") or []
+        if errors:
+            message = str(errors[0].get("message") or "未知错误")
+            if "waiting for page navigation" in message.lower():
+                return SignResult("failed", "Browserless 页面导航超时；请检查该站是否可由当前节点访问")
+            return SignResult("failed", "Browserless 执行失败：" + message)
+        return value.get("data") or {}
