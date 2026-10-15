@@ -30,8 +30,18 @@ CF_INTERSTITIAL_PATTERN = r"(just a moment|_cf_chl_opt|chl_page)"
 # 由页面 JS 在回调里生成，HTTP 直连拿不到，必须在真实浏览器里执行 JS 才能完成签到；注意与
 # 上面的「Just a moment...」交互挑战区分开——这类正常页面不带 _cf_chl_opt / chl_page。
 TURNSTILE_PATTERN = r"(cf-turnstile|turnstile/v0|turnstile\.min\.js|turnstile\.render)"
+# 页面内嵌 Cloudflare Turnstile 组件的隐藏 token 输入框（观众 Audiences 的签到页用它承载验证结果）
+TURNSTILE_TOKEN_SELECTOR = 'input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"]'
+# 站点把签到页踢回登录页的特征（NexusPHP login.php?returnto=... / takelogin.php）
+LOGIN_PAGE_PATTERN = r"(takelogin\.php|login\.php\?returnto)"
 # 等待 Cloudflare 交互挑战自动放行的默认秒数，可用站点规则字段 cloudflare_wait 覆盖。
 DEFAULT_CLOUDFLARE_WAIT = 10
+# 「验证通过后由页面 JS 自己提交」的提交方式：Browserless 的 solve 只负责生成 token，
+# 不会触发站点挂在 Turnstile 回调上的提交逻辑（官方文档：解完验证码要自己触发提交），
+# 所以插件还要显式补一次页面提交。
+AUTO_SUBMIT_METHODS = {"auto", "turnstile_auto"}
+# auto 提交方式等待 Turnstile token 出现的默认毫秒数，可用站点规则字段 auto_wait 覆盖。
+DEFAULT_AUTO_WAIT = 20000
 # 图片验证码 / 人机校验特征（HTTP 直连拿不到结果，需改用 Browserless）
 CAPTCHA_PATTERN = (
     r"(captcha\.php|<img[^>]+captcha"
@@ -159,9 +169,12 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
     # 爆米花奖励」「人机验证 / 验证通过后将自动完成签到」，验证组件是 Cloudflare Turnstile。
     # 签到由页面 JS 在 Turnstile 回调里**自动提交**，页面上没有可点的提交按钮；HTTP 直连
     # （GET / POST）只会拿到未签到的页面骨架，永远匹配不到结果，所以这里直接指定浏览器引擎：
-    #   加载签到页 -> 等 Turnstile 自动放行 -> 等页面自己把签到请求发完
-    #   - submit_method=none：不需要点任何按钮，只等页面自己签完（其它站点默认仍点提交按钮）
+    #   加载签到页 -> solve 生成 Turnstile token -> 显式补一刀页面提交 -> 等签到请求发完
+    #   - submit_method=auto：页面没有可点的提交按钮，而 Browserless 的 solve 只生成 token、
+    #     不会触发站点的 data-callback；所以由插件按「回调 -> 表单 -> 同源 POST」补一次提交
     #   - cloudflare_wait 调大一点（10 -> 15 秒）更稳，wait 给足页面 AJAX 时间
+    #   - auto_wait：solve 之后等待 Turnstile token 出现在隐藏输入框里的毫秒数
+    #   - solve_timeout：solve 找验证码的毫秒预算（默认 60 秒，这里 30 秒够了，省得整轮超时）
     #   - pending_keywords：仍停留在「验证中」的正文特征。命中说明人机验证没通过 / 签到没提交，
     #     此时给出明确提示，而不是含糊的「未匹配到签到成功标志」
     #   - 判定顺序：先看成功 / 已签到关键词，再判 pending，避免已签完的页面被 pending 文案误杀
@@ -169,8 +182,11 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "engine": "browserless",
         "mode": "cloudflare",
         "path": "/attendance.php",
-        "submit_method": "none",
+        "submit_method": "auto",
         "cloudflare_wait": 15,
+        # solve 只等验证码出现：组件本身 15 秒内就渲染好了，不必给 60 秒的默认预算
+        "solve_timeout": 30000,
+        "auto_wait": 15000,
         "wait": 8000,
         # 签到成功后页面可能跳回首页；同一浏览器会话重新打开 attendance.php 再确认一次，
         # 避免只看到首页就误报失败，也避免把未完成的验证当成成功。
@@ -549,6 +565,141 @@ def _trigger_script(selector: str) -> str:
     })()""" % json.dumps(selector)
 
 
+def _turnstile_auto_script(rule: Mapping[str, Any]) -> str:
+    """页面内嵌 Turnstile「验证通过后自动签到」的补充提交脚本（观众 Audiences 类站点）。
+
+    Browserless 的 solve 只会把验证结果写进隐藏输入框（必要时连勾选都不显示），**不会**
+    触发站点挂在 Turnstile 回调上的自动提交逻辑，所以这里按页面实际结构依次补一刀：
+
+    1. 先主动调用 ``data-callback`` 指向的站点回调，让站点自己的 JS 完成提交；
+    2. 回调不存在或抛错时，再按表单真实 ``action`` 做同源 POST（没有表单则 POST 当前
+       签到页），并带上表单中已有的字段和提交按钮字段。
+
+    回调有可能触发整页提交，因此回调放到 setTimeout 中异步触发，当前 evaluate 先返回；
+    回调若只是 AJAX，等 2.5 秒后若页面仍在 pending 状态，再触发一次表单 POST 兜底。
+    每步结果写入 ``window.__ptsignin_auto`` / sessionStorage，失败时由
+    ``auto_submit_hint`` 输出，便于判断到底是 token、回调还是提交环节出了问题。
+    """
+    wait = auto_wait_ms(rule)
+    pending = json.dumps([str(item) for item in (rule.get("pending_keywords") or [])],
+                         ensure_ascii=False)
+    return """(async () => {
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const pendingWords = %s;
+      const diag = {token: false, src: null, cb: null, form: false, act: null, post: null};
+      const save = () => {
+        window.__ptsignin_auto = diag;
+        try { sessionStorage.setItem('__ptsignin_auto', JSON.stringify(diag)); } catch (err) {}
+      };
+      save();
+      const sel = '%s';
+      const inputToken = () => { const el = document.querySelector(sel); return (el && (el.value || '').trim()) || ''; };
+      const apiToken = () => {
+        try {
+          if (window.turnstile && typeof window.turnstile.getResponse === 'function') {
+            return (window.turnstile.getResponse() || '').trim();
+          }
+        } catch (err) { return ''; }
+        return '';
+      };
+      const readToken = () => {
+        const viaInput = inputToken();
+        if (viaInput) { diag.src = 'input'; return viaInput; }
+        const viaApi = apiToken();
+        if (viaApi) { diag.src = 'turnstile'; return viaApi; }
+        return '';
+      };
+      const deadline = Date.now() + %d;
+      while (!readToken() && Date.now() < deadline) await sleep(250);
+      const token = readToken();
+      diag.token = !!token;
+      const forms = Array.prototype.slice.call(document.querySelectorAll('form'));
+      const form = forms.filter((item) => /attendance/i.test(item.getAttribute('action') || ''))[0]
+        || forms.filter((item) => item.querySelector(sel))[0]
+        || forms.filter((item) => (item.method || '').toLowerCase() === 'post')[0] || null;
+      if (form) { diag.form = true; }
+
+      const formData = () => {
+        const data = form ? new FormData(form) : new FormData();
+        if (!form) {
+          document.querySelectorAll('input[name], textarea[name], select[name]').forEach((el) => {
+            if (!el.disabled && !data.has(el.name)) data.append(el.name, el.value || '');
+          });
+        }
+        const submit = form && form.querySelector('button[type="submit"], input[type="submit"], button:not([type])');
+        if (submit && submit.name && !submit.disabled && !data.has(submit.name)) {
+          data.append(submit.name, submit.value || '');
+        }
+        if (token) data.set('cf-turnstile-response', token);
+        return data;
+      };
+
+      const postFallback = async () => {
+        const actionValue = form ? (form.getAttribute('action') || location.href) : location.href;
+        const action = new URL(actionValue, location.href);
+        if (action.origin !== location.origin) {
+          diag.act = diag.act ? diag.act + '+post-blocked' : 'post-blocked';
+          save();
+          return;
+        }
+        try {
+          const response = await fetch(action.href, {
+            method: 'POST', credentials: 'same-origin', body: formData()
+          });
+          window.__ptsignin_response = {status: response.status, url: response.url, text: await response.text()};
+          diag.post = response.status;
+          diag.act = diag.act ? diag.act + '+post' : 'post';
+          save();
+        } catch (err) {
+          diag.post = 'error';
+          diag.act = diag.act ? diag.act + '+post-error' : 'post-error';
+          save();
+        }
+      };
+
+      const stillPending = () => {
+        const text = (document.body && document.body.innerText) || '';
+        return pendingWords.some((word) => word && text.indexOf(word) !== -1);
+      };
+
+      const widget = document.querySelector('[data-callback]');
+      const cbName = (widget && (widget.getAttribute('data-callback') || '').trim()) || '';
+      if (cbName) {
+        diag.cb = cbName;
+        const cb = window[cbName];
+        if (typeof cb === 'function') {
+          diag.act = 'callback-scheduled';
+          save();
+          setTimeout(async () => {
+            try {
+              cb(token);
+              diag.act = 'callback';
+              save();
+            } catch (err) {
+              diag.act = 'callback-error';
+              save();
+              await postFallback();
+              return;
+            }
+            setTimeout(async () => {
+              if (stillPending()) {
+                diag.act = diag.act + '+fallback';
+                save();
+                await postFallback();
+              }
+            }, 2500);
+          }, 0);
+          return JSON.stringify(diag);
+        }
+        diag.act = 'callback-missing';
+      }
+
+      if (token) await postFallback();
+      save();
+      return JSON.stringify(diag);
+    })()""" % (pending, TURNSTILE_TOKEN_SELECTOR, wait)
+
+
 def build_query(rule: Mapping[str, Any], user_agent: Optional[str] = None) -> str:
     """构造一次签到的 BrowserQL mutation。
 
@@ -562,7 +713,10 @@ def build_query(rule: Mapping[str, Any], user_agent: Optional[str] = None) -> st
     needs_solver = rule["mode"] in {"image", "trigger_image", "cloudflare"}
     submit_method = str(rule.get("submit_method") or "click")
     native_click = submit_method == "click"
-    # submit_method=none：页面在验证通过后自己提交签到（观众 Audiences 这类没有提交按钮的站点）
+    # submit_method=auto：页面没有提交按钮、由验证回调自己提交（观众 Audiences）；solve 只
+    # 生成 token 不触发回调，所以由插件补一刀显式提交。
+    auto_submit = submit_method in AUTO_SUBMIT_METHODS
+    # submit_method=none：什么都不点，纯等页面自己签完
     skip_submit = submit_method in {"none", "skip"}
     solve = ("solve:solveImageCaptcha(captchaSelector:$captchaSelector,inputSelector:$captchaInputSelector,timeout:$solveTimeout){found solved time}"
              if image else "solve:solve(timeout:$solveTimeout){found solved time}" if rule["mode"] == "cloudflare"
@@ -573,6 +727,8 @@ def build_query(rule: Mapping[str, Any], user_agent: Optional[str] = None) -> st
     variable_suffix = (" $solveTimeout:Float!" if needs_solver else "")
     if native_click:
         variable_suffix += " $selector:String!"
+    elif auto_submit:
+        variable_suffix += " $autoSubmit:String!"
     elif not skip_submit:
         variable_suffix += " $submit:String!"
     if triggered_image:
@@ -588,6 +744,8 @@ def build_query(rule: Mapping[str, Any], user_agent: Optional[str] = None) -> st
         if rule.get("verify_wait") is not None:
             verify += "\n      waitForVerify:waitForTimeout(time:$verifyWait){time}"
         verify += "\n      verifyPage:html{html}"
+    auto_diag = ("" if not auto_submit else
+                 'autoDiag:evaluate(content:"JSON.stringify(window.__ptsignin_auto || (function(){try{return JSON.parse(sessionStorage.getItem(\'__ptsignin_auto\')||\'null\')}catch(e){return null}})())"){value}')
     if extra:
         variable_suffix += " " + extra
     variable_suffix += user_agent_variable
@@ -604,13 +762,16 @@ def build_query(rule: Mapping[str, Any], user_agent: Optional[str] = None) -> st
       waitAfter:waitForTimeout(time:$wait){time}
       response:evaluate(content:"JSON.stringify(window.__ptsignin_response || null)"){value}
       %s
+      %s
       after:html{html}
     }""" % (variable_suffix, set_user_agent,
             "trigger:evaluate(content:$trigger){value}\n      waitForTrigger:waitForTimeout(time:$triggerWait){time}" if triggered_image else "",
             "altcha:click(selector:$altchaSelector){selector time}" if altcha else "",
             solve,
             "submit:click(selector:$selector){selector time}" if native_click
+            else "submit:evaluate(content:$autoSubmit){value}" if auto_submit
             else "" if skip_submit else "submit:evaluate(content:$submit){value}",
+            auto_diag,
             verify)
 
 
@@ -647,6 +808,32 @@ def cloudflare_pending(html: str) -> bool:
     return bool(re.search(CF_INTERSTITIAL_PATTERN, html or "", re.IGNORECASE))
 
 
+def login_page(html: str) -> bool:
+    """页面是否就是站点登录页。
+
+    NexusPHP 在 Cookie 失效 / 未登录时会把 attendance.php 302 到
+    ``login.php?returnto=attendance.php``；也有站点直接把登录表单塞进返回的页面。
+    命中时要明确提示 Cookie 失效，而不是让人机验证超时背锅。
+    """
+    text = html or ""
+    if re.search(LOGIN_PAGE_PATTERN, text, re.IGNORECASE):
+        return True
+    if "logout.php" in text.lower():
+        return False
+    return bool(re.search(r"name\s*=\s*[\"']?password", text, re.IGNORECASE)
+                and re.search(r"name\s*=\s*[\"']?(?:username|email)", text, re.IGNORECASE))
+
+
+def login_required_message(where: str) -> str:
+    return (f"{where}：Cookie 无效或已过期，请在 MoviePilot 里重新登录该站并更新 Cookie；"
+            "否则插件每次拿到的都只是登录页")
+
+
+def append_hint(message: str, hint: str) -> str:
+    """把现场诊断拼到失败原因后面（没有诊断时原样返回）。"""
+    return f"{message}；{hint}" if hint else message
+
+
 def cloudflare_wait_ms(rule: Mapping[str, Any]) -> int:
     """Cloudflare 模式下停留在页面等待挑战自动放行的毫秒数（3~45 秒，可规则覆盖）。"""
     try:
@@ -654,6 +841,24 @@ def cloudflare_wait_ms(rule: Mapping[str, Any]) -> int:
     except (TypeError, ValueError):
         seconds = DEFAULT_CLOUDFLARE_WAIT
     return int(max(3.0, min(seconds, 45.0)) * 1000)
+
+
+def solve_timeout_ms(rule: Mapping[str, Any]) -> int:
+    """solve 等待验证码出现的毫秒预算（5~120 秒，可用 solve_timeout 覆盖）。"""
+    try:
+        milli = int(float(rule.get("solve_timeout") or 60000))
+    except (TypeError, ValueError):
+        milli = 60000
+    return max(5000, min(milli, 120000))
+
+
+def auto_wait_ms(rule: Mapping[str, Any]) -> int:
+    """auto 提交方式等待 Turnstile token 出现的毫秒数（3~45 秒，可用 auto_wait 覆盖）。"""
+    try:
+        milli = int(float(rule.get("auto_wait") or DEFAULT_AUTO_WAIT))
+    except (TypeError, ValueError):
+        milli = DEFAULT_AUTO_WAIT
+    return max(3000, min(milli, 45000))
 
 
 def navigation_ok(mode: str, status: Any, html: str) -> bool:
@@ -675,6 +880,46 @@ def _bonus_message(prefix: str, text: str, rule: Mapping[str, Any]) -> str:
     """成功 / 已签消息只带奖励数字，不再粘贴整页文字。"""
     bonus = extract_bonus(text, rule)
     return f"{prefix}（{bonus}）" if bonus else prefix
+
+
+def auto_submit_hint(value: Any) -> str:
+    """把页面里 ``window.__ptsignin_auto`` 的现场诊断翻译成一句中文提示。
+
+    用于「页面仍停在人机验证」这类失败：token 到底有没有生成、站点回调有没有触发、
+    表单有没有提交、兜底 POST 返回什么，直接写在失败原因里，省得来回猜。
+    """
+    if not value or value == "null":
+        return ""
+    try:
+        state = json.loads(str(value))
+    except (TypeError, ValueError):
+        return ""
+    if not isinstance(state, Mapping):
+        return ""
+    parts = ["已拿到 Turnstile token" if state.get("token") else "未拿到 Turnstile token"]
+    name = str(state.get("cb") or "").strip()
+    action = str(state.get("act") or "")
+    if name:
+        if action.startswith("callback-scheduled"):
+            parts.append(f"已调度站点回调 {name}（执行结果未确认）")
+        elif action.startswith("callback-error"):
+            parts.append(f"站点回调 {name} 执行失败")
+        elif action.startswith("callback-missing"):
+            parts.append(f"页面声明的站点回调 {name} 不存在")
+        elif action.startswith("callback"):
+            parts.append(f"已调用站点回调 {name}")
+        else:
+            parts.append(f"站点回调 {name} 没能调用")
+    else:
+        parts.append("页面没有 data-callback 回调")
+    if state.get("form"):
+        parts.append("已提交页面表单")
+    post = state.get("post")
+    if isinstance(post, int) and not isinstance(post, bool):
+        parts.append(f"兜底 POST 返回 HTTP {post}")
+    elif post:
+        parts.append("兜底 POST 失败")
+    return "诊断：" + "；".join(parts)
 
 
 def classify(html: str, rule: Mapping[str, Any]) -> SignResult:
@@ -763,6 +1008,9 @@ class BrowserlessSigner:
         else:
             if not navigation_ok(mode, preflight.get("goto", {}).get("status"), preflight_html):
                 return SignResult("failed", "打开签到页失败")
+            if login_page(preflight_html):
+                # 预检就已经被踢到登录页：Cookie 失效时怎么验人机验证都没用，直接给结论
+                return SignResult("failed", login_required_message("签到页跳转到了登录页"))
             initial = classify(preflight_html, rule)
             if initial.status in {"already", "success"}:
                 return initial
@@ -775,6 +1023,9 @@ class BrowserlessSigner:
                                      "wait": int(rule.get("wait") or 3500)}
         if submit_method == "click":
             variables["selector"] = rule["submit_selector"]
+        elif submit_method in AUTO_SUBMIT_METHODS:
+            # solve 只生成 Turnstile token、不触发站点回调：这里补一次显式提交
+            variables["autoSubmit"] = _turnstile_auto_script(rule)
         elif submit_method in {"none", "skip"}:
             # 页面在人机验证通过后自己提交签到，不需要点任何按钮
             pass
@@ -789,7 +1040,7 @@ class BrowserlessSigner:
             variables["trigger"] = _trigger_script(str(rule["trigger_selector"]))
             variables["triggerWait"] = int(rule.get("trigger_wait") or 500)
         if rule["mode"] != "open_page":
-            variables["solveTimeout"] = 60000
+            variables["solveTimeout"] = solve_timeout_ms(rule)
         if rule["mode"] in {"image", "trigger_image"}:
             variables.update({"captchaSelector": rule["captcha_selector"],
                               "captchaInputSelector": rule["captcha_input_selector"]})
@@ -808,11 +1059,13 @@ class BrowserlessSigner:
         if isinstance(data, SignResult):
             return data
         after_html = str((data.get("after") or {}).get("html") or "")
+        # auto 提交的现场诊断：token 有没有生成、回调有没有触发、表单有没有提交
+        auto_hint = auto_submit_hint((data.get("autoDiag") or {}).get("value"))
         # 已经等满预算却仍卡在挑战页：给出可操作的提示，而不是笼统的「打开签到页失败」
         if mode == "cloudflare" and cloudflare_pending(after_html):
-            return SignResult("failed",
-                              f"Cloudflare 挑战在 {page_wait // 1000} 秒内未自动放行；"
-                              "可在该站规则里调大 cloudflare_wait 后重试")
+            return SignResult("failed", append_hint(
+                f"Cloudflare 挑战在 {page_wait // 1000} 秒内未自动放行；"
+                "可在该站规则里调大 cloudflare_wait 后重试", auto_hint))
         if not navigation_ok(mode, data.get("goto", {}).get("status"), after_html):
             return SignResult("failed", "打开签到页失败")
         solve = data.get("solve") or {}
@@ -831,9 +1084,10 @@ class BrowserlessSigner:
             verify = data.get("verify") or {}
             verify_html = str((data.get("verifyPage") or {}).get("html") or "")
             if cloudflare_pending(verify_html):
-                return SignResult("failed",
-                                  "签到后二次核验仍停留在 Cloudflare 人机验证页，"
-                                  "未确认签到成功")
+                return SignResult("failed", append_hint(
+                    "签到后二次核验仍停留在 Cloudflare 人机验证页，未确认签到成功", auto_hint))
+            if login_page(verify_html):
+                return SignResult("failed", login_required_message("二次核验时签到页跳转到了登录页"))
             if not navigation_ok(mode, verify.get("status"), verify_html):
                 return SignResult("failed", "无法打开签到页确认签到记录")
             verified = classify(verify_html, rule)
@@ -845,12 +1099,11 @@ class BrowserlessSigner:
                 )
             pending = first_keyword(page_text(verify_html), rule.get("pending_keywords"))
             if pending:
-                return SignResult("failed",
-                                  f"签到后二次核验仍停留在「{pending}」"
-                                  "（人机验证未通过或签到未提交）")
-            return SignResult("failed",
-                              "签到后二次核验未显示签到成功状态；"
-                              + page_hint(verify_html))
+                return SignResult("failed", append_hint(
+                    f"签到后二次核验仍停留在「{pending}」（人机验证未通过或签到未提交）",
+                    auto_hint))
+            return SignResult("failed", append_hint(
+                "签到后二次核验未显示签到成功状态；" + page_hint(verify_html), auto_hint))
         if ajax_result:
             return ajax_result
         result = classify(after_html, rule)
@@ -862,13 +1115,18 @@ class BrowserlessSigner:
         # 没过或签到没提交，给出明确结论；若进页面时是未签到、跑完变成已签到，按签到成功上报。
         pending = first_keyword(page_text(after_html), rule.get("pending_keywords"))
         if pending and result.status not in {"success", "already"}:
-            return SignResult("failed",
-                              f"页面仍停留在「{pending}」（人机验证未通过或签到未提交）；"
-                              + page_hint(after_html))
+            return SignResult("failed", append_hint(
+                f"页面仍停留在「{pending}」（人机验证未通过或签到未提交）；"
+                + page_hint(after_html), auto_hint))
         if solve_failed and result.status not in {"success", "already"}:
-            return SignResult("failed", "找到验证码但未能完成验证（Turnstile/Cloudflare 可能未通过）")
+            return SignResult("failed", append_hint(
+                "找到验证码但未能完成验证（Turnstile/Cloudflare 可能未通过）", auto_hint))
         if result.status == "already" and pre_state_pending:
             return SignResult("success", _bonus_message("签到成功", page_text(after_html), rule))
+        if result.status == "failed" and login_page(after_html):
+            return SignResult("failed", login_required_message("签到页跳转到了登录页"))
+        if result.status == "failed" and auto_hint:
+            return SignResult("failed", f"{result.message}；{auto_hint}", result.challenge)
         return result
 
     def _request(self, variables: Mapping[str, Any], operation: str, query: str) -> Any:

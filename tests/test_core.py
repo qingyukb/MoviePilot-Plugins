@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -51,6 +52,12 @@ AUDIENCES_SIGNED_HTML = (
 AUDIENCES_HOME_HTML = (
     "<html><head><title>Audiences - Powered by NexusPHP</title></head><body>"
     "上一页 下一页 返回顶部 签到 收件箱 发件箱</body></html>")
+# Cookie 失效时 NexusPHP 会把 attendance.php 302 到 login.php?returnto=attendance.php
+LOGIN_PAGE_HTML = (
+    "<html><head><title>Audiences :: 登录 - Powered by NexusPHP</title></head><body>"
+    "<form action=\"takelogin.php\" method=\"post\">"
+    "<input name=\"username\"><input name=\"password\" type=\"password\">"
+    "<a href=\"login.php?returnto=attendance.php\">登录</a></form></body></html>")
 AUDIENCES_SITE = {"url": "https://audiences.me", "cookie": "a=1; b=2", "ua": ""}
 
 
@@ -60,9 +67,11 @@ def make_stub_signer(core, responses):
         def __init__(self):
             self.responses = list(responses)
             self.calls = []
+            self.queries = []
 
         def _request(self, variables, operation, query):
             self.calls.append((operation, dict(variables)))
+            self.queries.append(query)
             return self.responses.pop(0)
 
     return _StubSigner()
@@ -93,7 +102,7 @@ class CoreRegressionTests(unittest.TestCase):
         # 观众签到页由页面 JS 在 Turnstile 回调里自动提交，页面上没有可点的提交按钮：
         # 既不能走 HTTP 直连，也不能沿用默认的 input[type=submit] 点击
         self.assertEqual(self.audiences["mode"], "cloudflare")
-        self.assertEqual(self.audiences["submit_method"], "none")
+        self.assertEqual(self.audiences["submit_method"], "auto")
         self.assertNotIn("submit_selector", self.audiences)
         self.assertIn("签到成功", self.audiences["success_keywords"])
         self.assertIn("已签到", self.audiences["already_keywords"])
@@ -309,13 +318,17 @@ class BrowserlessAudiencesTests(unittest.TestCase):
     def _signer(self, responses):
         return make_stub_signer(self.core, responses)
 
-    def test_query_has_no_submit_step(self):
+    def test_query_triggers_turnstile_auto_submit(self):
+        # solve 只生成 token、不触发站点回调，所以必须再补一刀显式提交
         rule = self._rule()
         query = self.core.build_query(rule)
-        self.assertNotIn("submit:", query)
-        self.assertNotIn("$submit:", query)
-        self.assertNotIn("$selector", query)
         self.assertIn("solve:solve", query)
+        self.assertIn("submit:evaluate(content:$autoSubmit){value}", query)
+        self.assertIn("$autoSubmit:String!", query)
+        self.assertIn("autoDiag:evaluate", query)
+        self.assertNotIn("submit:click", query)
+        self.assertNotIn("$selector", query)
+        self.assertNotIn("$submit:", query)
         self.assertIn("verify:goto", query)
         self.assertIn("waitForVerify", query)
         self.assertIn("$verifyWait", query)
@@ -417,6 +430,94 @@ class BrowserlessAudiencesTests(unittest.TestCase):
         ])
         result = signer.sign(self.site, self._rule())
         self.assertEqual(result.status, "success")
+
+    def test_auto_submit_script_and_failure_diagnostics(self):
+        # 拿不到 token 时失败原因要带上现场诊断，否则又要来回猜
+        signer = self._signer([
+            {"goto": {"status": 200}, "before": {"html": AUDIENCES_PENDING_HTML}},
+            {"goto": {"status": 200}, "solve": {"found": True, "solved": False},
+             "submit": {}, "response": {},
+             "autoDiag": {"value": json.dumps(
+                 {"token": False, "cb": None, "form": False, "act": None, "post": None},
+                 ensure_ascii=False)},
+             "before": {"html": AUDIENCES_PENDING_HTML},
+             "after": {"html": AUDIENCES_PENDING_HTML},
+             "verify": {"status": 200},
+             "verifyPage": {"html": AUDIENCES_PENDING_HTML}},
+        ])
+        result = signer.sign(self.site, self._rule())
+        self.assertEqual(result.status, "failed")
+        self.assertIn("submit:evaluate(content:$autoSubmit)", signer.queries[1])
+        self.assertNotIn("$submit:", signer.queries[1])
+        script = signer.calls[1][1]["autoSubmit"]
+        self.assertIn("cf-turnstile-response", script)
+        self.assertIn("data-callback", script)
+        self.assertIn("method: 'POST'", script)
+        self.assertIn("credentials: 'same-origin'", script)
+        self.assertIn("getAttribute('action')", script)
+        self.assertIn("sessionStorage", script)
+        self.assertIn("callback-scheduled", script)
+        self.assertIn("return JSON.stringify(diag)", script)
+        self.assertIn("__ptsignin_auto", script)
+        self.assertIn("未拿到 Turnstile token", result.message)
+        self.assertIn("页面没有 data-callback 回调", result.message)
+
+    def test_auto_submit_script_waits_token_with_rule_budget(self):
+        script = self.core._turnstile_auto_script(self._rule())
+        self.assertIn("Date.now() + 15000", script)
+        self.assertEqual(self.core.auto_wait_ms({"auto_wait": 1}), 3000)
+        self.assertEqual(self.core.auto_wait_ms({}), 20000)
+        self.assertEqual(self.core.solve_timeout_ms(self._rule()), 30000)
+
+    def test_diagnostics_report_callback_and_post(self):
+        hint = self.core.auto_submit_hint(json.dumps(
+            {"token": True, "cb": "onTurnstileOk", "form": True, "act": "callback", "post": 200},
+            ensure_ascii=False))
+        self.assertIn("已拿到 Turnstile token", hint)
+        self.assertIn("onTurnstileOk", hint)
+        self.assertIn("已提交页面表单", hint)
+        self.assertIn("HTTP 200", hint)
+
+    def test_diagnostics_distinguish_callback_states(self):
+        scheduled = self.core.auto_submit_hint(json.dumps(
+            {"token": True, "cb": "onTurnstileOk", "act": "callback-scheduled"},
+            ensure_ascii=False))
+        self.assertIn("已调度站点回调", scheduled)
+        self.assertIn("执行结果未确认", scheduled)
+        self.assertNotIn("已调用站点回调", scheduled)
+
+        failed = self.core.auto_submit_hint(json.dumps(
+            {"token": True, "cb": "onTurnstileOk", "act": "callback-error+post"},
+            ensure_ascii=False))
+        self.assertIn("执行失败", failed)
+        missing = self.core.auto_submit_hint(json.dumps(
+            {"token": False, "cb": "onTurnstileOk", "act": "callback-missing"},
+            ensure_ascii=False))
+        self.assertIn("不存在", missing)
+
+    def test_login_page_preflight_reports_cookie_problem(self):
+        signer = self._signer([
+            {"goto": {"status": 200}, "before": {"html": LOGIN_PAGE_HTML}},
+        ])
+        result = signer.sign(self.site, self._rule())
+        self.assertEqual(result.status, "failed")
+        self.assertIn("Cookie", result.message)
+        self.assertIn("重新登录", result.message)
+        self.assertEqual(len(signer.calls), 1)
+
+    def test_verify_login_page_reports_cookie_problem(self):
+        signer = self._signer([
+            {"goto": {"status": 200}, "before": {"html": AUDIENCES_PENDING_HTML}},
+            {"goto": {"status": 200}, "solve": {}, "submit": {}, "response": {},
+             "before": {"html": AUDIENCES_PENDING_HTML},
+             "after": {"html": AUDIENCES_PENDING_HTML},
+             "verify": {"status": 200},
+             "verifyPage": {"html": LOGIN_PAGE_HTML}},
+        ])
+        result = signer.sign(self.site, self._rule())
+        self.assertEqual(result.status, "failed")
+        self.assertIn("重新登录", result.message)
+        self.assertIn("Cookie", result.message)
 
 
 if __name__ == "__main__":
