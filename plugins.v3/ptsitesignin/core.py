@@ -42,6 +42,8 @@ DEFAULT_CLOUDFLARE_WAIT = 10
 AUTO_SUBMIT_METHODS = {"auto", "turnstile_auto"}
 # auto 提交方式等待 Turnstile token 出现的默认毫秒数，可用站点规则字段 auto_wait 覆盖。
 DEFAULT_AUTO_WAIT = 20000
+# 第一段 Cloudflare 挑战通过后，等待签到页内嵌 Turnstile 渲染的默认毫秒数。
+DEFAULT_SOLVE2_WAIT = 3000
 # 图片验证码 / 人机校验特征（HTTP 直连拿不到结果，需改用 Browserless）
 CAPTCHA_PATTERN = (
     r"(captcha\.php|<img[^>]+captcha"
@@ -184,10 +186,15 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "path": "/attendance.php",
         "submit_method": "auto",
         "cloudflare_wait": 15,
+        # Audiences 是两段验证：/attendance.php 先过 Cloudflare 交互挑战，进入签到页后
+        # 还有内嵌 Turnstile。只 solve 一次时，第二次验证不会生成 token，日志会表现为
+        # “未拿到 Turnstile token / 页面没有 data-callback”。所以显式做第二次 solve。
+        "solve_count": 2,
+        "solve2_wait": 3000,
         # solve 只等验证码出现：组件本身 15 秒内就渲染好了，不必给 60 秒的默认预算
-        "solve_timeout": 30000,
+        "solve_timeout": 20000,
         "auto_wait": 15000,
-        "wait": 8000,
+        "wait": 5000,
         # 签到成功后页面可能跳回首页；同一浏览器会话重新打开 attendance.php 再确认一次，
         # 避免只看到首页就误报失败，也避免把未完成的验证当成成功。
         "verify_success_path": "/attendance.php",
@@ -694,7 +701,8 @@ def _turnstile_auto_script(rule: Mapping[str, Any]) -> str:
         diag.act = 'callback-missing';
       }
 
-      if (token) await postFallback();
+      // 二次 solve 可能已经触发了站点回调并完成签到，此时不要再重复 POST 一次。
+      if (token && (!pendingWords.length || stillPending())) await postFallback();
       save();
       return JSON.stringify(diag);
     })()""" % (pending, TURNSTILE_TOKEN_SELECTOR, wait)
@@ -711,6 +719,7 @@ def build_query(rule: Mapping[str, Any], user_agent: Optional[str] = None) -> st
     altcha = rule["mode"] == "altcha"
     verifies_success = bool(rule.get("verify_success_path"))
     needs_solver = rule["mode"] in {"image", "trigger_image", "cloudflare"}
+    second_solve = secondary_solve_enabled(rule)
     submit_method = str(rule.get("submit_method") or "click")
     native_click = submit_method == "click"
     # submit_method=auto：页面没有提交按钮、由验证回调自己提交（观众 Audiences）；solve 只
@@ -721,10 +730,18 @@ def build_query(rule: Mapping[str, Any], user_agent: Optional[str] = None) -> st
     solve = ("solve:solveImageCaptcha(captchaSelector:$captchaSelector,inputSelector:$captchaInputSelector,timeout:$solveTimeout){found solved time}"
              if image else "solve:solve(timeout:$solveTimeout){found solved time}" if rule["mode"] == "cloudflare"
              else "solve:evaluate(content:\"'skipped'\"){value}")
+    if second_solve:
+        # 第一次 solve 可能解决 /attendance.php 外层的 Cloudflare 交互挑战；等待页面切换后，
+        # 再对签到页内嵌的 Turnstile 执行一次 solve。没有这一步时，第一次 solve 返回时
+        # 第二段验证尚未发生，后续 autoSubmit 就只会看到空的 cf-turnstile-response。
+        solve += ("\n      waitBetweenSolves:waitForTimeout(time:$solve2Wait){time}"
+                  "\n      solve2:solve(timeout:$solveTimeout){found solved time}")
     extra = "$captchaSelector:String! $captchaInputSelector:String!" if image else ""
     set_user_agent = "userAgent(userAgent:$userAgent){time}" if user_agent else ""
     user_agent_variable = " $userAgent:String!" if user_agent else ""
     variable_suffix = (" $solveTimeout:Float!" if needs_solver else "")
+    if second_solve:
+        variable_suffix += " $solve2Wait:Float!"
     if native_click:
         variable_suffix += " $selector:String!"
     elif auto_submit:
@@ -852,6 +869,25 @@ def solve_timeout_ms(rule: Mapping[str, Any]) -> int:
     return max(5000, min(milli, 120000))
 
 
+def solve2_wait_ms(rule: Mapping[str, Any]) -> int:
+    """两次 solve 之间的等待预算（1~10 秒，可用 solve2_wait 覆盖）。"""
+    try:
+        milli = int(float(rule.get("solve2_wait") or DEFAULT_SOLVE2_WAIT))
+    except (TypeError, ValueError):
+        milli = DEFAULT_SOLVE2_WAIT
+    return max(1000, min(milli, 10000))
+
+
+def secondary_solve_enabled(rule: Mapping[str, Any]) -> bool:
+    """Cloudflare 模式是否需要对进入真实页面后的第二段 Turnstile 再 solve 一次。"""
+    if str(rule.get("mode") or "") != "cloudflare":
+        return False
+    try:
+        return int(float(rule.get("solve_count") or 1)) >= 2
+    except (TypeError, ValueError):
+        return False
+
+
 def auto_wait_ms(rule: Mapping[str, Any]) -> int:
     """auto 提交方式等待 Turnstile token 出现的毫秒数（3~45 秒，可用 auto_wait 覆盖）。"""
     try:
@@ -880,6 +916,24 @@ def _bonus_message(prefix: str, text: str, rule: Mapping[str, Any]) -> str:
     """成功 / 已签消息只带奖励数字，不再粘贴整页文字。"""
     bonus = extract_bonus(text, rule)
     return f"{prefix}（{bonus}）" if bonus else prefix
+
+
+def solver_hint(first: Any, second: Any = None) -> str:
+    """把 Browserless 两次 solve 的返回结果翻译成简短诊断。"""
+    parts: List[str] = []
+    for label, value in (("首次", first), ("二次", second)):
+        if not isinstance(value, Mapping):
+            continue
+        details: List[str] = []
+        if "found" in value:
+            details.append("found=" + str(bool(value.get("found"))).lower())
+        if "solved" in value:
+            details.append("solved=" + str(bool(value.get("solved"))).lower())
+        if value.get("time") is not None:
+            details.append("time=" + str(value.get("time")))
+        if details:
+            parts.append(label + " solve " + "/".join(details))
+    return "解题诊断：" + "；".join(parts) if parts else ""
 
 
 def auto_submit_hint(value: Any) -> str:
@@ -1041,6 +1095,8 @@ class BrowserlessSigner:
             variables["triggerWait"] = int(rule.get("trigger_wait") or 500)
         if rule["mode"] != "open_page":
             variables["solveTimeout"] = solve_timeout_ms(rule)
+        if secondary_solve_enabled(rule):
+            variables["solve2Wait"] = solve2_wait_ms(rule)
         if rule["mode"] in {"image", "trigger_image"}:
             variables.update({"captchaSelector": rule["captcha_selector"],
                               "captchaInputSelector": rule["captcha_input_selector"]})
@@ -1059,8 +1115,13 @@ class BrowserlessSigner:
         if isinstance(data, SignResult):
             return data
         after_html = str((data.get("after") or {}).get("html") or "")
+        solve = data.get("solve") or {}
+        solve2 = data.get("solve2") or {}
         # auto 提交的现场诊断：token 有没有生成、回调有没有触发、表单有没有提交
         auto_hint = auto_submit_hint((data.get("autoDiag") or {}).get("value"))
+        solve_hint = solver_hint(solve, solve2)
+        if solve_hint:
+            auto_hint = f"{solve_hint}；{auto_hint}" if auto_hint else solve_hint
         # 已经等满预算却仍卡在挑战页：给出可操作的提示，而不是笼统的「打开签到页失败」
         if mode == "cloudflare" and cloudflare_pending(after_html):
             return SignResult("failed", append_hint(
@@ -1068,14 +1129,13 @@ class BrowserlessSigner:
                 "可在该站规则里调大 cloudflare_wait 后重试", auto_hint))
         if not navigation_ok(mode, data.get("goto", {}).get("status"), after_html):
             return SignResult("failed", "打开签到页失败")
-        solve = data.get("solve") or {}
         if rule["mode"] in {"image", "trigger_image"} and not solve.get("found"):
             return SignResult("failed", "未找到图片验证码；请检查验证码图片选择器")
         # Cloudflare / Turnstile 存在「solve 没解成功、但页面自己跑完 JS 也放行了」的情况
         # （观众 Audiences 就是等一会儿自动过），所以先按页面实际内容判定，最后才回落到
         # 「找到验证码但未能完成验证」。
-        solve_failed = (rule["mode"] != "open_page" and solve.get("found")
-                        and not solve.get("solved"))
+        solve_failed = (rule["mode"] != "open_page" and any(
+            item.get("found") and not item.get("solved") for item in (solve, solve2)))
         submitted = (data.get("submit") or {}).get("value")
         if rule["mode"] in {"image", "trigger_image"} and submitted in (False, "false"):
             return SignResult("failed", "验证码未自动填入输入框，未发送签到请求")

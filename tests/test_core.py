@@ -323,6 +323,10 @@ class BrowserlessAudiencesTests(unittest.TestCase):
         rule = self._rule()
         query = self.core.build_query(rule)
         self.assertIn("solve:solve", query)
+        self.assertIn("waitBetweenSolves:waitForTimeout(time:$solve2Wait)", query)
+        self.assertIn("solve2:solve(timeout:$solveTimeout)", query)
+        self.assertIn("$solve2Wait:Float!", query)
+        self.assertLess(query.index("solve2:solve"), query.index("submit:evaluate"))
         self.assertIn("submit:evaluate(content:$autoSubmit){value}", query)
         self.assertIn("$autoSubmit:String!", query)
         self.assertIn("autoDiag:evaluate", query)
@@ -338,7 +342,9 @@ class BrowserlessAudiencesTests(unittest.TestCase):
             # 预检：页面还是「未签到 + 等人机验证」
             {"goto": {"status": 200}, "before": {"html": AUDIENCES_PENDING_HTML}},
             # 主流程：等 Turnstile 自动放行；签到完成后站点跳回首页
-            {"goto": {"status": 200}, "solve": {}, "submit": {}, "response": {},
+            {"goto": {"status": 200}, "solve": {"found": True, "solved": True},
+             "solve2": {"found": True, "solved": True},
+             "submit": {}, "response": {},
              "before": {"html": AUDIENCES_PENDING_HTML},
              "after": {"html": AUDIENCES_HOME_HTML},
              "verify": {"status": 200},
@@ -348,7 +354,8 @@ class BrowserlessAudiencesTests(unittest.TestCase):
         self.assertEqual(result.status, "success")
         self.assertIn("22", result.message)
         self.assertEqual(signer.calls[1][1]["beforeWait"], 15000)
-        self.assertEqual(signer.calls[1][1]["wait"], 8000)
+        self.assertEqual(signer.calls[1][1]["solve2Wait"], 3000)
+        self.assertEqual(signer.calls[1][1]["wait"], 5000)
         self.assertEqual(signer.calls[1][1]["verifyWait"], 8000)
         self.assertEqual(signer.calls[1][1]["verifyUrl"],
                          "https://audiences.me/attendance.php")
@@ -435,7 +442,8 @@ class BrowserlessAudiencesTests(unittest.TestCase):
         # 拿不到 token 时失败原因要带上现场诊断，否则又要来回猜
         signer = self._signer([
             {"goto": {"status": 200}, "before": {"html": AUDIENCES_PENDING_HTML}},
-            {"goto": {"status": 200}, "solve": {"found": True, "solved": False},
+            {"goto": {"status": 200}, "solve": {"found": True, "solved": True},
+             "solve2": {"found": True, "solved": False},
              "submit": {}, "response": {},
              "autoDiag": {"value": json.dumps(
                  {"token": False, "cb": None, "form": False, "act": None, "post": None},
@@ -448,6 +456,7 @@ class BrowserlessAudiencesTests(unittest.TestCase):
         result = signer.sign(self.site, self._rule())
         self.assertEqual(result.status, "failed")
         self.assertIn("submit:evaluate(content:$autoSubmit)", signer.queries[1])
+        self.assertIn("solve2:solve", signer.queries[1])
         self.assertNotIn("$submit:", signer.queries[1])
         script = signer.calls[1][1]["autoSubmit"]
         self.assertIn("cf-turnstile-response", script)
@@ -461,13 +470,19 @@ class BrowserlessAudiencesTests(unittest.TestCase):
         self.assertIn("__ptsignin_auto", script)
         self.assertIn("未拿到 Turnstile token", result.message)
         self.assertIn("页面没有 data-callback 回调", result.message)
+        self.assertIn("解题诊断", result.message)
+        self.assertIn("二次 solve", result.message)
 
     def test_auto_submit_script_waits_token_with_rule_budget(self):
         script = self.core._turnstile_auto_script(self._rule())
         self.assertIn("Date.now() + 15000", script)
         self.assertEqual(self.core.auto_wait_ms({"auto_wait": 1}), 3000)
         self.assertEqual(self.core.auto_wait_ms({}), 20000)
-        self.assertEqual(self.core.solve_timeout_ms(self._rule()), 30000)
+        self.assertEqual(self.core.solve_timeout_ms(self._rule()), 20000)
+        self.assertEqual(self.core.solve2_wait_ms({"solve2_wait": 1}), 1000)
+        self.assertEqual(self.core.solve2_wait_ms({}), 3000)
+        self.assertTrue(self.core.secondary_solve_enabled(self._rule()))
+        self.assertFalse(self.core.secondary_solve_enabled({"mode": "cloudflare"}))
 
     def test_diagnostics_report_callback_and_post(self):
         hint = self.core.auto_submit_hint(json.dumps(
