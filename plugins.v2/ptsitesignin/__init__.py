@@ -15,9 +15,11 @@ from __future__ import annotations
 
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timedelta
+from threading import Thread
 from typing import Any, Dict, List, Optional, Tuple
 
+from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from app.plugins import _PluginBase
 
@@ -50,7 +52,7 @@ class PTSiteSignIn(_PluginBase):
     plugin_name = "PT站点签到"
     plugin_desc = "双引擎 PT 签到：HTTP 直连签到接口，或经 Browserless 完成验证码 / Cloudflare / Turnstile 挑战。"
     plugin_icon = "signin.png"
-    plugin_version = "1.0.1"
+    plugin_version = "1.0.2"
     plugin_author = "qingyu"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "ptsignin_"
@@ -72,8 +74,10 @@ class PTSiteSignIn(_PluginBase):
     _browserless_timeout = 100
     _site_rules = ""
     _run_once = False
+    _run_once_scheduler: Optional[BackgroundScheduler] = None
 
     def init_plugin(self, config: Optional[dict] = None) -> None:
+        self.stop_service()
         config = config or {}
         self._enabled = bool(config.get("enabled", False))
         self._notify_mode = self._parse_notify_mode(config)
@@ -94,7 +98,33 @@ class PTSiteSignIn(_PluginBase):
         if self._run_once:
             self._run_once = False
             self.update_config(self._config())
-            self.run_sign_in()
+            self._start_run_once()
+
+    def _start_run_once(self) -> None:
+        """「保存后立即执行一次」：延后几秒交给后台调度器执行，不阻塞保存配置的请求。
+
+        与官方插件（alidnsddns、hdbluesignin）做法一致——不在 init_plugin 里同步跑长任务，
+        否则 MP 保存配置的请求会被签到（尤其是失败重试的等待）一直占住，表现为设置页卡死。
+        """
+        try:
+            scheduler = BackgroundScheduler()
+            scheduler.add_job(func=self._run_once_task, trigger="date",
+                              run_date=datetime.now() + timedelta(seconds=3),
+                              name="PT站点签到 立即执行一次")
+            scheduler.start()
+        except Exception:
+            logger.exception("PT站点签到：后台调度器启动失败，改用线程执行")
+            Thread(target=self._run_once_task, daemon=True).start()
+            return
+        self._run_once_scheduler = scheduler
+        logger.info("PT站点签到：保存后立即执行一次，将在 3 秒后于后台开始")
+
+    def _run_once_task(self) -> None:
+        """后台任务：只跑一遍签到，跳过失败重试的等待。"""
+        try:
+            self.run_sign_in(allow_retry=False)
+        except Exception:
+            logger.exception("PT站点签到：保存后立即执行失败")
 
     def _config(self) -> Dict[str, Any]:
         return {
@@ -396,7 +426,8 @@ class PTSiteSignIn(_PluginBase):
         with ThreadPoolExecutor(max_workers=workers) as executor:
             return list(executor.map(lambda info: self._sign_one(info, rules, signer), infos))
 
-    def run_sign_in(self) -> None:
+    def run_sign_in(self, allow_retry: bool = True) -> None:
+        """执行一轮签到。allow_retry=False 时跳过失败重试的等待（手动触发用）。"""
         try:
             all_sites = {site.id: site for site in SiteOper().list_order_by_pri()}
         except Exception as error:
@@ -431,7 +462,8 @@ class PTSiteSignIn(_PluginBase):
 
         results = self._run_batch(infos, rules, signer)
         result_by_key = {r.get("state_key") or r.get("site"): r for r in results}
-        for attempt in range(1, self._retry_count + 1):
+        retry_times = self._retry_count if allow_retry else 0
+        for attempt in range(1, retry_times + 1):
             failed_infos = [info for info, result in zip(infos, results)
                             if result.get("status") == "failed"]
             if not failed_infos:
@@ -478,4 +510,13 @@ class PTSiteSignIn(_PluginBase):
                           text=f"{head}\n\n{detail}")
 
     def stop_service(self) -> None:
+        """插件停用 / 重载时清理自有的「立即执行」调度器。"""
+        scheduler, self._run_once_scheduler = self._run_once_scheduler, None
+        if scheduler is not None:
+            try:
+                scheduler.remove_all_jobs()
+                if scheduler.running:
+                    scheduler.shutdown(wait=False)
+            except Exception:
+                logger.warning("PT站点签到：清理立即执行调度器时出错")
         return None
