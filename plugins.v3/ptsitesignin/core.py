@@ -21,6 +21,13 @@ DEFAULT_ALREADY_PATTERN = r"(今日已签|已连续签到|已经签到|已签到
 COOKIE_INVALID_PATTERN = r"(用户登录|會員登入|请先登录|请登录|login\.php)"
 # Cloudflare 挑战页特征（出现即说明请求未穿透盾，需改用 Browserless）
 CLOUDFLARE_PATTERN = r"(just a moment|cf-chl-widget|cf_chl_opt|challenge-platform)"
+# 图片验证码 / 人机校验特征（HTTP 直连拿不到结果，需改用 Browserless）
+CAPTCHA_PATTERN = (
+    r"(captcha\.php|<img[^>]+captcha"
+    r"|id\s*=\s*[\"']?(?:captcha|imagestring|imagehash|verifycode|imagecode)[\"']?"
+    r"|name\s*=\s*[\"']?(?:imagestring|imagehash|verifycode|imagecode|answer|captcha)[\"']?"
+    r"|验证码|驗證碼)"
+)
 # 签到奖励提取：按「获得 22 粒爆米花」「魔力值 +30」「签到已得 22」等常见文案取第一个命中（含繁体）
 BONUS_PATTERNS = (
     r"((?:获得|獲得|獲取)\s*[\d,]+(?:\.\d+)?\s*(?:个|粒|枚|点|個|顆)?\s*(?:魔力值|爆米花|积分|做种积分|金币|奖励))",
@@ -155,6 +162,7 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
 class SignResult:
     status: str   # success / already / failed
     message: str
+    challenge: str = ""   # "" / cloudflare / captcha：HTTP 失败时提示该站可改用浏览器引擎
 
 
 # ------------------------------------------------------------------ 公共工具
@@ -203,9 +211,14 @@ def resolve_rule(site: Mapping[str, Any], custom_rules: Mapping[str, Mapping[str
         preset = DEFAULT_RULES["open.cd"]
     rule = dict(preset or {})
     rule.update(custom)
-    rule["engine"] = str(rule.get("engine") or default_engine or "http").lower()
+    # 只有用户在自定义规则里显式声明 engine 才算「手工指定」；内置预设声明的 http
+    # 仍允许在遇盾 / 验证码时自动回退到浏览器引擎
+    user_engine = str(custom.get("engine") or "").strip().lower()
+    declared_engine = str(rule.get("engine") or "").strip().lower()
+    rule["engine"] = declared_engine or str(default_engine or "http").lower()
     if rule["engine"] not in {"http", "browserless"}:
         raise ValueError("签到引擎只能是 http 或 browserless")
+    rule["auto_fallback"] = not user_engine
     if rule["engine"] == "http":
         rule.setdefault("path", DEFAULT_HTTP_PATH)
         rule.setdefault("success", DEFAULT_SUCCESS_PATTERN)
@@ -246,6 +259,29 @@ def validate_rule(rule: Mapping[str, Any]) -> Dict[str, Any]:
                 raise ValueError("Altcha 规则缺少 " + name)
     # cloudflare / turnstile：仅允许自动检测，不允许手工指定 solve 类型
     return result
+
+
+# 挑战类型 → Browserless 签到方式
+FALLBACK_MODES = {"cloudflare": "cloudflare", "captcha": "open_page"}
+
+
+def fallback_rule(rule: Mapping[str, Any], challenge: str) -> Dict[str, Any]:
+    """由 HTTP 规则派生一份 Browserless 回退规则。
+
+    用于「没有写规则的站点」：HTTP 直连遇 Cloudflare / 验证码时，自动改用浏览器引擎
+    再试一次。Cloudflare 走 ``cloudflare`` 自动过盾；验证码走 ``open_page``（浏览器
+    打开签到页，部分站点在真实浏览器环境下不再要求验证码或可直接完成签到）。
+    """
+    fallback: Dict[str, Any] = {
+        "engine": "browserless",
+        "mode": FALLBACK_MODES.get(str(challenge), "open_page"),
+        "path": str(rule.get("path") or DEFAULT_HTTP_PATH),
+        "submit_selector": "input[type='submit']",
+        "already_keywords": [],
+    }
+    if rule.get("route_fragment"):
+        fallback["route_fragment"] = rule["route_fragment"]
+    return validate_rule(fallback)
 
 
 # =============================================================== HTTP 引擎
@@ -325,8 +361,7 @@ def judge_http(content: str, rule: Mapping[str, Any]) -> SignResult:
     # 完整页面匹配：Audiences 等站的判定文案位于页面较后位置，按 20000 字符截断会漏掉
     text = content[:200000]
     if re.search(CLOUDFLARE_PATTERN, text, re.IGNORECASE):
-        return SignResult("failed", "站点返回 Cloudflare 验证页，请在自定义站点规则中用 "
-                                    '{"engine":"browserless","mode":"cloudflare","path":"/attendance.php"} 覆盖')
+        return SignResult("failed", "站点返回 Cloudflare 验证页", challenge="cloudflare")
     if re.search(COOKIE_INVALID_PATTERN, text, re.IGNORECASE) and "logout" not in text.lower():
         return SignResult("failed", "Cookie 无效或已过期")
     already = str(rule.get("already") or DEFAULT_ALREADY_PATTERN)
@@ -350,6 +385,8 @@ def judge_http(content: str, rule: Mapping[str, Any]) -> SignResult:
             return SignResult("success", f"{message}（{bonus}）" if bonus else message)
         if state in {"false", "fail", "failed", "error"}:
             return SignResult("failed", str(data.get("msg") or data.get("error") or "站点返回签到失败"))
+    if re.search(CAPTCHA_PATTERN, text, re.IGNORECASE):
+        return SignResult("failed", "页面要求填写验证码", challenge="captcha")
     return SignResult("failed", f"未匹配到签到成功标志；{page_hint(text)}")
 
 

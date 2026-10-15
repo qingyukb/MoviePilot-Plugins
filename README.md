@@ -13,7 +13,9 @@
 | **HTTP 直连** | `requests` 请求签到接口（NexusPHP `attendance.php`） | 普通站点、无验证码的签到 |
 | **Browserless** | BrowserQL 驱动真实浏览器，自动解题 / 点击 / 提交 | 图片验证码、Cloudflare、Turnstile 点击打勾、弹窗签到、Altcha |
 
-默认全局走 HTTP（免费、毫秒级），可在「自定义站点规则 JSON」中用 `engine` 字段为单个站点单独切换到 Browserless。
+默认走 HTTP 直连（免费、毫秒级）。需要图片验证码 / Cloudflare / Turnstile 的站点由内置预设自动切到 Browserless，也可在「自定义站点规则 JSON」中用 `engine` 字段手工指定；**未写规则的站点**在 HTTP 直连撞上 Cloudflare 或验证码时，会自动改用 Browserless 重试一次（可在插件设置中关闭）。
+
+> Browserless 用的是官方云服务，免费额度 1000 units/月。注册账号、复制 Token 的具体步骤见 [插件 README「如何获取 Browserless Token」](plugins.v2/ptsitesignin/README.md#如何获取-browserless-token)。
 
 - V2：[`plugins.v2/ptsitesignin`](plugins.v2/ptsitesignin)
 - V3：[`plugins.v3/ptsitesignin`](plugins.v3/ptsitesignin)
@@ -23,6 +25,7 @@
 - 复用 MoviePilot 已保存的站点 Cookie 与 UA，无需重复填账号
 - 内置 Audiences、OpenCD、包子、慕雪阁、OshenPT、LuckPT、YemaPT、HDSky、dstudio.me、mua.xloli.cc、share.ilolicon.com 的签到预设，按域名自动匹配
 - Cron 定时执行、保存后立即执行一次、并发控制、失败重试
+- 未写规则的站点遇 Cloudflare / 验证码时自动回退到浏览器引擎重试，无需手工配规则
 - 插件详情页统计表（站点 / 方式 / 状态 / 时间 / 结果，含实际奖励如爆米花 / 魔力值）+ 通知模式三档（每次执行后 / 仅失败时 / 不通知）
 - Cookie 与 Token 不写入日志，签到结果按天留存
 

@@ -5,6 +5,9 @@
   2. Browserless 引擎 —— 通过 Browserless BrowserQL 打开真实浏览器完成
      图片验证码、Cloudflare / Turnstile 挑战、弹窗签到与 Altcha 验证。
 
+引擎默认按站点规则自动判定；未显式声明引擎的站点在 HTTP 直连撞上 Cloudflare
+或验证码时，会自动改用 Browserless 重试一次（可在配置中关闭）。
+
 参考 tmzg0000/moviepilot-plugins 的插件规范编写。
 """
 
@@ -34,6 +37,7 @@ from .core import (
     DEFAULT_BROWSERLESS_URL,
     BrowserlessSigner,
     SignResult,
+    fallback_rule,
     http_sign,
     parse_rules,
     resolve_rule,
@@ -46,7 +50,7 @@ class PTSiteSignIn(_PluginBase):
     plugin_name = "PT站点签到"
     plugin_desc = "双引擎 PT 签到：HTTP 直连签到接口，或经 Browserless 完成验证码 / Cloudflare / Turnstile 挑战。"
     plugin_icon = "signin.png"
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.1"
     plugin_author = "qingyu"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "ptsignin_"
@@ -62,6 +66,7 @@ class PTSiteSignIn(_PluginBase):
     _retry_delay_minutes = 10
     _retry_count = 1
     _proxy = False
+    _fallback_browserless = True
     _browserless_url = DEFAULT_BROWSERLESS_URL
     _browserless_token = ""
     _browserless_timeout = 100
@@ -80,6 +85,7 @@ class PTSiteSignIn(_PluginBase):
         self._retry_count = max(0, min(int(1 if retry_count in (None, "") else retry_count), 5))
         self._retry_delay_minutes = max(1, min(int(config.get("retry_delay_minutes") or 10), 1440))
         self._proxy = bool(config.get("proxy", False))
+        self._fallback_browserless = bool(config.get("fallback_browserless", True))
         self._browserless_url = str(config.get("browserless_url") or DEFAULT_BROWSERLESS_URL).strip()
         self._browserless_token = str(config.get("browserless_token") or "").strip()
         self._browserless_timeout = max(15, min(int(config.get("browserless_timeout") or 100), 300))
@@ -101,6 +107,7 @@ class PTSiteSignIn(_PluginBase):
             "retry_count": self._retry_count,
             "retry_delay_minutes": self._retry_delay_minutes,
             "proxy": self._proxy,
+            "fallback_browserless": self._fallback_browserless,
             "browserless_url": self._browserless_url,
             "browserless_token": self._browserless_token,
             "browserless_timeout": self._browserless_timeout,
@@ -152,11 +159,15 @@ class PTSiteSignIn(_PluginBase):
         ]
         return [{"component": "VForm", "content": [
             {"component": "VRow", "content": [
-                {"component": "VCol", "props": {"cols": 12, "md": 4},
+                {"component": "VCol", "props": {"cols": 12, "md": 3},
                  "content": [{"component": "VSwitch", "props": {"model": "enabled", "label": "启用插件"}}]},
-                {"component": "VCol", "props": {"cols": 12, "md": 4},
+                {"component": "VCol", "props": {"cols": 12, "md": 3},
                  "content": [{"component": "VSwitch", "props": {"model": "proxy", "label": "HTTP 引擎使用代理"}}]},
-                {"component": "VCol", "props": {"cols": 12, "md": 4},
+                {"component": "VCol", "props": {"cols": 12, "md": 3},
+                 "content": [{"component": "VSwitch", "props": {"model": "fallback_browserless",
+                             "label": "遇验证码 / CF 自动用浏览器",
+                             "hint": "仅对未声明引擎的站点生效，需填写 Browserless Token", "persistent-hint": True}}]},
+                {"component": "VCol", "props": {"cols": 12, "md": 3},
                  "content": [{"component": "VSwitch", "props": {"model": "run_once", "label": "保存后立即执行一次"}}]},
             ]},
             {"component": "VRow", "content": [
@@ -193,7 +204,7 @@ class PTSiteSignIn(_PluginBase):
             ]},
             {"component": "VDivider", "props": {"class": "my-4"}},
             {"component": "VAlert", "props": {"type": "info", "variant": "tonal", "density": "compact"},
-             "content": [{"component": "span", "text": "引擎按站点规则自动判定：需要图片验证码、Cloudflare / Turnstile 挑战、弹窗签到或 Altcha 的站点自动走 Browserless（内置预设已声明，也可在下方自定义规则中用 engine 指定），其余站点一律走 HTTP 直连、不消耗额度。首次使用 Browserless 请先 "},
+             "content": [{"component": "span", "text": "引擎按站点规则自动判定：需要图片验证码、Cloudflare / Turnstile 挑战、弹窗签到或 Altcha 的站点自动走 Browserless（内置预设已声明，也可在下方自定义规则中用 engine 指定），其余站点一律走 HTTP 直连、不消耗额度；未声明引擎的站点若 HTTP 直连撞上 Cloudflare 或验证码，会自动改用浏览器引擎重试一次（可在上方关闭）。首次使用 Browserless 请先 "},
                          {"component": "a", "props": {"href": "https://www.browserless.io/signup/email?plan=free",
                                                       "target": "_blank", "rel": "noopener noreferrer"},
                           "text": "注册 Browserless 账号"},
@@ -296,16 +307,22 @@ class PTSiteSignIn(_PluginBase):
         return {key: getattr(site, key, None)
                 for key in ("id", "name", "url", "cookie", "ua", "proxy", "rule")}
 
-    @staticmethod
-    def _needs_browserless(infos: List[Dict[str, Any]],
+    def _should_init_signer(self, infos: List[Dict[str, Any]],
                            rules: Dict[str, Dict[str, Any]]) -> bool:
-        """按最终生效的站点规则判断是否需要初始化 Browserless 引擎。"""
+        """按最终生效的站点规则判断是否需要初始化 Browserless 引擎。
+
+        两类站点需要浏览器：① 规则显式声明 engine=browserless；
+        ② 未声明引擎且开启自动回退的 HTTP 站点（遇盾 / 验证码时会改用浏览器）。
+        """
         for info in infos:
             try:
-                if str(resolve_rule(info, rules).get("engine")) == "browserless":
-                    return True
+                rule = resolve_rule(info, rules)
             except ValueError:
                 continue
+            if str(rule.get("engine")) == "browserless":
+                return True
+            if self._fallback_browserless and rule.get("auto_fallback"):
+                return True
         return False
 
     def _sign_one(self, info: Dict[str, Any], rules: Dict[str, Dict[str, Any]],
@@ -324,6 +341,8 @@ class PTSiteSignIn(_PluginBase):
             else:
                 outcome = http_sign(info, rule, timeout=self._timeout,
                                     proxies=self._proxies() if self._proxy else None)
+                if outcome.status == "failed" and outcome.challenge:
+                    outcome, engine = self._maybe_fallback(info, rule, outcome, signer)
         except ValueError as error:
             outcome = SignResult("failed", str(error))
         except Exception:
@@ -336,6 +355,29 @@ class PTSiteSignIn(_PluginBase):
         return {"site": site_name, "site_id": str(info.get("id") or ""),
                 "state_key": site_state_key(info), "engine": engine,
                 "status": outcome.status, "message": outcome.message, "ran_at": self._now()}
+
+    def _maybe_fallback(self, info: Dict[str, Any], rule: Dict[str, Any], outcome: SignResult,
+                        signer: Optional[BrowserlessSigner]) -> Tuple[SignResult, str]:
+        """HTTP 直连撞上 Cloudflare / 验证码时，自动改用 Browserless 重试一次。
+
+        只对未显式声明引擎的站点生效（rule 的 auto_fallback），并可在配置里整体关闭。
+        返回（结果, 实际使用的引擎）。
+        """
+        if not (self._fallback_browserless and rule.get("auto_fallback")):
+            return outcome, "http"
+        label = "Cloudflare 验证" if outcome.challenge == "cloudflare" else "验证码"
+        if signer is None:
+            return SignResult("failed", f"{outcome.message}；检测到{label}，但未配置 Browserless 地址或 Token"), "http"
+        site_name = str(info.get("name") or info.get("url") or "未知站点")
+        logger.info("PT站点签到：%s 检测到%s，自动改用 Browserless 重试", site_name, label)
+        try:
+            fallback = fallback_rule(rule, outcome.challenge)
+        except ValueError as error:
+            return SignResult("failed", f"{outcome.message}；回退规则无效：{error}"), "http"
+        retry = signer.sign(info, fallback)
+        if retry.status in {"success", "already"}:
+            return SignResult(retry.status, f"{retry.message}（已自动改用浏览器引擎通过{label}）"), "browserless"
+        return SignResult("failed", f"{outcome.message}；浏览器引擎重试未通过：{retry.message}"), "browserless"
 
     @staticmethod
     def _proxies() -> Optional[Dict[str, str]]:
@@ -375,7 +417,7 @@ class PTSiteSignIn(_PluginBase):
 
         infos = [self._site_dict(site) for site in selected]
         signer: Optional[BrowserlessSigner] = None
-        if self._needs_browserless(infos, rules):
+        if self._should_init_signer(infos, rules):
             if not self._browserless_token or not self._browserless_url:
                 logger.warning("PT站点签到：未配置 Browserless 地址或 Token，相关站点将失败")
             else:

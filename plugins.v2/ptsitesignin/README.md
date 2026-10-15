@@ -7,7 +7,7 @@
 | **HTTP 直连** | `requests` 请求签到接口（NexusPHP `attendance.php`） | 普通站点、无验证码的标签到 | 免费、毫秒级 |
 | **Browserless** | BrowserQL 驱动真实浏览器，自动解题/点击/提交 | 图片验证码、Cloudflare、**Turnstile 点击打勾**、弹窗签到、Altcha | 消耗 Browserless 额度 |
 
-默认走 HTTP 直连；内置预设或「自定义站点规则 JSON」中用 `engine` 声明为 `browserless` 的站点会自动改用浏览器引擎，其余站点一律 HTTP，无需手动切换全局引擎。
+默认走 HTTP 直连；内置预设或「自定义站点规则 JSON」中用 `engine` 声明为 `browserless` 的站点会自动改用浏览器引擎，其余站点一律 HTTP，无需手动切换全局引擎。**未声明引擎的站点**在 HTTP 直连遇到 Cloudflare 或图片验证码时，会自动改用 Browserless 重试一次（可在配置中关闭，见下「自动回退到浏览器引擎」）。
 
 > Browserless 部分参考并精简自 tmzg0000 的 `captchasignin` 插件，保留其验证码求解、页面预检与 AJAX 结果判定逻辑。
 
@@ -34,7 +34,7 @@ ptsitesignin/
 - 请求 `站点域名 + path`，默认 `/attendance.php`
 - 判定顺序：Cloudflare 验证页 → 登录页特征 → `already` 正则 → `success` 正则 → JSON `state` 字段
 - 奖励显示：成功 / 已签到时自动提取奖励文案（如「获得 22 粒爆米花」「魔力值 +30」）显示在结果与通知中；规则里的 `bonus` 正则可覆盖默认模板（捕获组内容即显示文本）
-- 遇 Cloudflare 人机验证时直接提示「站点返回 Cloudflare 验证页」，改用 `{"engine":"browserless","mode":"cloudflare","path":"/attendance.php"}`
+- 遇 Cloudflare 人机验证或图片验证码时返回对应标记，未声明引擎的站点会自动改用浏览器重试（见下「自动回退到浏览器引擎」）
 - 正则默认：`success` 匹配 `state:success / 签到成功 / 簽到成功`，`already` 匹配 `今日已签 / 已连续签到 / already`
 - 可在规则里加 `"method": "POST"` 改成 POST 提交
 
@@ -42,11 +42,43 @@ ptsitesignin/
 
 | 站点 | path | 说明 |
 |---|---|---|
-| Audiences (`audiences.me`) | `/attendance.php` | GET 即完成签到；成功判定「签到成功」，已签到判定「您今天已经签到过了」。若被 Cloudflare 拦截，改用 `{"engine":"browserless","mode":"cloudflare","path":"/attendance.php"}` |
+| Audiences (`audiences.me`) | `/attendance.php` | GET 即完成签到；成功判定「签到成功」，已签到判定「您今天已经签到过了」。被 Cloudflare 拦截时会自动回退到浏览器引擎 |
+
+## 自动回退到浏览器引擎
+
+只要站点**没有在自定义规则里声明 `engine`**（内置预设自带的默认值不算手工指定），HTTP 直连失败时若命中以下特征，会自动改用 Browserless 再试一次：
+
+| HTTP 引擎检测到 | 自动回退方式 |
+|---|---|
+| Cloudflare 验证页（`just a moment` / `cf-chl-widget` / `challenge-platform` 等） | 浏览器打开签到页并自动通过挑战（`mode=cloudflare`） |
+| 页面要求图片验证码（`captcha.php` / `id="captcha"` / `name="imagestring"` / 「验证码」等） | 浏览器打开签到页（`mode=open_page`） |
+
+- 每个站点每轮只回退一次，且仅在 HTTP 判定为失败时触发；需要已填写 Browserless Token，未填写时结果会明确提示。
+- 可在插件设置中用「遇验证码 / CF 自动用浏览器」开关整体关闭。
+- 只有你在**自定义规则**里显式写了 `"engine": "http"` 的站点不回退（尊重手工配置）；内置预设的 HTTP 站点（如 Audiences）仍会自动回退。
+
+> 图片验证码场景走 `open_page`：真实浏览器打开签到页后，部分站点不再要求验证码或可直接完成签到。
+> 若该站确实需要填图片验证码，请在自定义规则中配置 `mode=image` 与 `captcha_selector` / `captcha_input_selector`。
 
 ## Browserless 引擎
 
-内置站点预设（自动识别域名，无需手写规则）：
+### 如何获取 Browserless Token
+
+1. 打开账号面板 <https://browserless.io/account/>，用邮箱注册（免费额度 **1000 units/月**，不需要信用卡）。
+2. 登录后，面板**首页的「API Key」卡片**就显示你的 Token（默认打码，点眼睛图标显示、点复制按钮复制）；卡片上的 **Manage API keys** 可新建 / 管理多个 Token。
+3. 回到 MoviePilot 插件设置，把 Token 粘贴到 **Browserless Token**，地址保持默认 `https://production-sfo.browserless.io` 即可 —— 插件会自动补全 `/stealth/bql` 并带上 `?token=`。
+4. 保留「遇验证码 / CF 自动用浏览器」开关为开启（默认开），未写规则的站点遇到 Cloudflare 或验证码时会自动调用它。
+
+要点：
+
+- 免费额度 1000 units/月，一次签到通常消耗几十 units；可在面板查看已用量与剩余额度。
+- 官方区域端点：美西 `production-sfo.browserless.io`（默认）、欧洲 `production-ams.browserless.io`，按目标站点就近选择成功率更高。
+- 自建 Browserless（Docker）时：地址填你的服务根地址（如 `http://192.168.1.10:3000`），Token 填启动时 `-e TOKEN=xxx` 设置的值。
+- Token 只保存在 MoviePilot 插件配置里，不会写入日志与签到结果。
+
+### 内置站点预设
+
+自动识别域名，无需手写规则：
 
 | 站点 | mode | 说明 |
 |---|---|---|
@@ -86,6 +118,7 @@ ptsitesignin/
 | HTTP 超时 | 秒 | 30 |
 | 失败重试次数 / 等待分钟 | 额外重试次数与间隔 | 1 次 / 10 分钟 |
 | HTTP 引擎使用代理 | 复用 MoviePilot 全局代理 | 关 |
+| 遇验证码 / CF 自动用浏览器 | 未声明引擎的站点 HTTP 撞上 CF / 验证码时自动换浏览器重试 | 开 |
 | Browserless 地址 / Token / 超时 | Browserless 连接参数 | 官方地址 / 空 / 100 秒 |
 | 自定义站点规则 | JSON | 空 |
 

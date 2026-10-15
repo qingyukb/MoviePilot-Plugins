@@ -3,12 +3,13 @@
     "name": "PT站点签到",
     "description": "双引擎 PT 签到：HTTP 直连签到接口，或经 Browserless 完成图片验证码 / Cloudflare / Turnstile 挑战。",
     "labels": "站点,签到",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "icon": "https://raw.githubusercontent.com/qingyukb/MoviePilot-Plugins/main/icons/ptsignin.png",
     "author": "qingyu",
     "level": 2,
     "system_version": ">=2.0.0,<3.0.0",
     "history": {
+      "v1.0.1": "未声明引擎的站点在 HTTP 直连遇到 Cloudflare 验证页或图片验证码时，自动改用 Browserless 重试一次（新增配置开关，默认开启）；已显式声明 engine=http 的站点不受影响",
       "v1.0.0": "初始版本：attendance.php 标准签到、自定义规则 JSON、并发与失败重试、结果统计页"
     }
   }
