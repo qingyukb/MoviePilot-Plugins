@@ -39,11 +39,11 @@ ptsitesignin/
 - 正则默认：`success` 匹配 `state:success / 签到成功 / 簽到成功`，`already` 匹配 `今日已签 / 已连续签到 / already`
 - 可在规则里加 `"method": "POST"` 改成 POST 提交
 
-内置 HTTP 站点预设（按域名自动匹配，无需手写规则）：
+内置站点预设（按域名自动匹配，无需手写规则）：
 
 | 站点 | path | 说明 |
 |---|---|---|
-| Audiences (`audiences.me`) | `/attendance.php` | GET 即完成签到；成功判定「签到成功」，已签到判定「您今天已经签到过了」；成功页同时含「您已连续签到 N 天」时优先判成功。该站常驻 Cloudflare「Just a moment...」交互挑战，会自动回退到浏览器引擎并在页面上等待挑战自动放行（默认 10 秒）|
+| Audiences (`audiences.me`) | `/attendance.php` | Vue + Cloudflare Turnstile 签到页，**没有提交按钮**；验证通过后由页面 JS 自动提交。预设直接走 Browserless（`submit_method=none`），并在页面等待组件自动通过和签到请求完成（`cloudflare_wait=15` / `wait=8000`）。成功页常同时出现奖励文案与已签到状态，插件会按本轮页面变化确认结果 |
 
 ## 并发与失败重试
 
@@ -62,17 +62,17 @@ ptsitesignin/
 
 - 每个站点每轮只回退一次，且仅在 HTTP 判定为失败时触发；需要已填写 Browserless Token，未填写时结果会明确提示。
 - 可在插件设置中用「遇验证码 / CF 自动用浏览器」开关整体关闭。
-- 只有你在**自定义规则**里显式写了 `"engine": "http"` 的站点不回退（尊重手工配置）；内置预设的 HTTP 站点（如 Audiences）仍会自动回退。
+- 只有你在**自定义规则**里显式写了 `"engine": "http"` 的站点不回退（尊重手工配置）；内置预设里声明 `engine=http` 的站点仍会自动回退。
 
 ### Cloudflare「Just a moment...」交互挑战
 
-观众（Audiences）这类站点用的是 Cloudflare 的 **JS 交互挑战**（页面标题 `Just a moment...`，正文带 `_cf_chl_opt` / `chl_page`）。它**不需要人工点击**：真实浏览器只要在页面上等几秒，挑战会自己跑完 JS 并跳到真实页面。插件为此做了三件事：
+部分站点使用 Cloudflare 的 **JS 交互挑战**（页面标题 `Just a moment...`，正文带 `_cf_chl_opt` / `chl_page`）。它**不需要人工点击**：真实浏览器只要在页面上等几秒，挑战会自己跑完 JS 并跳到真实页面。插件为此做了三件事：
 
 - `mode=cloudflare` 时会在页面停留等待挑战自动放行，默认 **10 秒**；可用站点规则字段 `cloudflare_wait`（秒，范围 3–45）调整。
 - Cloudflare 挑战页是以 **403 / 503** 返回的，挑战放行后 `goto` 记录的仍是挑战页状态码，所以不能只看状态码；插件改为「状态码 + 页面是否仍带挑战特征」一起判断。
 - 等待超时且页面仍是挑战页时，结果会明确提示「Cloudflare 挑战在 N 秒内未自动放行」，而不是含糊的「未匹配到签到成功标志」。
 
-> 判断「是否还卡在挑战页」只认 `just a moment` / `_cf_chl_opt` / `chl_page` 这些交互挑战**专属**标记；正常页面里的 Turnstile 组件（带 `challenge-platform` / `cf-turnstile`）不会被误判。
+> 判断「是否还卡在挑战页」只认 `just a moment` / `_cf_chl_opt` / `chl_page` 这些交互挑战**专属**标记；正常页面里的 Turnstile 组件（带 `challenge-platform` / `cf-turnstile`）不会被误判为交互挑战，而是按各自规则等待验证通过。
 
 > 云节点 / 机房 IP 更容易被反复挑战。同一站点长期过不去时，优先换节点或住宅代理，而不是一味调大 `cloudflare_wait`。
 
@@ -116,7 +116,8 @@ ptsitesignin/
 
 - Turnstile 需要执行 JS 并生成一次性 token，还要拿到 `cf_clearance` Cookie，纯 HTTP 无法伪造；
 - Browserless 使用 `solve:solve(...)`（**不限定类型**，由它自动识别挑战种类），官方支持 reCAPTCHA、hCaptcha、Cloudflare Turnstile，能点击 iframe / shadow DOM 内的复选框，并带拟人化点击、指纹规避；
-- 因此「点击打勾」这类 **Managed Challenge** 只需规则写成 `{"engine":"browserless","mode":"cloudflare","path":"/attendance.php"}` 即可，无需指定具体类型。
+- 观众（Audiences）的 Turnstile 页面**没有提交按钮**：规则必须写 `submit_method=none`，验证通过后由页面 JS 自动提交；预置规则已按此配置。
+- 普通「点击打勾」页面若另有提交按钮，可写成 `{"engine":"browserless","mode":"cloudflare","path":"/attendance.php"}`，由插件按默认 `click` 提交。
 
 注意事项：
 
@@ -140,7 +141,7 @@ ptsitesignin/
 | HTTP 引擎使用代理 | 复用 MoviePilot 全局代理 | 关 |
 | 遇验证码 / CF 自动用浏览器 | 内置预设或未声明引擎的站点 HTTP 撞上 CF / 验证码时自动换浏览器重试（手工写了 engine 的除外） | 开 |
 | Browserless 地址 / Token / 超时 | Browserless 连接参数 | 官方地址 / 空 / 100 秒 |
-| 自定义站点规则 | JSON；Cloudflare 交互挑战可用 `cloudflare_wait`（秒）覆盖默认 10 秒等待 | 空 |
+| 自定义站点规则 | JSON；Cloudflare 交互挑战可用 `cloudflare_wait`（秒）覆盖默认 10 秒；无提交按钮页面用 `submit_method: "none"` | 空 |
 
 ## 自定义规则示例
 
@@ -179,11 +180,11 @@ Browserless 站点（键可用域名或站点 ID，`engine` 会覆盖全局默�
 |---|---|
 | `mode` | `http` / `open_page` / `cloudflare` / `image` / `trigger_image` / `altcha` |
 | `submit_selector` / `submit_text` | 提交按钮选择器或按钮文字 |
-| `submit_method` | `click`（原生点击）/ `ajax` / `dom_click` / `confirm_click` / `altcha_click` |
+| `submit_method` | `click`（原生点击）/ `ajax` / `dom_click` / `confirm_click` / `altcha_click` / `none`（页面 JS 自动提交） |
 | `captcha_selector` / `captcha_input_selector` | 图片验证码图片与输入框 |
 | `trigger_selector` / `trigger_wait` | 弹窗触发按钮与等待毫秒 |
-| `preflight_path` / `wait` / `preflight_wait` | 页面预检与等待时间 |
-| `success_keywords` / `already_keywords` | 文本关键词判定（严格模式） |
+| `preflight_path` / `wait` / `preflight_wait` / `cloudflare_wait` | 页面预检、签到后等待与 Cloudflare 自动放行等待时间 |
+| `success_keywords` / `already_keywords` / `pending_keywords` | 文本关键词判定；`pending_keywords` 用于诊断仍停留在人机验证中的页面 |
 | `success_json` | 形如 `{"field":"/state","values":["success"]}` 的 AJAX JSON 判定 |
 | `strict_status_keywords` | `true` 时只认 `success_keywords`，忽略通用词 |
 

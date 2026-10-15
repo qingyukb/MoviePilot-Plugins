@@ -35,6 +35,18 @@ CF_INTERSTITIAL_HTML = (
 # 挑战放行后的真实签到页（GET 即完成签到，页面同时含「签到成功」与「已连续签到 N 天」）
 REAL_ATTENDANCE_HTML = (
     "<html><body>签到成功！您已连续签到 3 天，获得 22 粒爆米花</body></html>")
+# 观众签到页未签到状态（正文取自站点实际页面：每日签到卡片 + Turnstile 人机验证）
+AUDIENCES_PENDING_HTML = (
+    "<html><head><title>Audiences :: 签到 - Powered by NexusPHP</title></head><body>"
+    "<div>每日签到</div><p>完成人机验证即可领取今日爆米花奖励</p>"
+    "<div>人机验证</div><p>验证通过后将自动完成签到</p>"
+    "<div class=\"cf-turnstile\" data-sitekey=\"0x4AAAAAA\"></div>"
+    "<script src=\"https://challenges.cloudflare.com/turnstile/v0/api.js\"></script>"
+    "</body></html>")
+# 签到完成状态
+AUDIENCES_SIGNED_HTML = (
+    "<html><head><title>Audiences :: 签到 - Powered by NexusPHP</title></head><body>"
+    "<div>今日已签到</div><p>已获得 22 粒爆米花</p></body></html>")
 AUDIENCES_SITE = {"url": "https://audiences.me", "cookie": "a=1; b=2", "ua": ""}
 
 
@@ -60,7 +72,7 @@ class CoreRegressionTests(unittest.TestCase):
     def test_v2_and_v3_core_load(self):
         for core in CORES:
             self.assertIn("audiences.me", core.DEFAULT_RULES)
-            self.assertEqual(core.DEFAULT_RULES["audiences.me"]["engine"], "http")
+            self.assertEqual(core.DEFAULT_RULES["audiences.me"]["engine"], "browserless")
 
     def test_audiences_success_not_misreported_as_already(self):
         html = "<html><body>签到成功！您已连续签到 3 天，获得 22 粒爆米花</body></html>"
@@ -73,9 +85,15 @@ class CoreRegressionTests(unittest.TestCase):
                                       self.audiences)
         self.assertEqual(result.status, "already")
 
-    def test_audiences_rule_does_not_use_bare_already_word(self):
-        self.assertNotIn("已签到", self.audiences["already"])
-        self.assertIn("签到成功", self.audiences["success"])
+    def test_audiences_preset_uses_browser_without_submit_button(self):
+        # 观众签到页由页面 JS 在 Turnstile 回调里自动提交，页面上没有可点的提交按钮：
+        # 既不能走 HTTP 直连，也不能沿用默认的 input[type=submit] 点击
+        self.assertEqual(self.audiences["mode"], "cloudflare")
+        self.assertEqual(self.audiences["submit_method"], "none")
+        self.assertNotIn("submit_selector", self.audiences)
+        self.assertIn("签到成功", self.audiences["success_keywords"])
+        self.assertIn("已签到", self.audiences["already_keywords"])
+        self.assertTrue(self.audiences["pending_keywords"])
 
     def test_success_is_checked_before_default_already_pattern(self):
         result = self.core.judge_http("<html><body>签到成功，您已连续签到 12 天</body></html>", {})
@@ -96,6 +114,25 @@ class CoreRegressionTests(unittest.TestCase):
         result = self.core.judge_http("<html><title>Just a moment...</title></html>", {})
         self.assertEqual(result.status, "failed")
         self.assertEqual(result.challenge, "cloudflare")
+
+    def test_turnstile_page_asks_for_browser_engine(self):
+        result = self.core.judge_http(AUDIENCES_PENDING_HTML, {})
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.challenge, "cloudflare")
+
+    def test_turnstile_page_with_success_text_wins(self):
+        html = ("<html><body>签到成功<div class=\"cf-turnstile\"></div>"
+                "<script src=\"https://challenges.cloudflare.com/turnstile/v0/api.js\"></script>"
+                "</body></html>")
+        result = self.core.judge_http(html, {})
+        self.assertEqual(result.status, "success")
+
+    def test_page_hint_includes_snippet_for_long_page(self):
+        filler = "页头" * 80
+        hint = self.core.page_hint("<html><body>" + filler
+                                   + " 验证通过后将自动完成签到</body></html>")
+        self.assertIn("片段「", hint)
+        self.assertIn("自动完成签到", hint)
 
     def test_captcha_page(self):
         result = self.core.judge_http("<html><body>请输入验证码</body></html>", {})
@@ -129,7 +166,7 @@ class CoreRegressionTests(unittest.TestCase):
     def test_resolve_rule_host_and_site_id(self):
         site = {"id": "5", "url": "https://www.audiences.me"}
         preset = self.core.resolve_rule(site, {})
-        self.assertEqual(preset["engine"], "http")
+        self.assertEqual(preset["engine"], "browserless")
         self.assertEqual(preset["path"], "/attendance.php")
         self.assertEqual(self.core.resolve_rule(site, {"audiences.me": {"path": "/signin.php"}})["path"],
                          "/signin.php")
@@ -199,7 +236,8 @@ class CoreRegressionTests(unittest.TestCase):
 
 
     def test_browserless_waits_out_cloudflare_and_reports_success(self):
-        rule = self.core.fallback_rule(self.audiences, "cloudflare")
+        rule = self.core.fallback_rule(
+            {"engine": "http", "path": "/attendance.php"}, "cloudflare")
         signer = make_stub_signer(self.core, [
             # 预检仍停在挑战页：不能就此判定「打开签到页失败」
             {"goto": {"status": 403}, "before": {"html": CF_INTERSTITIAL_HTML}},
@@ -226,7 +264,8 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertEqual(len(signer.calls), 1)
 
     def test_browserless_cloudflare_timeout_reports_actionable_message(self):
-        rule = self.core.fallback_rule(self.audiences, "cloudflare")
+        rule = self.core.fallback_rule(
+            {"engine": "http", "path": "/attendance.php"}, "cloudflare")
         signer = make_stub_signer(self.core, [
             {"goto": {"status": 403}, "before": {"html": CF_INTERSTITIAL_HTML}},
             {"goto": {"status": 403}, "solve": {}, "submit": {}, "response": {},
@@ -251,6 +290,76 @@ class CoreRegressionTests(unittest.TestCase):
         result = signer.sign(AUDIENCES_SITE, rule)
         self.assertEqual(result.status, "success")
         self.assertEqual(signer.calls[1][1]["beforeWait"], 20000)
+
+
+class BrowserlessAudiencesTests(unittest.TestCase):
+    """观众（Audiences）浏览器引擎：不点按钮、等 Turnstile 自动过、按页面状态判定。"""
+
+    def setUp(self):
+        self.core = CORES[0]
+        self.site = AUDIENCES_SITE
+
+    def _rule(self):
+        return self.core.resolve_rule(self.site, {})
+
+    def _signer(self, responses):
+        return make_stub_signer(self.core, responses)
+
+    def test_query_has_no_submit_step(self):
+        rule = self._rule()
+        query = self.core.build_query(rule)
+        self.assertNotIn("submit:", query)
+        self.assertNotIn("$submit:", query)
+        self.assertNotIn("$selector", query)
+        self.assertIn("solve:solve", query)
+
+    def test_waits_for_turnstile_then_reports_success(self):
+        signer = self._signer([
+            # 预检：页面还是「未签到 + 等人机验证」
+            {"goto": {"status": 200}, "before": {"html": AUDIENCES_PENDING_HTML}},
+            # 主流程：等 Turnstile 自动放行后页面自己签完
+            {"goto": {"status": 200}, "solve": {}, "submit": {}, "response": {},
+             "before": {"html": AUDIENCES_PENDING_HTML},
+             "after": {"html": AUDIENCES_SIGNED_HTML}},
+        ])
+        result = signer.sign(self.site, self._rule())
+        self.assertEqual(result.status, "success")
+        self.assertEqual(signer.calls[1][1]["beforeWait"], 15000)
+        self.assertEqual(signer.calls[1][1]["wait"], 8000)
+        self.assertEqual(signer.calls[0][0], "CheckInPreflight")
+        self.assertEqual(signer.calls[1][0], "CheckIn")
+
+    def test_already_signed_before_run_short_circuits(self):
+        signer = self._signer([
+            {"goto": {"status": 200}, "before": {"html": AUDIENCES_SIGNED_HTML}},
+        ])
+        result = signer.sign(self.site, self._rule())
+        self.assertEqual(result.status, "already")
+        self.assertEqual(len(signer.calls), 1)
+
+    def test_still_pending_reports_actionable_failure(self):
+        signer = self._signer([
+            {"goto": {"status": 200}, "before": {"html": AUDIENCES_PENDING_HTML}},
+            {"goto": {"status": 200}, "solve": {}, "submit": {}, "response": {},
+             "before": {"html": AUDIENCES_PENDING_HTML},
+             "after": {"html": AUDIENCES_PENDING_HTML}},
+        ])
+        result = signer.sign(self.site, self._rule())
+        self.assertEqual(result.status, "failed")
+        self.assertIn("人机验证", result.message)
+        self.assertIn("自动完成签到", result.message)
+
+    def test_solved_but_page_says_signed_is_success(self):
+        # solve 报 found 但没解成功，页面其实已经签上了：不能误报失败
+        signer = self._signer([
+            {"goto": {"status": 200}, "before": {"html": AUDIENCES_PENDING_HTML}},
+            {"goto": {"status": 200}, "solve": {"found": True, "solved": False},
+             "submit": {}, "response": {},
+             "before": {"html": AUDIENCES_PENDING_HTML},
+             "after": {"html": AUDIENCES_SIGNED_HTML}},
+        ])
+        result = signer.sign(self.site, self._rule())
+        self.assertEqual(result.status, "success")
 
 
 if __name__ == "__main__":

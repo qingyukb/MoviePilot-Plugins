@@ -26,6 +26,10 @@ CLOUDFLARE_PATTERN = r"(just a moment|cf-chl-widget|cf_chl_opt|challenge-platfor
 # cf-chl-widget 判断——正常的 Turnstile 组件页也会带这些标记；挑战放行后页面会换成新
 # 文档，_cf_chl_opt / chl_page 随之消失。
 CF_INTERSTITIAL_PATTERN = r"(just a moment|_cf_chl_opt|chl_page)"
+# 页面内嵌的 Cloudflare Turnstile 人机验证组件（观众 Audiences 的签到页就是这种）：验证结果
+# 由页面 JS 在回调里生成，HTTP 直连拿不到，必须在真实浏览器里执行 JS 才能完成签到；注意与
+# 上面的「Just a moment...」交互挑战区分开——这类正常页面不带 _cf_chl_opt / chl_page。
+TURNSTILE_PATTERN = r"(cf-turnstile|turnstile/v0|turnstile\.min\.js|turnstile\.render)"
 # 等待 Cloudflare 交互挑战自动放行的默认秒数，可用站点规则字段 cloudflare_wait 覆盖。
 DEFAULT_CLOUDFLARE_WAIT = 10
 # 图片验证码 / 人机校验特征（HTTP 直连拿不到结果，需改用 Browserless）
@@ -150,25 +154,38 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "path": "/attendance.php",
         "submit_selector": "form[action*='attendance.php'] input[type='submit']",
     },
-    # ---- 纯 HTTP 直连站点（无需浏览器交互）----
+    # ---- 观众（Audiences）：签到由页面 JS 自动完成，必须走 Browserless ----
+    # 该站 /attendance.php 是一个 Vue 签到页：正文是「每日签到 / 完成人机验证即可领取今日
+    # 爆米花奖励」「人机验证 / 验证通过后将自动完成签到」，验证组件是 Cloudflare Turnstile。
+    # 签到由页面 JS 在 Turnstile 回调里**自动提交**，页面上没有可点的提交按钮；HTTP 直连
+    # （GET / POST）只会拿到未签到的页面骨架，永远匹配不到结果，所以这里直接指定浏览器引擎：
+    #   加载签到页 -> 等 Turnstile 自动放行 -> 等页面自己把签到请求发完
+    #   - submit_method=none：不需要点任何按钮，只等页面自己签完（其它站点默认仍点提交按钮）
+    #   - cloudflare_wait 调大一点（10 -> 15 秒）更稳，wait 给足页面 AJAX 时间
+    #   - pending_keywords：仍停留在「验证中」的正文特征。命中说明人机验证没通过 / 签到没提交，
+    #     此时给出明确提示，而不是含糊的「未匹配到签到成功标志」
+    #   - 判定顺序：先看成功 / 已签到关键词，再判 pending，避免已签完的页面被 pending 文案误杀
+    "audiences.me": {
+        "engine": "browserless",
+        "mode": "cloudflare",
+        "path": "/attendance.php",
+        "submit_method": "none",
+        "cloudflare_wait": 15,
+        "wait": 8000,
+        # 「已领取 / 已获得」不能作为成功标志：签到后刷新页面仍会显示奖励，
+        # 很容易把已签到状态误判成刚刚签到。
+        "success_keywords": ["签到成功", "簽到成功", "成功签到", "签到完成", "领取成功"],
+        "already_keywords": ["今日已签到", "今天已经签到", "您今天已经签到", "已经签到",
+                             "已签到", "今日已领取", "已连续签到", "明日再来", "明天再来"],
+        "pending_keywords": ["验证通过后将自动完成签到", "完成人机验证即可领取今日爆米花奖励"],
+    },
+    # ---- 未内置的站点默认走 HTTP 直连（无需浏览器交互）----
     # GET 打开签到页即完成签到，判定文案取自站点实际页面：
     #   签到成功 -> 「签到成功」；已签到 -> 「您今天已经签到过了」
     # already 只保留上述「已签到」原文案：签到成功页往往同时带「已签到 N 天」「您已连续
     # 签到 N 天」之类的状态行，一旦把裸「已签到」写进 already，新签到就会被误判成
-    # 「今日已签到」（观众 Audiences 就是这个坑）。
-    # 该站常驻 Cloudflare「Just a moment...」交互挑战：HTTP 直连会被盾挡下，插件会自动
-    # 回退到 Browserless 的 cloudflare 模式，在页面上等待挑战自动放行（默认 10 秒）。等待
-    # 不够可在自定义规则里调大，例如
-    # {"engine": "http", "path": "/attendance.php", "cloudflare_wait": 20}
-    # 若站点改版后 GET 不再直接完成签到（只返回表单），在自定义规则里加
-    # {"engine": "http", "path": "/attendance.php", "method": "POST"} 手动改成 POST 即可。
-    "audiences.me": {
-        "engine": "http",
-        "path": "/attendance.php",
-        "success": r"(签到成功|簽到成功|打卡成功|成功签到|签到已成功)",
-        "already": r"(您今天已经签到过了|您今天已经签到|今天已经签到过了|今日已经签到|明天再来|明日再来)",
-        "bonus": r"((?:签到已得|簽到已得)\s*[\d,]+(?:\s*(?:个|粒|枚|点|個|顆))?|(?:已签到|已簽到)\s*\+?\s*[\d,]+(?:\s*(?:个|粒|枚|点|個|顆))?|(?:获得|獲得|獲取)\s*[\d,]+(?:\.\d+)?\s*(?:个|粒|枚|点|個|顆)?\s*(?:魔力值|爆米花|积分|做种积分|金币|金幣|奖励|獎勵)|签到成功[^。<]{0,30}?(获得[^。<，,]{0,40}))",
-    },
+    # 「今日已签到」。
+    # 页面内嵌 Turnstile 的站点 HTTP 拿不到结果，会自动回退到 Browserless（见 judge_http）。
 }
 
 
@@ -267,6 +284,9 @@ def validate_rule(rule: Mapping[str, Any]) -> Dict[str, Any]:
                 raise ValueError("图片验证码规则缺少 " + name)
     if mode == "trigger_image" and not str(result.get("trigger_selector") or "").strip():
         raise ValueError("弹窗图片验证码规则缺少 trigger_selector")
+    if mode in {"image", "trigger_image", "altcha"} and str(
+            result.get("submit_method") or "").lower() in {"none", "skip"}:
+        raise ValueError("图片验证码 / Altcha 站点必须指定提交按钮，不能用 submit_method=none")
     if mode == "altcha":
         for name in ("altcha_checkbox_selector", "altcha_payload_selector", "submit_selector"):
             if not str(result.get(name) or "").strip():
@@ -363,6 +383,16 @@ def extract_bonus(content: str, rule: Mapping[str, Any]) -> str:
     return ""
 
 
+def snippet_around(text: str, keyword: str, width: int = 60) -> str:
+    """截取 keyword 前后的一小段正文，便于定位页面实际内容。"""
+    index = text.find(keyword)
+    if index < 0:
+        return ""
+    start = max(0, index - width)
+    end = min(len(text), index + width)
+    return ("…" if start else "") + text[start:end] + ("…" if end < len(text) else "")
+
+
 def page_hint(content: str) -> str:
     """截取响应摘要，便于判断站点到底返回了什么页面。"""
     title = re.search(r"<title[^>]*>(.*?)</title>", content, re.IGNORECASE | re.DOTALL)
@@ -372,6 +402,11 @@ def page_hint(content: str) -> str:
         parts.append("标题「" + re.sub(r"\s+", " ", title.group(1)).strip()[:60] + "」")
     if body:
         parts.append("正文「" + body[:120] + "」")
+        # 签到卡片常在页面中后段，正文前 120 字全是站点头尾时再补一段签到相关片段
+        for word in ("每日签到", "人机验证", "签到成功", "已签到", "签到"):
+            if body.find(word) > 100:
+                parts.append("片段「" + snippet_around(body, word) + "」")
+                break
     return "；".join(parts) or "响应为空"
 
 
@@ -395,6 +430,12 @@ def judge_http(content: str, rule: Mapping[str, Any]) -> SignResult:
     if re.search(already, visible, re.IGNORECASE):
         bonus = extract_bonus(text, rule)
         return SignResult("already", f"今日已签到（{bonus}）" if bonus else "今日已签到")
+    # 页面内嵌 Cloudflare Turnstile 人机验证（观众 Audiences 这类 Vue 签到页）：签到的判定
+    # 文案由 JS 在验证回调里生成，HTTP 直连拿不到，只能交给浏览器引擎。放在成功 / 已签到
+    # 之后判断，避免「已签到」页仍带 Turnstile 组件时被判成还需要验证。
+    if re.search(TURNSTILE_PATTERN, text, re.IGNORECASE):
+        return SignResult("failed", "页面需要完成 Cloudflare 人机验证（Turnstile）",
+                          challenge="cloudflare")
     # NexusPHP JSON 返回
     try:
         data = json.loads(text.strip())
@@ -515,7 +556,10 @@ def build_query(rule: Mapping[str, Any], user_agent: Optional[str] = None) -> st
     altcha = rule["mode"] == "altcha"
     verifies_success = bool(rule.get("verify_success_path"))
     needs_solver = rule["mode"] in {"image", "trigger_image", "cloudflare"}
-    native_click = str(rule.get("submit_method") or "click") == "click"
+    submit_method = str(rule.get("submit_method") or "click")
+    native_click = submit_method == "click"
+    # submit_method=none：页面在验证通过后自己提交签到（观众 Audiences 这类没有提交按钮的站点）
+    skip_submit = submit_method in {"none", "skip"}
     solve = ("solve:solveImageCaptcha(captchaSelector:$captchaSelector,inputSelector:$captchaInputSelector,timeout:$solveTimeout){found solved time}"
              if image else "solve:solve(timeout:$solveTimeout){found solved time}" if rule["mode"] == "cloudflare"
              else "solve:evaluate(content:\"'skipped'\"){value}")
@@ -523,7 +567,10 @@ def build_query(rule: Mapping[str, Any], user_agent: Optional[str] = None) -> st
     set_user_agent = "userAgent(userAgent:$userAgent){time}" if user_agent else ""
     user_agent_variable = " $userAgent:String!" if user_agent else ""
     variable_suffix = (" $solveTimeout:Float!" if needs_solver else "")
-    variable_suffix += " $selector:String!" if native_click else " $submit:String!"
+    if native_click:
+        variable_suffix += " $selector:String!"
+    elif not skip_submit:
+        variable_suffix += " $submit:String!"
     if triggered_image:
         variable_suffix += " $trigger:String! $triggerWait:Float!"
     if altcha:
@@ -551,7 +598,8 @@ def build_query(rule: Mapping[str, Any], user_agent: Optional[str] = None) -> st
             "trigger:evaluate(content:$trigger){value}\n      waitForTrigger:waitForTimeout(time:$triggerWait){time}" if triggered_image else "",
             "altcha:click(selector:$altchaSelector){selector time}" if altcha else "",
             solve,
-            "submit:click(selector:$selector){selector time}" if native_click else "submit:evaluate(content:$submit){value}",
+            "submit:click(selector:$selector){selector time}" if native_click
+            else "" if skip_submit else "submit:evaluate(content:$submit){value}",
             "verify:goto(url:$verifyUrl,waitUntil:domContentLoaded){status}\n      verifyPage:html{html}" if verifies_success else "")
 
 
@@ -571,6 +619,16 @@ def page_text(html: str) -> str:
     visible = re.sub(r"<(script|style)\b[^>]*>.*?</\1\s*>", " ", html or "",
                      flags=re.IGNORECASE | re.DOTALL)
     return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", visible)).strip()
+
+
+def first_keyword(text: str, keywords: Any) -> str:
+    """返回 keywords 里第一个出现在 text 中的词（大小写不敏感），都不命中时返回空串。"""
+    haystack = (text or "").lower()
+    for word in keywords or []:
+        needle = str(word).strip()
+        if needle and needle.lower() in haystack:
+            return needle
+    return ""
 
 
 def cloudflare_pending(html: str) -> bool:
@@ -686,6 +744,8 @@ class BrowserlessSigner:
         if isinstance(preflight, SignResult):
             return preflight
         preflight_html = str((preflight.get("before") or {}).get("html") or "")
+        # 进页面时是否还停在「验证中 / 未签到」状态（只有配了 pending_keywords 的站点才有意义）
+        pre_state_pending = False
         if cloudflare_pending(preflight_html):
             # 挑战还没放行：不要把挑战页的 403 当成「打开失败」，交给下面等待更久的主流程
             pass
@@ -695,6 +755,8 @@ class BrowserlessSigner:
             initial = classify(preflight_html, rule)
             if initial.status in {"already", "success"}:
                 return initial
+            pre_state_pending = bool(first_keyword(page_text(preflight_html),
+                                                  rule.get("pending_keywords")))
 
         submit_method = str(rule.get("submit_method") or "click")
         variables: Dict[str, Any] = {"cookies": cookies, "url": target,
@@ -702,6 +764,9 @@ class BrowserlessSigner:
                                      "wait": int(rule.get("wait") or 3500)}
         if submit_method == "click":
             variables["selector"] = rule["submit_selector"]
+        elif submit_method in {"none", "skip"}:
+            # 页面在人机验证通过后自己提交签到，不需要点任何按钮
+            pass
         else:
             variables["submit"] = (_altcha_submit_script(rule) if submit_method == "altcha_click"
                                    else _submit_script(rule["submit_selector"], submit_method,
@@ -736,8 +801,11 @@ class BrowserlessSigner:
         solve = data.get("solve") or {}
         if rule["mode"] in {"image", "trigger_image"} and not solve.get("found"):
             return SignResult("failed", "未找到图片验证码；请检查验证码图片选择器")
-        if rule["mode"] != "open_page" and solve.get("found") and not solve.get("solved"):
-            return SignResult("failed", "找到验证码但未能完成验证（Turnstile/Cloudflare 可能未通过）")
+        # Cloudflare / Turnstile 存在「solve 没解成功、但页面自己跑完 JS 也放行了」的情况
+        # （观众 Audiences 就是等一会儿自动过），所以先按页面实际内容判定，最后才回落到
+        # 「找到验证码但未能完成验证」。
+        solve_failed = (rule["mode"] != "open_page" and solve.get("found")
+                        and not solve.get("solved"))
         submitted = (data.get("submit") or {}).get("value")
         if rule["mode"] in {"image", "trigger_image"} and submitted in (False, "false"):
             return SignResult("failed", "验证码未自动填入输入框，未发送签到请求")
@@ -756,6 +824,17 @@ class BrowserlessSigner:
             before = classify(str((data.get("before") or {}).get("html") or ""), rule)
             if before.status == "already":
                 return before
+        # 配了 pending_keywords 的站点（如观众 Audiences）：页面仍停在「人机验证中」说明验证
+        # 没过或签到没提交，给出明确结论；若进页面时是未签到、跑完变成已签到，按签到成功上报。
+        pending = first_keyword(page_text(after_html), rule.get("pending_keywords"))
+        if pending and result.status not in {"success", "already"}:
+            return SignResult("failed",
+                              f"页面仍停留在「{pending}」（人机验证未通过或签到未提交）；"
+                              + page_hint(after_html))
+        if solve_failed and result.status not in {"success", "already"}:
+            return SignResult("failed", "找到验证码但未能完成验证（Turnstile/Cloudflare 可能未通过）")
+        if result.status == "already" and pre_state_pending:
+            return SignResult("success", _bonus_message("签到成功", page_text(after_html), rule))
         return result
 
     def _request(self, variables: Mapping[str, Any], operation: str, query: str) -> Any:
