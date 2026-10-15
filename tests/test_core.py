@@ -47,6 +47,10 @@ AUDIENCES_PENDING_HTML = (
 AUDIENCES_SIGNED_HTML = (
     "<html><head><title>Audiences :: 签到 - Powered by NexusPHP</title></head><body>"
     "<div>今日已签到</div><p>已获得 22 粒爆米花</p></body></html>")
+# 签到成功后站点可能跳转到的首页（正文取自插件日志）
+AUDIENCES_HOME_HTML = (
+    "<html><head><title>Audiences - Powered by NexusPHP</title></head><body>"
+    "上一页 下一页 返回顶部 签到 收件箱 发件箱</body></html>")
 AUDIENCES_SITE = {"url": "https://audiences.me", "cookie": "a=1; b=2", "ua": ""}
 
 
@@ -312,20 +316,29 @@ class BrowserlessAudiencesTests(unittest.TestCase):
         self.assertNotIn("$submit:", query)
         self.assertNotIn("$selector", query)
         self.assertIn("solve:solve", query)
+        self.assertIn("verify:goto", query)
+        self.assertIn("waitForVerify", query)
+        self.assertIn("$verifyWait", query)
 
     def test_waits_for_turnstile_then_reports_success(self):
         signer = self._signer([
             # 预检：页面还是「未签到 + 等人机验证」
             {"goto": {"status": 200}, "before": {"html": AUDIENCES_PENDING_HTML}},
-            # 主流程：等 Turnstile 自动放行后页面自己签完
+            # 主流程：等 Turnstile 自动放行；签到完成后站点跳回首页
             {"goto": {"status": 200}, "solve": {}, "submit": {}, "response": {},
              "before": {"html": AUDIENCES_PENDING_HTML},
-             "after": {"html": AUDIENCES_SIGNED_HTML}},
+             "after": {"html": AUDIENCES_HOME_HTML},
+             "verify": {"status": 200},
+             "verifyPage": {"html": AUDIENCES_SIGNED_HTML}},
         ])
         result = signer.sign(self.site, self._rule())
         self.assertEqual(result.status, "success")
+        self.assertIn("22", result.message)
         self.assertEqual(signer.calls[1][1]["beforeWait"], 15000)
         self.assertEqual(signer.calls[1][1]["wait"], 8000)
+        self.assertEqual(signer.calls[1][1]["verifyWait"], 8000)
+        self.assertEqual(signer.calls[1][1]["verifyUrl"],
+                         "https://audiences.me/attendance.php")
         self.assertEqual(signer.calls[0][0], "CheckInPreflight")
         self.assertEqual(signer.calls[1][0], "CheckIn")
 
@@ -342,12 +355,54 @@ class BrowserlessAudiencesTests(unittest.TestCase):
             {"goto": {"status": 200}, "before": {"html": AUDIENCES_PENDING_HTML}},
             {"goto": {"status": 200}, "solve": {}, "submit": {}, "response": {},
              "before": {"html": AUDIENCES_PENDING_HTML},
-             "after": {"html": AUDIENCES_PENDING_HTML}},
+             "after": {"html": AUDIENCES_PENDING_HTML},
+             "verify": {"status": 200},
+             "verifyPage": {"html": AUDIENCES_PENDING_HTML}},
         ])
         result = signer.sign(self.site, self._rule())
         self.assertEqual(result.status, "failed")
         self.assertIn("人机验证", result.message)
         self.assertIn("自动完成签到", result.message)
+
+    def test_pending_main_but_signed_verify_is_success(self):
+        signer = self._signer([
+            {"goto": {"status": 200}, "before": {"html": AUDIENCES_PENDING_HTML}},
+            {"goto": {"status": 200}, "solve": {}, "submit": {}, "response": {},
+             "before": {"html": AUDIENCES_PENDING_HTML},
+             "after": {"html": AUDIENCES_PENDING_HTML},
+             "verify": {"status": 200},
+             "verifyPage": {"html": AUDIENCES_SIGNED_HTML}},
+        ])
+        result = signer.sign(self.site, self._rule())
+        self.assertEqual(result.status, "success")
+        self.assertIn("已重新打开签到页确认签到成功", result.message)
+
+    def test_homepage_and_pending_verify_is_failure(self):
+        signer = self._signer([
+            {"goto": {"status": 200}, "before": {"html": AUDIENCES_PENDING_HTML}},
+            {"goto": {"status": 200}, "solve": {}, "submit": {}, "response": {},
+             "before": {"html": AUDIENCES_PENDING_HTML},
+             "after": {"html": AUDIENCES_HOME_HTML},
+             "verify": {"status": 200},
+             "verifyPage": {"html": AUDIENCES_PENDING_HTML}},
+        ])
+        result = signer.sign(self.site, self._rule())
+        self.assertEqual(result.status, "failed")
+        self.assertIn("二次核验", result.message)
+        self.assertIn("人机验证", result.message)
+
+    def test_homepage_and_homepage_verify_is_failure(self):
+        signer = self._signer([
+            {"goto": {"status": 200}, "before": {"html": AUDIENCES_PENDING_HTML}},
+            {"goto": {"status": 200}, "solve": {}, "submit": {}, "response": {},
+             "before": {"html": AUDIENCES_PENDING_HTML},
+             "after": {"html": AUDIENCES_HOME_HTML},
+             "verify": {"status": 200},
+             "verifyPage": {"html": AUDIENCES_HOME_HTML}},
+        ])
+        result = signer.sign(self.site, self._rule())
+        self.assertEqual(result.status, "failed")
+        self.assertIn("未显示签到成功状态", result.message)
 
     def test_solved_but_page_says_signed_is_success(self):
         # solve 报 found 但没解成功，页面其实已经签上了：不能误报失败
@@ -356,7 +411,9 @@ class BrowserlessAudiencesTests(unittest.TestCase):
             {"goto": {"status": 200}, "solve": {"found": True, "solved": False},
              "submit": {}, "response": {},
              "before": {"html": AUDIENCES_PENDING_HTML},
-             "after": {"html": AUDIENCES_SIGNED_HTML}},
+             "after": {"html": AUDIENCES_SIGNED_HTML},
+             "verify": {"status": 200},
+             "verifyPage": {"html": AUDIENCES_SIGNED_HTML}},
         ])
         result = signer.sign(self.site, self._rule())
         self.assertEqual(result.status, "success")

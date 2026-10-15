@@ -25,6 +25,7 @@
 - 复用 MoviePilot 已保存的站点 Cookie 与 UA，无需重复填账号
 - 内置 Audiences、OpenCD、包子、慕雪阁、OshenPT、LuckPT、YemaPT、HDSky、dstudio.me、mua.xloli.cc、share.ilolicon.com 的签到预设，按域名自动匹配
 - 观众（Audiences）签到页为 Vue + Cloudflare Turnstile，页面没有提交按钮；预设改为 Browserless 等待验证通过，由页面 JS 自动完成签到
+- 观众签到后会跳回首页，插件在同一浏览器会话回查 `/attendance.php`，只有看到真实的已签到 / 签到成功状态才上报成功；仍停留在人机验证页或首页无签到状态时明确报失败
 - 观众成功页的奖励文案不会再误判为「今日已签到」，预检已签到与本轮刚签到的结果会分别确认
 - Cron 定时执行、保存后立即执行一次、进程级并发控制、后台 Timer 失败重试（不阻塞执行线程）
 - 未写规则的站点遇 Cloudflare / 验证码时自动回退到浏览器引擎重试，无需手工配规则

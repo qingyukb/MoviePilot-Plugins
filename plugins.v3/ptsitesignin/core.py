@@ -172,6 +172,10 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "submit_method": "none",
         "cloudflare_wait": 15,
         "wait": 8000,
+        # 签到成功后页面可能跳回首页；同一浏览器会话重新打开 attendance.php 再确认一次，
+        # 避免只看到首页就误报失败，也避免把未完成的验证当成成功。
+        "verify_success_path": "/attendance.php",
+        "verify_wait": 8000,
         # 「已领取 / 已获得」不能作为成功标志：签到后刷新页面仍会显示奖励，
         # 很容易把已签到状态误判成刚刚签到。
         "success_keywords": ["签到成功", "簽到成功", "成功签到", "签到完成", "领取成功"],
@@ -575,8 +579,15 @@ def build_query(rule: Mapping[str, Any], user_agent: Optional[str] = None) -> st
         variable_suffix += " $trigger:String! $triggerWait:Float!"
     if altcha:
         variable_suffix += " $altchaSelector:String!"
+    verify = ""
     if verifies_success:
         variable_suffix += " $verifyUrl:String!"
+        if rule.get("verify_wait") is not None:
+            variable_suffix += " $verifyWait:Float!"
+        verify = "verify:goto(url:$verifyUrl,waitUntil:domContentLoaded){status}"
+        if rule.get("verify_wait") is not None:
+            verify += "\n      waitForVerify:waitForTimeout(time:$verifyWait){time}"
+        verify += "\n      verifyPage:html{html}"
     if extra:
         variable_suffix += " " + extra
     variable_suffix += user_agent_variable
@@ -600,7 +611,7 @@ def build_query(rule: Mapping[str, Any], user_agent: Optional[str] = None) -> st
             solve,
             "submit:click(selector:$selector){selector time}" if native_click
             else "" if skip_submit else "submit:evaluate(content:$submit){value}",
-            "verify:goto(url:$verifyUrl,waitUntil:domContentLoaded){status}\n      verifyPage:html{html}" if verifies_success else "")
+            verify)
 
 
 def build_preflight_query(user_agent: Optional[str] = None, wait: int = 2000) -> str:
@@ -784,6 +795,12 @@ class BrowserlessSigner:
                               "captchaInputSelector": rule["captcha_input_selector"]})
         if rule.get("verify_success_path"):
             variables["verifyUrl"] = target_url(base_url, str(rule["verify_success_path"]))
+            if rule.get("verify_wait") is not None:
+                try:
+                    verify_wait = int(rule.get("verify_wait"))
+                except (TypeError, ValueError):
+                    verify_wait = 8000
+                variables["verifyWait"] = max(1000, min(verify_wait, 20000))
         if user_agent:
             variables["userAgent"] = user_agent
 
@@ -811,12 +828,29 @@ class BrowserlessSigner:
             return SignResult("failed", "验证码未自动填入输入框，未发送签到请求")
         ajax_result = classify_ajax_response((data.get("response") or {}).get("value"), rule)
         if rule.get("verify_success_path"):
-            if (data.get("verify") or {}).get("status") not in range(200, 400):
-                return SignResult("failed", "无法打开页面确认签到记录")
-            verified = classify(str((data.get("verifyPage") or {}).get("html") or ""), rule)
+            verify = data.get("verify") or {}
+            verify_html = str((data.get("verifyPage") or {}).get("html") or "")
+            if cloudflare_pending(verify_html):
+                return SignResult("failed",
+                                  "签到后二次核验仍停留在 Cloudflare 人机验证页，"
+                                  "未确认签到成功")
+            if not navigation_ok(mode, verify.get("status"), verify_html):
+                return SignResult("failed", "无法打开签到页确认签到记录")
+            verified = classify(verify_html, rule)
             if verified.status in {"success", "already"}:
-                return SignResult("success", "已在首页确认签到记录")
-            return SignResult("failed", "首页未显示签到成功标记，未确认签到成功")
+                return SignResult(
+                    "success",
+                    _bonus_message("已重新打开签到页确认签到成功",
+                                   page_text(verify_html), rule),
+                )
+            pending = first_keyword(page_text(verify_html), rule.get("pending_keywords"))
+            if pending:
+                return SignResult("failed",
+                                  f"签到后二次核验仍停留在「{pending}」"
+                                  "（人机验证未通过或签到未提交）")
+            return SignResult("failed",
+                              "签到后二次核验未显示签到成功状态；"
+                              + page_hint(verify_html))
         if ajax_result:
             return ajax_result
         result = classify(after_html, rule)

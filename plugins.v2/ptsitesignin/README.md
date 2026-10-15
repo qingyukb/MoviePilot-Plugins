@@ -43,7 +43,7 @@ ptsitesignin/
 
 | 站点 | path | 说明 |
 |---|---|---|
-| Audiences (`audiences.me`) | `/attendance.php` | Vue + Cloudflare Turnstile 签到页，**没有提交按钮**；验证通过后由页面 JS 自动提交。预设直接走 Browserless（`submit_method=none`），并在页面等待组件自动通过和签到请求完成（`cloudflare_wait=15` / `wait=8000`）。成功页常同时出现奖励文案与已签到状态，插件会按本轮页面变化确认结果 |
+| Audiences (`audiences.me`) | `/attendance.php` | Vue + Cloudflare Turnstile 签到页，**没有提交按钮**；验证通过后由页面 JS 自动提交。预设走 Browserless（`submit_method=none`），先等待组件自动通过和签到请求完成（`cloudflare_wait=15` / `wait=8000`），再在同一会话重新打开 `/attendance.php` 等待 8 秒核验（`verify_success_path` / `verify_wait=8000`）。只有确认真实的已签到 / 签到成功状态才上报成功；仍然停在人机验证页或只看到首页时会明确报失败 |
 
 ## 并发与失败重试
 
@@ -116,7 +116,7 @@ ptsitesignin/
 
 - Turnstile 需要执行 JS 并生成一次性 token，还要拿到 `cf_clearance` Cookie，纯 HTTP 无法伪造；
 - Browserless 使用 `solve:solve(...)`（**不限定类型**，由它自动识别挑战种类），官方支持 reCAPTCHA、hCaptcha、Cloudflare Turnstile，能点击 iframe / shadow DOM 内的复选框，并带拟人化点击、指纹规避；
-- 观众（Audiences）的 Turnstile 页面**没有提交按钮**：规则必须写 `submit_method=none`，验证通过后由页面 JS 自动提交；预置规则已按此配置。
+- 观众（Audiences）的 Turnstile 页面**没有提交按钮**：规则必须写 `submit_method=none`，验证通过后由页面 JS 自动提交；预置规则已按此配置。签到完成后页面可能跳回首页，因此预置规则会在同一个 Browserless 会话中重新打开 `/attendance.php` 并等待 8 秒核验，只有看到签到成功 / 今日已签到才上报成功，避免“跳回首页但实际没签到”被误报为失败或成功。
 - 普通「点击打勾」页面若另有提交按钮，可写成 `{"engine":"browserless","mode":"cloudflare","path":"/attendance.php"}`，由插件按默认 `click` 提交。
 
 注意事项：
