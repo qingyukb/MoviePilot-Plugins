@@ -504,7 +504,8 @@ def http_sign_auto(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: in
                 return SignResult(retry.status, f"{retry.message}（签到入口：{path}）")
             return retry
     return SignResult("failed", f"没找到可用的签到入口（HTTP 404）：已试过 {'、'.join(tried)}；"
-                                "可在自定义规则里用 path 指定该站的签到路径")
+                                "可在自定义规则里用 path 指定该站的签到路径；若该站本身没有签到功能，"
+                                "把它从「签到站点」移到「登录站点」即可（插件仍会登录并读最近动向）")
 
 
 def plain_text(content: str) -> str:

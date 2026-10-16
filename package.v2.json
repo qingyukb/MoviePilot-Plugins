@@ -3,13 +3,13 @@
     "name": "PT站点签到",
     "description": "双引擎 PT 签到，可选真实登录刷新 Cookie 并读取站点「最近动向」：HTTP 直连签到接口，或经 Browserless 完成图片验证码 / Cloudflare / Turnstile 挑战。",
     "labels": "站点,签到",
-    "version": "1.4.6",
+    "version": "1.4.7",
     "icon": "https://raw.githubusercontent.com/qingyukb/MoviePilot-Plugins/main/icons/ptsignin.png",
     "author": "qingyu",
     "level": 2,
     "system_version": ">=2.0.0,<3.0.0",
     "history": {
-      "v1.4.6": "设置页精简：新增「发送通知」开关（开 / 关），删掉原来的「通知模式」三档下拉；删掉「遇验证码 / CF 自动用浏览器」开关——自动回退恒为开启，未在规则里写 engine 的站点撞上 Cloudflare / 验证码时总是会自动改用浏览器重试一次（在规则里显式写 engine 的站点仍不参与，尊重手工配置）。通知开关兼容旧配置：1.3.x 的 notify_mode（off 视为关闭）与 1.2.x 的 notify 都会正确迁移。"
+      "v1.4.7": "HTTP 签到路径全部 404 时的失败提示补上处置建议：除「用 path 指定签到路径」外，明确提示「若该站本身没有签到功能（例如只是要维护 Cookie），把它从『签到站点』移到『登录站点』即可」——实测 pt.btschool.club（学校）就没有 attendance.php 等常见签到入口，首页是经典 NexusPHP 登录页（登录还带验证图片），这类站点留在「登录站点」里更合适。"
     }
   }
 }
