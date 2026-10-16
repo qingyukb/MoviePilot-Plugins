@@ -5,7 +5,8 @@
 
 接口契约（2026-10 从 kp.m-team.cc 前端 bundle 逆向并用真实请求验证）：
 
-* 前端 kp.m-team.cc 与后端 api.m-team.cc 前后端分离，API 基址 https://api.m-team.cc/api 。
+* 前端 kp.m-team.cc 与后端前后端分离；浏览器实际使用 https://api.m-team.io/api，
+  插件默认优先该地址，api.m-team.cc / api2.m-team.cc 仅作兼容镜像。
 * 签名算法 base64(HMAC-SHA1(secret, "METHOD&path&ts_ms"))，其中 path **包含** /api 前缀；
   字段名沿用站点自身的拼写 _timestamp / _sgin。
 * GET 把 _timestamp / _sgin 放在 URL query，POST 放在 multipart 表单里。
@@ -43,10 +44,10 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 # --------------------------------------------------------------------- 常量
 
-DEFAULT_API_HOST = "https://api.m-team.cc/api"
+DEFAULT_API_HOST = "https://api.m-team.io/api"
 API_HOSTS = (
-    "https://api.m-team.cc/api",
     "https://api.m-team.io/api",
+    "https://api.m-team.cc/api",
     "https://api2.m-team.cc/api",
 )
 # 站点前端 bundle 里硬编码的 HMAC 密钥（各镜像共用）。
@@ -62,6 +63,8 @@ LOGIN_PATH = "/login"
 PROFILE_PATH = "/member/profile"
 # 前端登录 / 校验通过后立刻调用的保活心跳：把「最近动向」刷成当前时间。
 UPDATE_LAST_BROWSE_PATH = "/member/updateLastBrowse"
+# 登录响应 code=1001（需要两步验证）时，用这个接口把验证码发到账号注册邮箱。
+SEND_LOGIN_EMAIL_CODE_PATH = "/member/sendLoginEmailVerifyCode"
 # 令牌 / API Key 失效时的提示特征。
 INVALID_API_KEY_KEYWORDS = ("key無效", "key无效", "無效的key", "invalid api key", "invalid key",
                             "令牌無效", "令牌无效", "token invalid", "unauthorized")
@@ -150,6 +153,16 @@ class KeepAliveResult:
     message: str = ""
     endpoint: str = ""
     auth: str = ""
+
+
+@dataclass
+class SendCodeResult:
+    """一次「发送登录邮箱验证码」的结果。"""
+
+    ok: bool = False
+    code: int = -1
+    message: str = ""
+    endpoint: str = ""
 
 
 @dataclass
@@ -304,6 +317,8 @@ class LoginReport:
     login_ok: bool = False
     login_used: bool = False
     login_message: str = ""
+    # 本次真实登录换回的 authorization；只用于回写插件配置，绝不写日志/详情。
+    new_token: str = ""
 
 
 @dataclass
@@ -671,13 +686,37 @@ def hint_for(message: str) -> str:
     return ""
 
 
+def login_need_from_body(body: Mapping[str, Any], code: int) -> str:
+    """判断登录响应还缺哪种两步验证："" / "otp" / "email" / "tg"。
+
+    馒头前端在 code=1001 时会看 data 里的 ["email"] / ["tg"] / ["otp"]
+    决定渲染哪种验证码输入框；插件据此自动发送对应验证码。
+    """
+    data = (body or {}).get("data")
+    items = [str(item).strip().lower() for item in data] if isinstance(data, (list, tuple)) else []
+    if "email" in items:
+        return "email"
+    if "tg" in items or "telegram" in items:
+        return "tg"
+    if "otp" in items or "app" in items:
+        return "otp"
+    if code in LOGIN_NEED_EMAIL_CODES:
+        return "email"
+    if code in LOGIN_NEED_OTP_CODES:
+        return "otp"
+    return ""
+
+
 def login_hint_for(code: int, need: str, message: str = "") -> str:
     """把真实登录的失败原因翻译成可操作提示。"""
     if need == "otp":
         return ("（站点要求二步验证：请在插件配置里填「二步验证密钥」（Base32 密钥）"
                 "或临时的「动态码」）")
     if need == "email":
-        return ("（站点要求邮箱验证码：请在插件配置里填「邮箱验证码」）")
+        return ("（站点要求邮箱验证码：请把账号注册邮箱收到的 6 位验证码填到插件配置的"
+                "「邮箱验证码」后重试；也可以直接填浏览器登录后的 authorization）")
+    if need == "tg":
+        return "（站点要求 Telegram 验证码：请在插件配置里填「Telegram 验证码」）"
     text = str(message or "").lower()
     if any(word.lower() in text for word in INVALID_API_KEY_KEYWORDS):
         return "（插件配置里的账号或密码不正确）"
@@ -897,12 +936,7 @@ class MTeamClient:
             message = "HTTP " + str(status)
         token = extract_token_from_headers(headers) or extract_token_from_body(body)
         ok = status < 400 and code == 0 and bool(token)
-        need = ""
-        if not ok:
-            if code in LOGIN_NEED_OTP_CODES:
-                need = "otp"
-            elif code in LOGIN_NEED_EMAIL_CODES:
-                need = "email"
+        need = login_need_from_body(body, code) if not ok else ""
         result = LoginResult(ok=ok, code=code, message=message, token=token,
                              endpoint=self.last_request, need=need,
                              username=str(credentials.username or ""))
@@ -911,6 +945,26 @@ class MTeamClient:
             if identity.get("username"):
                 result.username = str(identity.get("username"))
         return result
+
+    def send_login_email_code(self, username: str,
+                              ts_ms: Optional[int] = None) -> SendCodeResult:
+        """把登录两步验证码发到账号注册邮箱。
+
+        对应浏览器登录页的「获取验证码」按钮：POST
+        /member/sendLoginEmailVerifyCode，只需要 username，站点自己查注册邮箱。
+        """
+        username = str(username or "").strip()
+        if not username:
+            raise MTeamError("缺少账号，无法发送邮箱验证码")
+        status, _headers, body = self.request(
+            "POST", SEND_LOGIN_EMAIL_CODE_PATH,
+            fields=[("username", username)], ts_ms=ts_ms)
+        code = _as_int(body.get("code"))
+        message = str(body.get("message") or "")
+        if status >= 400 and not message:
+            message = "HTTP " + str(status)
+        return SendCodeResult(ok=status < 400 and code == 0, code=code,
+                              message=message, endpoint=self.last_request)
 
     # ---------------------------------------------------------- 组合流程
 
@@ -957,9 +1011,24 @@ class MTeamClient:
             failures.append("真实登录：" + str(error))
             return None, None, None
         if not login_result.ok:
+            hint = login_hint_for(login_result.code, login_result.need,
+                                  login_result.message)
+            if login_result.need == "email":
+                # 浏览器登录页同样会在这一步点「获取验证码」；插件直接把验证码
+                # 发到账号注册邮箱，用户只需把收到的 6 位码填进「邮箱验证码」。
+                try:
+                    sent = self.send_login_email_code(credentials.username)
+                except MTeamError as error:
+                    hint = "（站点要求邮箱验证码，自动发送失败：" + str(error) + "）"
+                else:
+                    if sent.ok:
+                        hint = ("（站点要求邮箱验证码：已把 6 位验证码发到账号注册邮箱，"
+                                "请填到插件配置的「邮箱验证码」后重试）")
+                    else:
+                        hint = ("（站点要求邮箱验证码，但发送失败：" +
+                                (sent.message or ("code=" + str(sent.code))) + "）")
             failures.append("真实登录：" + (login_result.message or ("code=" + str(login_result.code)))
-                            + login_hint_for(login_result.code, login_result.need,
-                                             login_result.message))
+                            + hint)
             return None, None, login_result
         plan = AuthPlan(name="真实登录 authorization", token=login_result.token, scheme="jwt")
         result = self._keepalive_with_plan(plan, failures)
@@ -1009,6 +1078,8 @@ class MTeamClient:
             report.login_message = login_result.message
             if login_result.endpoint:
                 report.endpoint = login_result.endpoint
+            if login_result.ok and login_result.token:
+                report.new_token = login_result.token
 
         if keepalive is not None and keepalive.ok and winner is not None:
             report.method = "login+keepalive" if report.login_used else "keepalive"

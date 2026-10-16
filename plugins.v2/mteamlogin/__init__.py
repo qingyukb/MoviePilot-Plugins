@@ -52,7 +52,7 @@ class MTeamLogin(_PluginBase):
     plugin_name = "馒头登录"
     plugin_desc = "插件配置页手填馒头（M-Team）账号密码或 authorization，真实登录保活并校验「最近动向」。"
     plugin_icon = "mteam.png"
-    plugin_version = "1.3.0"
+    plugin_version = "1.3.1"
     plugin_author = "qingyu"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "mteamlogin_"
@@ -386,7 +386,7 @@ class MTeamLogin(_PluginBase):
         hosts = api_host_candidates(primary_host)
         logger.info("馒头登录：凭证来源 %s，候选接口 %s",
                     credentials.source or "（空）", " → ".join(hosts))
-        report: Optional[LoginReport] = None
+        reports: List[LoginReport] = []
         for host in hosts:
             client = MTeamClient(host=host, timeout=timeout, proxy=self._proxy,
                                  user_agent=DEFAULT_USER_AGENT)
@@ -398,18 +398,64 @@ class MTeamLogin(_PluginBase):
                                      ran_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                                      site=host, credential=credentials.source,
                                      endpoint=client.last_request)
-            if report.api_ok:
+            reports.append(report)
+            if report.ok or report.keepalive_ok:
                 if host != hosts[0]:
-                    logger.info("馒头登录：接口 %s 未返回 M-Team 数据，已改用 %s",
+                    logger.info("馒头登录：接口 %s 未完成保活，已改用 %s",
                                 hosts[0], host)
                 return report
-            logger.warning("馒头登录：接口 %s 未返回 M-Team 数据（%s），尝试下一个",
+            if not report.api_ok:
+                logger.warning("馒头登录：接口 %s 未返回 M-Team 数据（%s），尝试下一个",
+                               host, report.message or report.endpoint or "未知响应")
+                continue
+            # 某些镜像会返回结构化错误（例如 401 / code -1），这不能证明它
+            # 是可用接口，继续尝试其它候选地址。
+            logger.warning("馒头登录：接口 %s 返回 M-Team 错误（%s），尝试下一个",
                            host, report.message or report.endpoint or "未知响应")
-        if report is not None and not report.api_ok and report.endpoint:
-            report.message = (report.message + "；最后一次请求 " + report.endpoint).strip("；")
-        return report or LoginReport(ok=False, message="没有可用的 M-Team 接口地址。")
+
+        # 所有接口都无法保活时，优先保留能读出最近动向的响应；否则保留
+        # 第一个真正的 M-Team 结构化响应，便于用户看到可诊断的错误。
+        if reports:
+            fallback = next((item for item in reports if not item.last_browse.empty), None)
+            if fallback is None:
+                fallback = next((item for item in reports if item.api_ok), reports[0])
+            if fallback is not reports[0] and fallback.site:
+                logger.info("馒头登录：接口 %s 均未保活，使用 %s 的读取结果",
+                            hosts[0], fallback.site)
+            if fallback.endpoint:
+                fallback.message = (fallback.message + "；最后一次请求 "
+                                    + fallback.endpoint).strip("；")
+            return fallback
+        return LoginReport(ok=False, message="没有可用的 M-Team 接口地址。")
+
+    def _persist_after_report(self, report: LoginReport) -> None:
+        """把真实登录换回的新 authorization 与命中的接口地址回写插件配置。
+
+        这样下一轮会直接复用新令牌保活，而不是再次触发邮箱两步验证
+        （邮箱验证码是一次性的，不可能每轮都让用户手工填）。
+        """
+        changed = False
+        token = str(getattr(report, "new_token", "") or "").strip()
+        if token and token != self._token:
+            self._token = token
+            # 一次性验证码已经用完，清掉避免下一轮拿旧码重试。
+            if self._email_code:
+                self._email_code = ""
+            if self._otp_code:
+                self._otp_code = ""
+            changed = True
+            logger.info("馒头登录：已保存本次真实登录换回的新 authorization（长度 %d）", len(token))
+        if report.ok and report.site:
+            current = self._api_host or DEFAULT_API_HOST
+            if report.site != current:
+                self._api_host = report.site
+                changed = True
+                logger.info("馒头登录：已把可用接口地址写回配置：%s", report.site)
+        if changed:
+            self.update_config(self._config())
 
     def _finish(self, report: LoginReport) -> None:
+        self._persist_after_report(report)
         record = self._record(report)
         self._save(record)
         if report.ok:

@@ -136,6 +136,14 @@ def login_needs_otp():
     return 200, {}, {"code": 1001, "message": "需要二次验证", "data": ["otp"]}
 
 
+def login_needs_email():
+    return 200, {}, {"code": 1001, "message": "需要兩步驗證驗", "data": ["email"]}
+
+
+def send_code_ok():
+    return 200, {}, {"code": 0, "message": "SUCCESS", "data": None}
+
+
 def keepalive_ok():
     """保活心跳成功的真实响应形状。"""
     return 200, {}, {"code": 0, "message": "success", "data": None}
@@ -399,6 +407,45 @@ class KeepAliveFlowTests(unittest.TestCase):
                 self.assertFalse(report.login_ok)
                 self.assertIn("二步验证", report.message)
 
+    def test_login_need_from_body_distinguishes_email_and_otp(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                self.assertEqual(core.login_need_from_body({"data": ["email"]}, 1001), "email")
+                self.assertEqual(core.login_need_from_body({"data": ["otp"]}, 1001), "otp")
+                self.assertEqual(core.login_need_from_body({"data": ["tg"]}, 1001), "tg")
+                self.assertEqual(core.login_need_from_body({}, 1001), "otp")
+                self.assertEqual(core.login_need_from_body({}, 1002), "email")
+                self.assertEqual(core.login_need_from_body({}, 0), "")
+
+    def test_login_needing_email_auto_sends_code_and_reports_it(self):
+        """站点返回 code=1001 data=['email'] 时，插件要自动发邮箱验证码并提示填 email_code。"""
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                client, opener = build_client(core, [login_needs_email(), send_code_ok()])
+                creds = core.Credentials(username="tester", password="secret")
+                report = client.fetch_last_browse(credentials=creds)
+                self.assertFalse(report.ok)
+                self.assertTrue(report.login_used)
+                self.assertFalse(report.login_ok)
+                self.assertIn("邮箱验证码", report.message)
+                self.assertIn("已把 6 位验证码发到账号注册邮箱", report.message)
+                requests = recorded(opener)
+                self.assertEqual([item["path"] for item in requests],
+                                 ["/api/login", "/api/member/sendLoginEmailVerifyCode"])
+                self.assertEqual(multipart_values(requests[1]["body"])["username"], "tester")
+
+    def test_successful_login_exposes_new_token_for_plugin_persist(self):
+        """真实登录成功后要把新 authorization 带回给插件，插件再写回配置复用。"""
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                client, _opener = build_client(core, [login_ok("NEWTOKEN"),
+                                                       keepalive_ok(),
+                                                       profile_ok(1792147191401)])
+                creds = core.Credentials(username="tester", password="secret")
+                report = client.fetch_last_browse(credentials=creds)
+                self.assertTrue(report.ok, report.message)
+                self.assertEqual(report.new_token, "NEWTOKEN")
+
     def test_stale_last_browse_after_keepalive_is_flagged(self):
         for core in CORES:
             with self.subTest(core=core.__name__):
@@ -571,6 +618,7 @@ class HelperTests(unittest.TestCase):
     def test_api_host_derivation_and_candidates(self):
         for core in CORES:
             with self.subTest(core=core.__name__):
+                self.assertEqual(core.DEFAULT_API_HOST, "https://api.m-team.io/api")
                 self.assertEqual(core.derive_api_host("https://kp.m-team.cc/"),
                                  "https://api.m-team.cc/api")
                 self.assertEqual(core.derive_api_host("m-team.cc"),

@@ -5,7 +5,7 @@
 
 ## 它解决什么问题
 
-馒头是前后端分离的：前端 `kp.m-team.cc`，后端 API `api.m-team.cc`。前端在每次登录 / 校验通过后会**立刻**调用：
+馒头是前后端分离的：前端 `kp.m-team.cc`，后端 API `api.m-team.io`。前端在每次登录 / 校验通过后会**立刻**调用：
 
 ```text
 POST /api/member/updateLastBrowse
@@ -64,11 +64,11 @@ POST /api/member/updateLastBrowse
 
 馒头的前端（如 `kp.m-team.cc`）和后端 API（`api.<域名>`）不是同一个域名，所以插件请求的是后端地址：
 
-1. 默认使用 `https://api.m-team.cc/api`；
+1. 默认使用 `https://api.m-team.io/api`；
 2. 如果你的镜像不同，可在「API 基址」里手动填写后端地址，例如 `https://api.m-team.io/api`；
    **不要填 `kp.m-team.cc` 这类前端地址**；
 3. 当前地址没有返回 M-Team 的结构化 JSON（比如误将前端当成 API，返回 nginx 403 HTML）时，
-   插件会自动依次回退 `api.m-team.cc` → `api.m-team.io` → `api2.m-team.cc`；
+   插件会自动依次回退 `api.m-team.io` → `api.m-team.cc` → `api2.m-team.cc`；
 4. 若后端把某个接口改成只接受 POST，还会自动改用 POST 重试一次。
 
 失败时日志会附上实际请求的 `METHOD URL`，方便定位到底命中了哪个地址。
@@ -93,7 +93,7 @@ POST /api/member/updateLastBrowse
 | authorization | 浏览器真实登录后的 JWT；可直接保活 |
 | API Key | 只读凭证，不能保活 |
 | Cookie | 可选；能解析出 authorization 时也可保活 |
-| API 基址（可选） | 留空使用 `https://api.m-team.cc/api` |
+| API 基址（可选） | 留空使用 `https://api.m-team.io/api` |
 | 执行周期 | 5 位 Cron 表达式，默认 `0 9 * * *` |
 | 保存后立即执行一次 | 保存配置后 3 秒后台执行一轮，不阻塞设置页 |
 | 通知模式 | 每次执行后通知 / 仅失败时通知 / 不通知 |
@@ -106,11 +106,12 @@ POST /api/member/updateLastBrowse
 |---|---|---|
 | 保活失败：`Full authentication is required` | 只填了 API Key，而 API Key 不能用于保活 | 在插件配置里填账号 + 密码，或填浏览器登录后的 `authorization` |
 | 保活失败：`key 无效` / `令牌无效` | 配置里的凭证过期或写错 | 重新获取 `authorization` 并更新，或改用账号 + 密码自动登录 |
-| 真实登录失败：需要二步验证（code=1001） | 站点要求 OTP | 在插件配置里补 `otp_secret`（Base32 密钥）或临时的 `otp_code` |
-| 真实登录失败：需要邮箱验证码（code=1002） | 站点要求邮箱验证码 | 在插件配置里补 `email_code` |
+| 真实登录失败：需要两步验证（code=1001，`data` 为 `["email"]`） | 站点要求邮箱验证码（浏览器登录页会显示「郵箱驗證碼」） | 插件会**自动调 `/member/sendLoginEmailVerifyCode` 把 6 位验证码发到账号注册邮箱**；把收到的码填到 `email_code` 后重试，登录成功即自动换回新 `authorization` |
+| 真实登录失败：需要两步验证（code=1001，`data` 为 `["otp"]`） | 站点要求 2FA APP 动态码 | 在插件配置里补 `otp_secret`（Base32 密钥）或临时的 `otp_code` |
+| 真实登录失败：需要 Telegram 验证码 | 站点要求 Telegram 验证码 | 在插件配置里补 `tg_code` |
 | 真实登录失败：账号或密码不正确 | 账号密码写错 | 检查插件配置里的 `username` / `password` |
 | 保活返回成功，但最近动向仍是几天前 | 站点缓存了该接口，或该凭证没有保活权限 | 换用浏览器 `authorization`，或补上账号密码让插件真实登录 |
-| 请求打到了 nginx 403 HTML | 用了前端地址当 API | 在「API 基址」里填 `https://api.m-team.cc/api` |
+| 请求打到了 nginx 403 HTML | 用了前端地址当 API | 在「API 基址」里填 `https://api.m-team.io/api` |
 
 ## 实现要点
 
@@ -128,6 +129,10 @@ POST /api/member/updateLastBrowse
 - 真实登录走后端自己的接口：`POST /api/login`（multipart：`username` / `password`，需要时再加
   `otpCode` / `emailCode` / `tgCode` / `turnstile`），成功的 `authorization` **只在响应头里**返回，
   与浏览器前端的行为一致。
+- 站点返回 `code=1001` 且 `data` 含 `email` 时，插件会像浏览器点「获取验证码」一样调用
+  `POST /api/member/sendLoginEmailVerifyCode`（只需要 `username`），把验证码发到账号注册邮箱；
+  真实登录成功后插件会把新 `authorization` **自动写回配置的 `token` 字段**并清掉一次性的
+  `email_code` / `otp_code`，下一轮直接复用新令牌保活，不会每轮都触发邮箱验证。
 
 ## 数据留存
 
