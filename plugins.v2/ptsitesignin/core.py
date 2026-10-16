@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -49,6 +50,8 @@ DEFAULT_AUTO_WAIT = 20000
 DEFAULT_SOLVE2_WAIT = 3000
 # Turnstile 复选框从外层 Cloudflare 放行到 iframe 渲染完成的最长等待时间。
 DEFAULT_TURNSTILE_WAIT = 45000
+# 网络层失败（跨境链路抖动 / 节点临时故障）时的重试间隔（秒）。
+RETRY_DELAY_SECONDS = 3
 # 图片验证码 / 人机校验特征（HTTP 直连拿不到结果，需改用 Browserless）
 CAPTCHA_PATTERN = (
     r"(captcha\.php|<img[^>]+captcha"
@@ -215,6 +218,9 @@ class SignResult:
     status: str   # success / already / failed
     message: str
     challenge: str = ""   # "" / cloudflare / captcha：HTTP 失败时提示该站可改用浏览器引擎
+    # 网络层失败（读超时 / 连接中断）时置 True：请求是否真的执行过未知，调用方可以补一次
+    # 只读回查，避免把「已签到但响应丢失」误报成失败。
+    transient: bool = False
 
 
 # ------------------------------------------------------------------ 公共工具
@@ -895,6 +901,38 @@ def turnstile_wait_ms(rule: Mapping[str, Any]) -> int:
     return max(5000, min(milli, 60000))
 
 
+def bql_wait_budget_ms(rule: Mapping[str, Any]) -> int:
+    """估算一次 BQL mutation 内部的等待总时长（毫秒）。
+
+    BrowserQL 是「整段执行完才返回响应」的整包请求：如果 HTTP 读超时比页面内等待预算
+    还短，插件会自己先掐断连接，报出 The read operation timed out 这种自伤式失败。
+    """
+    total = 0
+    if str(rule.get("mode")) == "cloudflare":
+        total += cloudflare_wait_ms(rule)
+    if str(rule.get("submit_method") or "").lower() == "turnstile_click":
+        total += turnstile_wait_ms(rule)
+    if str(rule.get("mode")) == "trigger_image":
+        try:
+            total += max(0, int(rule.get("trigger_wait") or 500))
+        except (TypeError, ValueError):
+            total += 500
+    if solver_enabled(rule):
+        total += solve_timeout_ms(rule)
+    if secondary_solve_enabled(rule):
+        total += solve2_wait_ms(rule)
+    try:
+        total += max(0, int(rule.get("wait") or 3500))
+    except (TypeError, ValueError):
+        total += 3500
+    if rule.get("verify_success_path"):
+        try:
+            total += max(1000, min(int(rule.get("verify_wait") or 8000), 20000))
+        except (TypeError, ValueError):
+            total += 8000
+    return total
+
+
 def solver_enabled(rule: Mapping[str, Any]) -> bool:
     """Browserless cloudflare / image 模式是否启用 solve。
 
@@ -1056,12 +1094,60 @@ def classify_ajax_response(value: Any, rule: Mapping[str, Any]) -> Optional[Sign
     return classify(text, rule)
 
 
+def _browserless_error_message(operation: str, exc: BaseException, elapsed: float,
+                               timeout: int) -> str:
+    """把 Browserless 的网络层异常翻译成可执行的排查建议。"""
+    step = "签到主流程" if operation == "CheckIn" else "签到页预检"
+    if isinstance(exc, TimeoutError) or "timed out" in str(exc).lower():
+        return (f"Browserless 请求超时（{step} {timeout} 秒内未收到响应，已等待 {elapsed:.0f} 秒）："
+                "常见原因是本机 / 服务器到 Browserless 的链路不稳定，或该节点执行时间过长；"
+                "请检查网络 / 代理，或调大「Browserless 超时」、改用更近的区域地址"
+                "（如 production-ams.browserless.io）后重试")
+    return f"Browserless 请求失败（{step}，已等待 {elapsed:.0f} 秒）：{exc}"
+
+
 class BrowserlessSigner:
     """通过 Browserless BrowserQL 执行一次签到。"""
 
     def __init__(self, address: str, token: str, timeout: int = 100):
         self.endpoint = bql_endpoint(address, token)
         self.timeout = max(15, min(int(timeout), 300))
+
+    def request_timeout(self, rule: Mapping[str, Any]) -> int:
+        """HTTP 读超时：至少覆盖一次 BQL 的页面内等待预算 + 45 秒余量。
+
+        BrowserQL 是「整段执行完才返回响应」的整包请求。如果读超时比页面内等待预算还短，
+        插件会自己先掐断连接，报出 The read operation timed out 这种自伤式失败；这里保证
+        读超时永远不短于内部预算 + 导航 / 浏览器启动余量。
+        """
+        needed = (bql_wait_budget_ms(rule) + 45000 + 999) // 1000
+        return max(15, min(max(self.timeout, needed), 300))
+
+    def _recheck_after_transient(self, base_url: str, cookies: List[Dict[str, Any]],
+                                 user_agent: str,
+                                 rule: Mapping[str, Any]) -> Optional[SignResult]:
+        """主流程请求在网络层失败（响应丢失）时补一次只读回查。
+
+        签到可能已经在 Browserless 的浏览器里完成、只是响应没回到插件；直接报请求超时会把
+        「已经签到」误判成失败。这里重新打开签到页，只有确凿看到成功 / 已签到才改判。
+        """
+        path = str(rule.get("verify_success_path") or rule["path"])
+        variables: Dict[str, Any] = {"cookies": cookies, "url": target_url(base_url, path)}
+        if user_agent:
+            variables["userAgent"] = user_agent
+        data = self._request(variables, "CheckInPreflight",
+                             build_preflight_query(user_agent, 8000),
+                             timeout=self.request_timeout(rule), retry_transient=True)
+        if isinstance(data, SignResult):
+            return None
+        html = str((data.get("before") or {}).get("html") or "")
+        if not html or cloudflare_pending(html) or login_page(html):
+            return None
+        result = classify(html, rule)
+        if result.status in {"success", "already"}:
+            return SignResult("success", _bonus_message(
+                "主流程响应丢失，但重新打开签到页确认签到成功", page_text(html), rule))
+        return None
 
     def sign(self, site: Mapping[str, Any], rule: Mapping[str, Any]) -> SignResult:
         base_url = str(site.get("url") or "").rstrip("/")
@@ -1083,7 +1169,8 @@ class BrowserlessSigner:
             preflight_variables["userAgent"] = user_agent
         preflight_wait = max(1000, min(int(rule.get("preflight_wait") or page_wait), 15000))
         preflight = self._request(preflight_variables, "CheckInPreflight",
-                                  build_preflight_query(user_agent, preflight_wait))
+                                  build_preflight_query(user_agent, preflight_wait),
+                                  timeout=self.request_timeout(rule), retry_transient=True)
         if isinstance(preflight, SignResult):
             return preflight
         preflight_html = str((preflight.get("before") or {}).get("html") or "")
@@ -1146,8 +1233,18 @@ class BrowserlessSigner:
         if user_agent:
             variables["userAgent"] = user_agent
 
-        data = self._request(variables, "CheckIn", build_query(rule, user_agent))
+        data = self._request(variables, "CheckIn", build_query(rule, user_agent),
+                             timeout=self.request_timeout(rule))
         if isinstance(data, SignResult):
+            if data.transient:
+                # 超时 / 连接中断时结果未知：补一次只读回查，别把已签到报成网络失败
+                rechecked = self._recheck_after_transient(base_url, cookies, user_agent, rule)
+                if rechecked is not None:
+                    return rechecked
+                return SignResult(
+                    "failed",
+                    f"{data.message}；已重新打开签到页核对，未能确认为已签到，"
+                    "请稍后重试或改用更近的 Browserless 节点")
             return data
         after_html = str((data.get("after") or {}).get("html") or "")
         solve = data.get("solve") or {}
@@ -1224,23 +1321,44 @@ class BrowserlessSigner:
             return SignResult("failed", f"{result.message}；{auto_hint}", result.challenge)
         return result
 
-    def _request(self, variables: Mapping[str, Any], operation: str, query: str) -> Any:
+    def _request(self, variables: Mapping[str, Any], operation: str, query: str,
+                 timeout: Optional[int] = None, retry_transient: bool = False) -> Any:
         payload = json.dumps({"query": query, "operationName": operation,
                               "variables": variables}).encode()
-        request = urllib.request.Request(self.endpoint, data=payload,
-                                         headers={"Content-Type": "application/json"},
-                                         method="POST")
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                value = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            if exc.code in {401, 403}:
-                return SignResult("failed", f"Browserless 鉴权失败（HTTP {exc.code}），请检查 Token")
-            if exc.code == 429:
-                return SignResult("failed", "Browserless 额度不足或请求过于频繁（HTTP 429）")
-            return SignResult("failed", f"Browserless HTTP {exc.code}")
-        except (urllib.error.URLError, TimeoutError, ValueError) as exc:
-            return SignResult("failed", f"Browserless 请求失败：{exc}")
+        # 读超时按调用方给的预算走，缺省才用构造时的配置；上限仍是 300 秒
+        read_timeout = max(15, min(int(timeout or self.timeout), 300))
+        # 只读的预检请求允许在网络抖动时重试一次；主流程（会真的点提交）不在这里重试，
+        # 交给 _recheck_after_transient 用只读回查确认，避免重复提交。
+        attempts = 2 if retry_transient else 1
+        value: Any = None
+        for attempt in range(1, attempts + 1):
+            request = urllib.request.Request(self.endpoint, data=payload,
+                                             headers={"Content-Type": "application/json"},
+                                             method="POST")
+            started = time.monotonic()
+            try:
+                with urllib.request.urlopen(request, timeout=read_timeout) as response:
+                    value = json.loads(response.read().decode("utf-8"))
+                break
+            except urllib.error.HTTPError as exc:
+                if exc.code in {401, 403}:
+                    return SignResult("failed", f"Browserless 鉴权失败（HTTP {exc.code}），请检查 Token")
+                if exc.code == 429:
+                    return SignResult("failed", "Browserless 额度不足或请求过于频繁（HTTP 429）")
+                if exc.code >= 500 and attempt < attempts:
+                    time.sleep(RETRY_DELAY_SECONDS)
+                    continue
+                return SignResult("failed", f"Browserless HTTP {exc.code}（步骤 {operation}）")
+            except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+                elapsed = time.monotonic() - started
+                if attempt < attempts:
+                    time.sleep(RETRY_DELAY_SECONDS)
+                    continue
+                return SignResult(
+                    "failed",
+                    _browserless_error_message(operation, exc, elapsed, read_timeout),
+                    # JSON 解析失败不是网络问题，其余（超时 / 连接中断）结果未知
+                    transient=not isinstance(exc, ValueError))
         errors = value.get("errors") or []
         if errors:
             message = str(errors[0].get("message") or "未知错误")

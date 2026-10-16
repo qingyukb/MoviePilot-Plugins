@@ -65,11 +65,14 @@ def make_stub_signer(core, responses):
     """返回一个不联网的 BrowserlessSigner，按顺序吐出预置响应。"""
     class _StubSigner(core.BrowserlessSigner):
         def __init__(self):
+            # 不联网：只补齐 request_timeout() 需要的属性，_request 由下面的桩接管
+            self.endpoint = "https://example.test/bql"
+            self.timeout = 100
             self.responses = list(responses)
             self.calls = []
             self.queries = []
 
-        def _request(self, variables, operation, query):
+        def _request(self, variables, operation, query, **kwargs):
             self.calls.append((operation, dict(variables)))
             self.queries.append(query)
             return self.responses.pop(0)
@@ -320,6 +323,47 @@ class BrowserlessAudiencesTests(unittest.TestCase):
 
     def _signer(self, responses):
         return make_stub_signer(self.core, responses)
+
+    def test_request_timeout_covers_internal_wait_budget(self):
+        # BQL 是「整段执行完才返回响应」的整包请求：读超时必须 ≥ 页面内等待预算，
+        # 否则插件会自己先掐断连接，报出 The read operation timed out 这种自伤式失败。
+        rule = self._rule()
+        budget = self.core.bql_wait_budget_ms(rule)
+        # cloudflare_wait 5s + turnstile_wait 45s + wait 8s + verify_wait 8s
+        self.assertEqual(budget, 66000)
+        signer = self.core.BrowserlessSigner("https://example.test/bql", "token", 100)
+        self.assertGreater(signer.request_timeout(rule), 100)
+        self.assertGreaterEqual(signer.request_timeout(rule) * 1000, budget + 45000)
+
+    def test_transient_failure_rechecks_and_reports_success(self):
+        # 主流程响应丢失（The read operation timed out）但站点其实已经签到：
+        # 插件应补一次只读回查，把结果改判成成功，而不是报网络失败。
+        signer = self._signer([
+            {"goto": {"status": 200}, "before": {"html": AUDIENCES_PENDING_HTML}},
+            self.core.SignResult(
+                "failed",
+                "Browserless 请求超时（签到主流程 111 秒内未收到响应，已等待 111 秒）",
+                transient=True),
+            {"goto": {"status": 200}, "before": {"html": AUDIENCES_SIGNED_HTML}},
+        ])
+        result = signer.sign(self.site, self._rule())
+        self.assertEqual(result.status, "success")
+        self.assertIn("重新打开签到页确认签到成功", result.message)
+        self.assertEqual([call[0] for call in signer.calls],
+                         ["CheckInPreflight", "CheckIn", "CheckInPreflight"])
+
+    def test_transient_failure_without_recheck_still_fails(self):
+        # 回查也没看到签到状态时仍如实报失败，并提示换节点 / 重试
+        signer = self._signer([
+            {"goto": {"status": 200}, "before": {"html": AUDIENCES_PENDING_HTML}},
+            self.core.SignResult("failed", "Browserless 请求超时（签到主流程）",
+                                 transient=True),
+            {"goto": {"status": 200}, "before": {"html": AUDIENCES_PENDING_HTML}},
+        ])
+        result = signer.sign(self.site, self._rule())
+        self.assertEqual(result.status, "failed")
+        self.assertIn("Browserless 请求超时", result.message)
+        self.assertIn("未能确认为已签到", result.message)
 
     def test_query_waits_for_turnstile_then_native_clicks_it(self):
         # 不使用 solve；等 Turnstile iframe 内 checkbox 可见后，用 BrowserQL 原生 click

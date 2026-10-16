@@ -51,7 +51,7 @@ class PTSiteSignIn(_PluginBase):
     plugin_name = "PT站点签到"
     plugin_desc = "双引擎 PT 签到：HTTP 直连签到接口，或经 Browserless 完成验证码 / Cloudflare / Turnstile 挑战。"
     plugin_icon = "signin.png"
-    plugin_version = "1.0.10"
+    plugin_version = "1.0.11"
     plugin_author = "qingyu"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "ptsignin_"
@@ -268,7 +268,7 @@ class PTSiteSignIn(_PluginBase):
                 {"component": "VCol", "props": {"cols": 12, "md": 6},
                  "content": [{"component": "VTextField", "props": {"model": "browserless_timeout",
                              "label": "Browserless 超时（秒）", "type": "number", "min": 15, "max": 300,
-                             "hint": "含验证码求解时间，建议 100–180", "persistent-hint": True}}]},
+                             "hint": "含验证码求解与页面等待时间；插件会自动保证不低于页面内等待预算，建议 120–180", "persistent-hint": True}}]},
             ]},
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12},

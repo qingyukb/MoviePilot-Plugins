@@ -127,6 +127,7 @@ ptsitesignin/
 2. 默认走 `https://production-sfo.browserless.io` + `/stealth/bql`，自建服务填根地址或完整 `/stealth/bql` 地址即可（会自动补全路径并带上 `?token=`）。
 3. 免费额度 1000 units/月，一次签到通常几十 units，建议并发设为 1–2。
 4. 若日志出现「找到验证码但未能完成验证」，多半是该挑战未通过（换节点/IP 或改用住宅代理重试）。
+5. 出现「Browserless 请求超时（…秒内未收到响应）」通常是插件 / 服务器到 Browserless 的跨境链路抖动，或节点执行过慢。插件会自动把 HTTP 读超时抬到不低于「页面内等待预算 + 45 秒余量」，避免读超时比 BQL 内部等待还短而自己掐断连接；仍超时请调大「Browserless 超时」或换成更近的区域（如 `production-ams.browserless.io`）。主流程响应丢失时插件会自动只读回查一次，已签到不会被报成失败。
 
 ## 配置项
 
@@ -142,7 +143,7 @@ ptsitesignin/
 | 失败重试次数 / 等待分钟 | 额外重试次数与间隔；重试由后台 Timer 延迟执行，不占用执行线程 | 1 次 / 10 分钟 |
 | HTTP 引擎使用代理 | 复用 MoviePilot 全局代理 | 关 |
 | 遇验证码 / CF 自动用浏览器 | 内置预设或未声明引擎的站点 HTTP 撞上 CF / 验证码时自动换浏览器重试（手工写了 engine 的除外） | 开 |
-| Browserless 地址 / Token / 超时 | Browserless 连接参数 | 官方地址 / 空 / 100 秒 |
+| Browserless 地址 / Token / 超时 | Browserless 连接参数；读超时自动抬升到「页面内等待预算 + 45 秒余量」（上限 300 秒），避免读超时短于 BrowserQL 内部等待 | 官方地址 / 空 / 100 秒 |
 | 自定义站点规则 | JSON；Cloudflare 交互挑战可用 `cloudflare_wait`（秒）覆盖默认 10 秒；签到页内嵌 Turnstile 复选框（如观众 Audiences）可设 `submit_method: "turnstile_click"` + `submit_selector: "< *challenges.cloudflare.com* input[type='checkbox']"` 并配 `solve_count: 0`，由插件等复选框可见后原生点击；确需自动解题时再使用 `auto` / `solve_count` | 空 |
 
 ## 自定义规则示例
