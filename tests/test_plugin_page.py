@@ -196,6 +196,7 @@ class PagePluginTests(unittest.TestCase):
                    if isinstance(node, dict) and node.get("component") == "div"]
         self.assertIn("ptsignin-section", headers)
         self.assertTrue(nodes(page, "VExpansionPanels"))
+        self.assertEqual(len(nodes(page, "VTable")), 3)   # 观众 / 学校 / 红豆饭 各一张明细表
         self.assertIn("最近动向：2026-10-17 07:12:03", texts(page))
 
     def test_dual_site_shows_in_both_sections(self):
@@ -223,13 +224,24 @@ class PagePluginTests(unittest.TestCase):
                   {"site": "学校", "status": "failed",
                    "message": "签到后二次核验未显示签到成功状态"}]
         page, _ = self._page(latest)
-        values = [node.get("text") for node in nodes(page, "div")
-                  if str(node.get("props", {}).get("class", "")).startswith("ptsignin-stat__value")]
-        self.assertEqual(values[:5], ["2", "1", "0", "1", "1"])   # 站点/成功/失败/未确认/未记录
+        counters = [node.get("text") for node in nodes(page, "VChip")]
+        self.assertEqual(counters[:5], ["站点 2", "成功 1", "失败 0", "未确认 1", "未记录 1"])
         alerts = [node.get("text") for node in nodes(page, "VAlert")
                   if "本轮没有记录的站点" in str(node.get("text"))]
         self.assertTrue(alerts)
         self.assertIn("红豆饭", alerts[0])
+
+    def test_latest_result_is_not_duplicated(self):
+        # 之前同一个结果会在「最近一轮」区块和明细表里各出现一次，看着很乱
+        latest = [{"site": "观众", "status": "already", "ran_at": "2026-10-17 03:11:49",
+                   "message": "今日已经签到（获得 20 粒爆米花）", "login": "复用站点管理 Cookie",
+                   "activity": "2026-10-17 03:11:47", "dual": True, "login_status": "login"}]
+        page, _ = self._page(latest, history=latest)
+        self.assertEqual(texts(page).count("今日已经签到（获得 20 粒爆米花）"), 1)
+        self.assertEqual(len(nodes(page, "VTable")), 2)          # 签到 / 登录 各一张明细表
+        headers = [node.get("text") for node in nodes(page, "th")]
+        self.assertEqual(headers, ["时间", "状态", "结果", "时间", "状态", "登录", "最近动向"])
+        self.assertEqual(len(nodes(page, "VChip")), 7)           # 5 个统计胶囊 + 两块各 1 个状态标签
 
     def test_empty_state(self):
         page, _ = self._page([])
@@ -255,23 +267,27 @@ class PagePluginTests(unittest.TestCase):
         self.assertEqual(config["site_ids"], [1, 2, "all"])
         self.assertEqual(config["login_site_ids"], [2, 3])
 
-    def test_get_form_has_sections_and_all_option(self):
+    def test_get_form_layout_and_all_option(self):
         plugin = self._make({})
         form, config = plugin.get_form()
-        titles = [node.get("text") for node in walk(form)
-                  if "ptsignin-form-title" in str(node.get("props", {}).get("class"))]
-        for expected in ("基础", "站点选择", "执行与重试", "通知", "高级"):
-            self.assertIn(expected, titles)
+        # 顶部是开关行，然后是两列字段，没有分区大标题（参考 MP 官方插件的扁平布局）
+        switches = [node.get("props") or {} for node in nodes(form, "VSwitch")]
+        models = {props.get("model") for props in switches}
+        for expected in ("enabled", "run_once", "proxy", "fallback_browserless", "read_activity"):
+            self.assertIn(expected, models)
         selects = [node.get("props") or {} for node in nodes(form, "VSelect")]
-        models = {props.get("model") for props in selects}
-        self.assertIn("site_ids", models)
-        self.assertIn("login_site_ids", models)
+        select_models = {props.get("model") for props in selects}
+        self.assertIn("site_ids", select_models)
+        self.assertIn("login_site_ids", select_models)
         for props in selects:
             if props.get("model") in {"site_ids", "login_site_ids"}:
                 self.assertEqual(props["items"][0]["value"], "all")
                 self.assertIn("全部站点", props["items"][0]["title"])
+                self.assertIn("选择全部后自动包含后续新增站点", props["hint"])
+        hints = " ".join(str((node.get("props") or {}).get("hint") or "") for node in walk(form))
+        self.assertIn("同时选中", hints)             # 双选说明放在登录站点的提示里
+        self.assertNotIn("ptsignin-form-title", str(form))
         self.assertIsInstance(config, dict)
-        self.assertIn("同时", texts(form))       # 双选说明提示
 
 
 if __name__ == "__main__":
