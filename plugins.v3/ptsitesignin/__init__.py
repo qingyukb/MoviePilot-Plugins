@@ -50,6 +50,9 @@ from .core import (
     account_from_site,
     account_ready,
     fallback_rule,
+    DEFAULT_INDEX_PATH,
+    discover_signin_target,
+    fetch_page,
     http_sign_auto,
     is_login_record,
     is_signin_record,
@@ -94,7 +97,7 @@ class PTSiteSignIn(_PluginBase):
     plugin_desc = ("双引擎 PT 签到，可选真实登录刷新 Cookie 并读取站点「最近动向」：HTTP 直连签到接口，"
                    "或经 Browserless 完成验证码 / Cloudflare / Turnstile 挑战。")
     plugin_icon = "signin.png"
-    plugin_version = "1.4.7"
+    plugin_version = "1.4.8"
     plugin_author = "qingyu"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "ptsignin_"
@@ -733,6 +736,16 @@ class PTSiteSignIn(_PluginBase):
             fallback = fallback_rule(rule, outcome.challenge)
         except ValueError as error:
             return SignResult("failed", f"{outcome.message}；回退规则无效：{error}"), "http"
+        # 撞盾时未必知道该站真正的签到入口（首页挂「每日签到」表单的站点没有独立签到页）：
+        # 顺手从首页找一次，找到就把它交给浏览器，别让浏览器去开一个 404 的地址
+        base_url = str(info.get("url") or "").rstrip("/")
+        discovered = discover_signin_target(
+            fetch_page(target_url(base_url, DEFAULT_INDEX_PATH), str(info.get("cookie") or ""),
+                       self._timeout, self._proxies_for(info), str(info.get("ua") or "")),
+            base_url)
+        if discovered.get("path"):
+            fallback = dict(fallback, path=str(discovered["path"]))
+            logger.info("PT站点签到：%s 的签到入口改为 %s", site_name, discovered["path"])
         retry = signer.sign(info, fallback)
         if retry.status in {"success", "already"}:
             return SignResult(retry.status, f"{retry.message}（已自动改用浏览器引擎通过{label}）"), "browserless"

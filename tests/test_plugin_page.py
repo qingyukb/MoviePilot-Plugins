@@ -262,6 +262,31 @@ class PagePluginTests(unittest.TestCase):
         captions = [site for site, _status, _result in table_rows(page)]
         self.assertTrue(any("共 12 条记录" in caption for caption in captions))
 
+    def test_fallback_uses_discovered_signin_entry(self):
+        # 撞盾时先按首页「每日签到」表单修正签到入口，再交给浏览器（别让浏览器开 404 的地址）
+        plugin = self._make({})
+        plugin._timeout = 5
+        plugin._proxy_host = lambda: ""
+        home = ('<html><body><form method="post" action="/signin.php">'
+                '<input type="submit" name="signin" value="每日签到"></form></body></html>')
+        self.plugin_module.fetch_page = lambda *a, **k: home
+        captured = {}
+
+        class _Signer:
+            def sign(self, info, rule):
+                captured["rule"] = dict(rule)
+                return plugin_module.SignResult("success", "签到成功")
+
+        plugin_module = self.plugin_module
+        outcome, engine = plugin._maybe_fallback(
+            {"url": "https://pt.example/", "cookie": "c=1"},
+            {"engine": "http", "path": "/attendance.php", "auto_fallback": True},
+            plugin_module.SignResult("failed", "站点返回 Cloudflare 验证页", challenge="cloudflare"),
+            _Signer())
+        self.assertEqual(engine, "browserless")
+        self.assertEqual(captured["rule"]["path"], "/signin.php")
+        self.assertEqual(outcome.status, "success")
+
     def test_notify_switch_and_message(self):
         plugin = self._make({}, _notify_enabled=True)
         sent = []

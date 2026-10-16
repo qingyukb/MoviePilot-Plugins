@@ -400,10 +400,14 @@ def http_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: int = 3
         session = requests.Session()
         session.headers.update(headers)
         method = str(rule.get("method") or "GET").upper()
+        # 规则里的 data：签到表单需要提交字段时用（例如首页「每日签到」按钮带 name）
+        data = rule.get("data") if isinstance(rule.get("data"), Mapping) else None
         if method == "POST":
-            response = session.post(url, timeout=timeout, allow_redirects=True, proxies=proxies)
+            response = session.post(url, data=data, timeout=timeout,
+                                    allow_redirects=True, proxies=proxies)
         else:
-            response = session.get(url, timeout=timeout, allow_redirects=True, proxies=proxies)
+            response = session.get(url, params=data, timeout=timeout,
+                                   allow_redirects=True, proxies=proxies)
     except Exception as error:
         return SignResult("failed", f"请求异常：{error}")
     content = response.text or ""
@@ -413,13 +417,16 @@ def http_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: int = 3
     return judge_http(content, rule)
 
 
-# 常见签到入口路径：默认路径 404 时按顺序再试，仍然找不到就从站点首页的链接里自动发现
+# 常见签到入口路径：默认路径 404 时按顺序再试，仍然找不到就从站点首页自动发现
 FALLBACK_SIGNIN_PATHS = ("/attendance.php", "/signin.php", "/sign_in.php", "/checkin.php",
                          "/plugin_sign-in.php", "/attendance.php?action=sign")
-# 首页里「签到」入口的链接文字
+# 首页里「签到」入口的文字（链接文字或提交按钮文字）
 SIGNIN_LINK_WORDS = ("签到", "簽到", "打卡")
 _SIGNIN_LINK_RE = re.compile(
     r"<a\b[^>]*href\s*=\s*[\"']([^\"']+)[\"'][^>]*>(.*?)</a>", re.IGNORECASE | re.DOTALL)
+_FORM_RE = re.compile(r"<form\b([^>]*)>(.*?)</form>", re.IGNORECASE | re.DOTALL)
+_SUBMIT_RE = re.compile(r"<(?:input|button)\b[^>]*>", re.IGNORECASE)
+_BUTTON_TEXT_RE = re.compile(r"<button\b[^>]*>(.*?)</button>", re.IGNORECASE | re.DOTALL)
 
 
 def fetch_page(url: str, cookie: str, timeout: int = 30,
@@ -470,6 +477,51 @@ def discover_signin_path(html: str, base_url: str) -> str:
     return ""
 
 
+def _submit_control(inner: str) -> Dict[str, str]:
+    """表单里的提交控件属性（``<input type=submit>`` / ``<button>``），没有就返回空字典。"""
+    for tag in _SUBMIT_RE.findall(inner or ""):
+        attributes = _tag_attrs(tag)
+        kind = (attributes.get("type") or "").lower()
+        if tag.lower().startswith("<button"):
+            if kind in {"", "submit"}:
+                return attributes
+        elif kind == "submit":
+            return attributes
+    return {}
+
+
+def discover_signin_target(html: str, base_url: str) -> Dict[str, Any]:
+    """找签到入口，返回 ``{"path", "method", "data"}``（找不到返回空字典）。
+
+    先看表单：首页上直接挂一个「每日签到」提交按钮的站点（BTSCHOOL / 学校 就是这种）没有独立
+    签到页，必须按表单的 action / method 提交，按钮带 name 时还要把它的字段一起发过去；
+    表单里找不到再退回「找链接」。
+    """
+    body = html or ""
+    for raw_attrs, inner in _FORM_RE.findall(body):
+        control = _submit_control(inner)
+        if not control:
+            continue
+        label = re.sub(r"\s+", "", plain_text(inner) + str(control.get("value") or ""))
+        if not any(word in label for word in SIGNIN_LINK_WORDS):
+            continue
+        attrs = _tag_attrs("<form " + raw_attrs + ">")
+        path = same_site_path(base_url, attrs.get("action") or "") or \
+            (urllib.parse.urlparse(base_url).path or "/")
+        method = (attrs.get("method") or "POST").strip().upper()
+        target: Dict[str, Any] = {"path": path, "method": "GET" if method == "GET" else "POST"}
+        name = str(control.get("name") or "").strip()
+        if name:
+            value = control.get("value")
+            if value is None:
+                match = _BUTTON_TEXT_RE.search(inner)
+                value = re.sub(r"\s+", "", plain_text(match.group(1))) if match else ""
+            target["data"] = {name: str(value or "")}
+        return target
+    found = discover_signin_path(body, base_url)
+    return {"path": found, "method": "GET"} if found else {}
+
+
 def http_sign_auto(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: int = 30,
                    proxies: Optional[Dict[str, str]] = None) -> SignResult:
     """HTTP 签到：默认路径 404 / 405 时自动换签到入口，并把找法写进失败原因。
@@ -485,20 +537,29 @@ def http_sign_auto(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: in
     cookie = str(site.get("cookie") or "").strip()
     user_agent = str(site.get("ua") or "").strip()
     tried = [str(rule.get("path") or DEFAULT_HTTP_PATH)]
-    candidates: List[str] = []
-    discovered = discover_signin_path(
+    # 首页里可能挂着「每日签到」表单（学校 BTSCHOOL 就是这种）或一个签到链接
+    target = discover_signin_target(
         fetch_page(target_url(base_url, DEFAULT_INDEX_PATH), cookie, timeout, proxies, user_agent),
         base_url)
+    attempts: List[Dict[str, Any]] = []
+    discovered = str(target.get("path") or "")
     if discovered and discovered not in tried:
-        candidates.append(discovered)
+        attempt = dict(rule, path=discovered)
+        if target.get("method"):
+            attempt["method"] = str(target["method"])
+        if target.get("data"):
+            attempt["data"] = dict(target["data"])
+        attempts.append(attempt)
     for path in FALLBACK_SIGNIN_PATHS:
-        if path not in tried and path not in candidates:
-            candidates.append(path)
-    if not discovered and not candidates:
+        if path in tried or any(item.get("path") == path for item in attempts):
+            continue
+        attempts.append(dict(rule, path=path))
+    if not attempts:
         return result
-    for path in candidates[:4]:
+    for attempt in attempts[:4]:
+        path = str(attempt.get("path") or "")
         tried.append(path)
-        retry = http_sign(site, dict(rule, path=path), timeout=timeout, proxies=proxies)
+        retry = http_sign(site, attempt, timeout=timeout, proxies=proxies)
         if not retry.missing_path:
             if retry.status in {"success", "already"}:
                 return SignResult(retry.status, f"{retry.message}（签到入口：{path}）")

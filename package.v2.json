@@ -3,13 +3,13 @@
     "name": "PT站点签到",
     "description": "双引擎 PT 签到，可选真实登录刷新 Cookie 并读取站点「最近动向」：HTTP 直连签到接口，或经 Browserless 完成图片验证码 / Cloudflare / Turnstile 挑战。",
     "labels": "站点,签到",
-    "version": "1.4.7",
+    "version": "1.4.8",
     "icon": "https://raw.githubusercontent.com/qingyukb/MoviePilot-Plugins/main/icons/ptsignin.png",
     "author": "qingyu",
     "level": 2,
     "system_version": ">=2.0.0,<3.0.0",
     "history": {
-      "v1.4.7": "HTTP 签到路径全部 404 时的失败提示补上处置建议：除「用 path 指定签到路径」外，明确提示「若该站本身没有签到功能（例如只是要维护 Cookie），把它从『签到站点』移到『登录站点』即可」——实测 pt.btschool.club（学校）就没有 attendance.php 等常见签到入口，首页是经典 NexusPHP 登录页（登录还带验证图片），这类站点留在「登录站点」里更合适。"
+      "v1.4.8": "修复「签到就在首页」的站点（学校 BTSCHOOL：首页挂一个「每日签到」提交按钮，没有 attendance.php，实测 /attendance.php、/signin.php、/checkin.php 等全是 404）：HTTP 引擎在默认路径 404 时，现在会先在首页里找**签到表单**——提交按钮文字含「签到 / 打卡」就按表单的 action / method 提交，并把按钮字段（如 signin=每日签到）一起发过去（http_sign 新增 data 支持）；找不到表单再找同站签到链接，最后才依次试常见路径。撞 Cloudflare / 验证码需要改用浏览器时，也会先用这个入口修正 path，避免浏览器去打开 404 地址。"
     }
   }
 }

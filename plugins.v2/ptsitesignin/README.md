@@ -31,7 +31,7 @@ ptsitesignin/
 
 ## HTTP 引擎（默认）
 
-- 请求 `站点域名 + path`，默认 `/attendance.php`；**默认路径返回 404 / 405 时自动换签到入口**：先从站点首页里找文字含「签到 / 打卡」的同站链接，再依次试 `/signin.php`、`/sign_in.php`、`/checkin.php`、`/plugin_sign-in.php`、`/attendance.php?action=sign`；都找不到时失败原因会列出试过哪些路径，可直接在自定义规则里用 `path` 指定
+- 请求 `站点域名 + path`，默认 `/attendance.php`；**默认路径返回 404 / 405 时自动换签到入口**：① 先在首页里找**签到表单**——提交按钮文字含「签到 / 打卡」时按表单的 `action` / `method` 提交，并把按钮字段（如 `signin=每日签到`）一起发过去（学校 BTSCHOOL 就是这种「首页挂一个每日签到按钮」的站，没有独立签到页）；② 再找同站链接里文字含「签到 / 打卡」的；③ 然后依次试 `/signin.php`、`/sign_in.php`、`/checkin.php`、`/plugin_sign-in.php`、`/attendance.php?action=sign`。都找不到时失败原因会列出试过哪些路径，可直接在自定义规则里用 `path` 指定
 - 判定顺序：Cloudflare 验证页 → 登录页特征 → `success` 正则 → `already` 正则 → JSON `state` 字段 → 脚本 `state` 兜底
 - 奖励显示：成功 / 已签到时自动提取奖励文案（如「获得 22 粒爆米花」「魔力值 +30」）显示在结果与通知中；规则里的 `bonus` 正则可覆盖默认模板（捕获组内容即显示文本）
 - 遇 Cloudflare 人机验证或图片验证码时返回对应标记，未声明引擎的站点会自动改用浏览器重试（见下「自动回退到浏览器引擎」）
@@ -100,6 +100,7 @@ ptsitesignin/
 - 每个站点每轮只回退一次，且仅在 HTTP 判定为失败时触发；需要已填写 Browserless Token，未填写时结果会明确提示。
 - 自动回退**恒为开启**（设置页不再提供开关），避免「忘记打开导致 HTTP 站点一直失败」。
 - 只有你在**自定义规则**里显式写了 `"engine": "http"` 的站点不回退（尊重手工配置）；内置预设里声明 `engine=http` 的站点仍会自动回退。
+- 回退前会先用「首页签到表单 / 签到链接」修正签到入口，避免浏览器去打开一个 404 的地址（例如学校那种首页签到的站）。
 
 ### Cloudflare「Just a moment...」交互挑战
 

@@ -378,6 +378,27 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertEqual(self.core.same_site_path("https://pt.example/", "../x.php"), "/x.php")
         self.assertEqual(self.core.same_site_path("https://pt.example/", "#top"), "")
 
+    def test_discover_signin_target_from_home_form(self):
+        # 学校（BTSCHOOL）这种：首页上挂一个「每日签到」提交按钮，没有独立签到页
+        home = ('<html><body><form method="post" action="/index.php">'
+                '<input type="submit" name="signin" value="每日签到"></form></body></html>')
+        self.assertEqual(self.core.discover_signin_target(home, "https://pt.example/"),
+                         {"path": "/index.php", "method": "POST", "data": {"signin": "每日签到"}})
+        # <button> 形式：文字取标签内容，没有 name 时不带 data
+        home2 = ('<html><body><form method="post">'
+                 '<button type="submit">每 日 签 到</button></form></body></html>')
+        self.assertEqual(self.core.discover_signin_target(home2, "https://pt.example/"),
+                         {"path": "/", "method": "POST"})
+        # 没有签到表单时退回找链接
+        home3 = '<html><body><a href="/signin.php">签到</a></body></html>'
+        self.assertEqual(self.core.discover_signin_target(home3, "https://pt.example/"),
+                         {"path": "/signin.php", "method": "GET"})
+        # 普通登录表单不会被误认成签到入口
+        home4 = ('<html><body><form method="post" action="/takelogin.php">'
+                 '<input name="username"><input type="password" name="password">'
+                 '<input type="submit" value="登录"></form></body></html>')
+        self.assertEqual(self.core.discover_signin_target(home4, "https://pt.example/"), {})
+
     def test_fallback_rule_carries_cloudflare_wait(self):
         fallback = self.core.fallback_rule(
             {"engine": "http", "path": "/attendance.php", "cloudflare_wait": 25}, "cloudflare")

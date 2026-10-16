@@ -266,6 +266,27 @@ class LoginCoreTests(unittest.TestCase):
                 self.assertEqual(result.status, "failed")
                 self.assertIn("最近动向", result.message)
 
+    def test_http_sign_auto_posts_home_signin_form(self):
+        # 首页「每日签到」表单：按表单 action + method 提交，并带上按钮字段
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                session = FakeSession({
+                    "index.php": lambda s, u: FakeResponse(
+                        u, '<html><body><form method="post" action="/signin.php">'
+                           '<input type="submit" name="signin" value="每日签到"></form></body></html>'),
+                    "attendance.php": lambda s, u: FakeResponse(u, "not found", status_code=404),
+                    "signin.php": lambda s, u: FakeResponse(u, "<html><body>签到成功！</body></html>"),
+                })
+                rule = core.resolve_rule({"url": "https://pt.example/"}, {})
+                with mock.patch.dict(sys.modules, {"requests": fake_requests(session)}):
+                    result = core.http_sign_auto({"url": "https://pt.example/", "cookie": "c=1"}, rule)
+                self.assertEqual(result.status, "success")
+                self.assertIn("签到入口：/signin.php", result.message)
+                posted = [call for call in session.calls if call[0] == "POST"]
+                self.assertTrue(posted, session.calls)
+                self.assertIn("signin.php", posted[0][1])
+                self.assertEqual(posted[0][2], {"signin": "每日签到"})
+
     def test_http_sign_auto_discovers_signin_path(self):
         # 站点没有 /attendance.php（学校那种 404）时，从头版「签到」链接自动发现入口
         for core in CORES:
