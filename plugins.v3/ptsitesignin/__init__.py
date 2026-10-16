@@ -19,10 +19,13 @@
 
 from __future__ import annotations
 
+import importlib
+import os
+import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from threading import Event, Lock, Thread, Timer
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -47,7 +50,7 @@ from .core import (
     account_from_site,
     account_ready,
     fallback_rule,
-    http_sign,
+    http_sign_auto,
     is_login_record,
     is_signin_record,
     login as site_login,
@@ -61,6 +64,11 @@ from .core import (
     summarize_records,
     target_url,
 )
+
+def mask_proxy(host: str) -> str:
+    """代理地址可能带账号密码，日志里把凭据打码。"""
+    return re.sub(r"//[^@/]+@", "//***@", str(host or ""))
+
 
 # ---------------------------------------------------------------- 常量
 # 站点选择里的哨兵值：勾选它等于「全部站点」，并且以后新增的站点自动包含进来。
@@ -86,7 +94,7 @@ class PTSiteSignIn(_PluginBase):
     plugin_desc = ("双引擎 PT 签到，可选真实登录刷新 Cookie 并读取站点「最近动向」：HTTP 直连签到接口，"
                    "或经 Browserless 完成验证码 / Cloudflare / Turnstile 挑战。")
     plugin_icon = "signin.png"
-    plugin_version = "1.4.4"
+    plugin_version = "1.4.5"
     plugin_author = "qingyu"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "ptsignin_"
@@ -104,7 +112,6 @@ class PTSiteSignIn(_PluginBase):
     _timeout = 30
     _retry_delay_minutes = 10
     _retry_count = 1
-    _proxy = False
     _fallback_browserless = True
     _browserless_url = DEFAULT_BROWSERLESS_URL
     _browserless_token = ""
@@ -140,7 +147,6 @@ class PTSiteSignIn(_PluginBase):
         retry_count = config.get("retry_count")
         self._retry_count = max(0, min(int(1 if retry_count in (None, "") else retry_count), 5))
         self._retry_delay_minutes = max(1, min(int(config.get("retry_delay_minutes") or 10), 1440))
-        self._proxy = bool(config.get("proxy", False))
         self._fallback_browserless = bool(config.get("fallback_browserless", True))
         self._browserless_url = str(config.get("browserless_url") or DEFAULT_BROWSERLESS_URL).strip()
         self._browserless_token = str(config.get("browserless_token") or "").strip()
@@ -204,7 +210,6 @@ class PTSiteSignIn(_PluginBase):
             "timeout": self._timeout,
             "retry_count": self._retry_count,
             "retry_delay_minutes": self._retry_delay_minutes,
-            "proxy": self._proxy,
             "fallback_browserless": self._fallback_browserless,
             "browserless_url": self._browserless_url,
             "browserless_token": self._browserless_token,
@@ -262,13 +267,11 @@ class PTSiteSignIn(_PluginBase):
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12, "md": 3},
                  "content": [{"component": "VSwitch", "props": {"model": "enabled", "label": "启用插件"}}]},
-                {"component": "VCol", "props": {"cols": 12, "md": 3},
+                {"component": "VCol", "props": {"cols": 12, "md": 4},
                  "content": [{"component": "VSwitch", "props": {"model": "run_once",
-                             "label": "保存后立即执行一次"}}]},
-                {"component": "VCol", "props": {"cols": 12, "md": 3},
-                 "content": [{"component": "VSwitch", "props": {"model": "proxy",
-                             "label": "HTTP 引擎使用代理"}}]},
-                {"component": "VCol", "props": {"cols": 12, "md": 3},
+                             "label": "保存后立即执行一次",
+                             "hint": "保存配置后延后 3 秒在后台跑一轮", "persistent-hint": True}}]},
+                {"component": "VCol", "props": {"cols": 12, "md": 4},
                  "content": [{"component": "VSwitch", "props": {"model": "fallback_browserless",
                              "label": "遇验证码 / CF 自动用浏览器",
                              "hint": "内置预设或未声明引擎的站点遇盾时自动换浏览器重试一次",
@@ -600,7 +603,7 @@ class PTSiteSignIn(_PluginBase):
         # ——仍用旧 Cookie 试一次，并如实记录原因。
         account = account_from_site(info)
         if account_ready(account):
-            proxies = self._proxies() if self._proxy else None
+            proxies = self._proxies_for(info)
             try:
                 login_result = site_login(info, account, timeout=self._timeout, proxies=proxies)
             except Exception:
@@ -633,8 +636,8 @@ class PTSiteSignIn(_PluginBase):
                 else:
                     outcome = signer.sign(info, rule)
             else:
-                outcome = http_sign(info, rule, timeout=self._timeout,
-                                    proxies=self._proxies() if self._proxy else None)
+                outcome = http_sign_auto(info, rule, timeout=self._timeout,
+                                         proxies=self._proxies_for(info))
                 if outcome.status == "failed" and outcome.challenge:
                     outcome, engine = self._maybe_fallback(info, rule, outcome, signer)
         except ValueError as error:
@@ -664,7 +667,7 @@ class PTSiteSignIn(_PluginBase):
         login_ok = False
         account = account_from_site(info)
         if account_ready(account):
-            proxies = self._proxies() if self._proxy else None
+            proxies = self._proxies_for(info)
             try:
                 login_result = site_login(info, account, timeout=self._timeout, proxies=proxies)
             except Exception:
@@ -711,7 +714,7 @@ class PTSiteSignIn(_PluginBase):
         paths = [str(rule.get("path") or ""), str(rule.get("verify_success_path") or "")]
         try:
             activity = read_activity(info, cookie, timeout=self._timeout,
-                                     proxies=self._proxies() if self._proxy else None,
+                                     proxies=self._proxies_for(info),
                                      path=str(account.get("activity_path") or "") or None,
                                      paths=paths)
         except Exception:
@@ -744,14 +747,47 @@ class PTSiteSignIn(_PluginBase):
             return SignResult(retry.status, f"{retry.message}（已自动改用浏览器引擎通过{label}）"), "browserless"
         return SignResult("failed", f"{outcome.message}；浏览器引擎重试未通过：{retry.message}"), "browserless"
 
+    def _proxies_for(self, info: Optional[Mapping[str, Any]] = None
+                     ) -> Optional[Dict[str, str]]:
+        """这个站点是否走代理——直接用 MoviePilot「站点管理」里的「使用代理访问」开关。
+
+        站点记录勾了才走 MoviePilot 的全局代理（设置 → 系统 → 代理）；勾了但全局代理为空时写一条
+        日志说明本次仍直连，避免出现「勾了却看不出效果」。Browserless 引擎走它自己的出口。
+        """
+        if not (info or {}).get("proxy"):
+            return None
+        host = self._proxy_host()
+        if not host:
+            logger.warning("PT站点签到：站点勾选了「使用代理访问」，但 MoviePilot（设置 → 系统 → 代理）"
+                           "与 HTTP_PROXY / HTTPS_PROXY 都没有配置，本次仍走直连")
+            return None
+        if host != getattr(self, "_proxy_logged", ""):
+            self._proxy_logged = host
+            logger.info("PT站点签到：站点勾选「使用代理访问」，HTTP 引擎走代理 %s", mask_proxy(host))
+        return {"http": host, "https": host}
+
     @staticmethod
-    def _proxies() -> Optional[Dict[str, str]]:
-        try:
-            from app.core.config import settings
-            host = settings.PROXY_HOST or ""
-        except Exception:
-            host = ""
-        return {"http": host, "https": host} if host else None
+    def _proxy_host() -> str:
+        """取 MoviePilot 的全局代理地址：不同版本的模块路径与配置项名都试一遍，最后看环境变量。"""
+        for module_name in ("app.core.config", "app.sdk.config", "app.core.settings",
+                            "app.core.config.base"):
+            try:
+                module = importlib.import_module(module_name)
+            except Exception:
+                continue
+            for holder_name in ("settings", "config", "Config"):
+                holder = getattr(module, holder_name, None)
+                if holder is None:
+                    continue
+                for key in ("PROXY_HOST", "PROXY", "proxy_host", "proxy"):
+                    value = getattr(holder, key, None)
+                    if isinstance(value, str) and value.strip():
+                        return value.strip()
+        for key in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
+            value = str(os.environ.get(key) or "").strip()
+            if value:
+                return value
+        return ""
 
     def _run_batch(self, infos: List[Dict[str, Any]], rules: Dict[str, Dict[str, Any]],
                    signer: Optional[BrowserlessSigner]) -> List[Dict[str, str]]:

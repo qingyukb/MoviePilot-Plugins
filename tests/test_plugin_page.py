@@ -262,6 +262,31 @@ class PagePluginTests(unittest.TestCase):
         captions = [site for site, _status, _result in table_rows(page)]
         self.assertTrue(any("共 12 条记录" in caption for caption in captions))
 
+    def test_proxy_follows_site_switch(self):
+        # 代理不再由插件开关控制，直接跟随「站点管理 → 使用代理访问」
+        plugin = self._make({})
+        plugin._proxy_host = lambda: ""
+        logs = []
+        self.plugin_module.logger.warning = lambda *a, **k: logs.append(str(a[0]))
+        self.assertIsNone(plugin._proxies_for({"proxy": False}))     # 站点没勾 → 直连
+        self.assertIsNone(plugin._proxies_for({}))                   # 记录里没有该字段 → 直连
+        self.assertIsNone(plugin._proxies_for({"proxy": True}))      # 勾了但没配全局代理 → 直连 + 写日志
+        self.assertTrue(any("直连" in item for item in logs), logs)
+        plugin._proxy_host = lambda: "http://user:pw@127.0.0.1:7890"
+        proxies = plugin._proxies_for({"proxy": True})
+        self.assertEqual(proxies["http"], "http://user:pw@127.0.0.1:7890")
+        self.assertEqual(proxies["https"], "http://user:pw@127.0.0.1:7890")
+        self.assertEqual(self.plugin_module.mask_proxy("http://user:pw@127.0.0.1:7890"),
+                         "http://***@127.0.0.1:7890")
+
+    def test_proxy_host_falls_back_to_env(self):
+        import os
+        from unittest import mock
+
+        plugin = self._make({})
+        with mock.patch.dict(os.environ, {"HTTPS_PROXY": "http://env.example:8080"}, clear=True):
+            self.assertEqual(plugin._proxy_host(), "http://env.example:8080")
+
     def test_parse_site_ids_handles_all_sentinel(self):
         parse = self.plugin_module.PTSiteSignIn._parse_site_ids
         self.assertEqual(parse(["all", 3, "5"]), ([3, 5], True))
@@ -281,8 +306,9 @@ class PagePluginTests(unittest.TestCase):
         # 顶部是开关行，然后是两列字段，没有分区大标题（参考 MP 官方插件的扁平布局）
         switches = [node.get("props") or {} for node in nodes(form, "VSwitch")]
         models = {props.get("model") for props in switches}
-        for expected in ("enabled", "run_once", "proxy", "fallback_browserless", "read_activity"):
+        for expected in ("enabled", "run_once", "fallback_browserless", "read_activity"):
             self.assertIn(expected, models)
+        self.assertNotIn("proxy", models)      # 代理改成跟随站点管理里的「使用代理访问」
         selects = [node.get("props") or {} for node in nodes(form, "VSelect")]
         select_models = {props.get("model") for props in selects}
         self.assertIn("site_ids", select_models)

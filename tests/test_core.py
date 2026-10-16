@@ -364,6 +364,20 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertEqual(self.core.cookie_uid("c_secure_uid=abc"), "")
         self.assertEqual(self.core.cookie_uid(""), "")
 
+    def test_discover_signin_path_from_index_links(self):
+        html = ('<html><body><a href="/index.php">首页</a>'
+                '<a href="/torrents.php">种子</a>'
+                '<a href="https://other.example/attendance.php">签到</a>'
+                '<a href="javascript:void(0)">签到</a>'
+                '<a href="/signin.php?from=nav">每 日 签 到</a></body></html>')
+        # 跨域、javascript: 链接丢掉，只认同站的「签到」入口
+        self.assertEqual(self.core.discover_signin_path(html, "https://pt.example/"),
+                         "/signin.php?from=nav")
+        self.assertEqual(self.core.discover_signin_path("<html><body>没有链接</body></html>",
+                                                        "https://pt.example/"), "")
+        self.assertEqual(self.core.same_site_path("https://pt.example/", "../x.php"), "/x.php")
+        self.assertEqual(self.core.same_site_path("https://pt.example/", "#top"), "")
+
     def test_fallback_rule_carries_cloudflare_wait(self):
         fallback = self.core.fallback_rule(
             {"engine": "http", "path": "/attendance.php", "cloudflare_wait": 25}, "cloudflare")

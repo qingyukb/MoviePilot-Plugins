@@ -31,7 +31,7 @@ ptsitesignin/
 
 ## HTTP 引擎（默认）
 
-- 请求 `站点域名 + path`，默认 `/attendance.php`
+- 请求 `站点域名 + path`，默认 `/attendance.php`；**默认路径返回 404 / 405 时自动换签到入口**：先从站点首页里找文字含「签到 / 打卡」的同站链接，再依次试 `/signin.php`、`/sign_in.php`、`/checkin.php`、`/plugin_sign-in.php`、`/attendance.php?action=sign`；都找不到时失败原因会列出试过哪些路径，可直接在自定义规则里用 `path` 指定
 - 判定顺序：Cloudflare 验证页 → 登录页特征 → `success` 正则 → `already` 正则 → JSON `state` 字段 → 脚本 `state` 兜底
 - 奖励显示：成功 / 已签到时自动提取奖励文案（如「获得 22 粒爆米花」「魔力值 +30」）显示在结果与通知中；规则里的 `bonus` 正则可覆盖默认模板（捕获组内容即显示文本）
 - 遇 Cloudflare 人机验证或图片验证码时返回对应标记，未声明引擎的站点会自动改用浏览器重试（见下「自动回退到浏览器引擎」）
@@ -185,7 +185,7 @@ ptsitesignin/
 | 并发数 | 同时签到站点数 | 2 |
 | HTTP 超时 | 秒 | 30 |
 | 失败重试次数 / 等待分钟 | 额外重试次数与间隔；重试由后台 Timer 延迟执行，不占用执行线程 | 1 次 / 10 分钟 |
-| HTTP 引擎使用代理 | 复用 MoviePilot 全局代理 | 关 |
+| 走代理 | **不用插件开关**：跟随 MoviePilot「站点管理 → 使用代理访问」——勾了的站点才走 MoviePilot 全局代理（设置 → 系统 → 代理），Browserless 引擎走它自己的出口；勾了但全局代理为空时日志会写明本次仍直连 | 关 |
 | 遇验证码 / CF 自动用浏览器 | 内置预设或未声明引擎的站点 HTTP 撞上 CF / 验证码时自动换浏览器重试（手工写了 engine 的除外） | 开 |
 | Browserless 地址 / Token / 超时 | Browserless 连接参数；读超时自动抬升到「页面内等待预算 + 45 秒余量」（上限 300 秒），避免读超时短于 BrowserQL 内部等待 | 官方地址 / 空 / 100 秒 |
 | 自定义站点规则 | JSON；Cloudflare 交互挑战可用 `cloudflare_wait`（秒）覆盖默认 10 秒；页面内嵌 Turnstile、且验证通过后由站点自己提交的站点（如观众 Audiences）用 `submit_method: "auto"` + `solve_count: 1`：插件会两段式处理（solve 取 token → 同一会话注入并提交），`auto_wait` 控制脚本等 token 的时间、`reconnect_wait` 控制会话保留时间；只有确实能命中的站点才用 `turnstile_click` + `submit_selector` 原生点击 | 空 |

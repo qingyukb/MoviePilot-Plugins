@@ -243,6 +243,8 @@ class SignResult:
     # 网络层失败（读超时 / 连接中断）时置 True：请求是否真的执行过未知，调用方可以补一次
     # 只读回查，避免把「已签到但响应丢失」误报成失败。
     transient: bool = False
+    # 签到路径不存在（HTTP 404 / 405）时置 True：调用方可以换签到入口再试
+    missing_path: bool = False
 
 
 # ------------------------------------------------------------------ 公共工具
@@ -395,19 +397,114 @@ def http_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: int = 3
         "X-Requested-With": "XMLHttpRequest",
     }
     try:
+        session = requests.Session()
+        session.headers.update(headers)
         method = str(rule.get("method") or "GET").upper()
         if method == "POST":
-            response = requests.post(url, headers=headers, timeout=timeout,
-                                     allow_redirects=True, proxies=proxies)
+            response = session.post(url, timeout=timeout, allow_redirects=True, proxies=proxies)
         else:
-            response = requests.get(url, headers=headers, timeout=timeout,
-                                    allow_redirects=True, proxies=proxies)
+            response = session.get(url, timeout=timeout, allow_redirects=True, proxies=proxies)
     except Exception as error:
         return SignResult("failed", f"请求异常：{error}")
     content = response.text or ""
     if response.status_code >= 400:
-        return SignResult("failed", f"请求失败（HTTP {response.status_code}）")
+        return SignResult("failed", f"请求失败（HTTP {response.status_code}）",
+                          missing_path=response.status_code in {404, 405})
     return judge_http(content, rule)
+
+
+# 常见签到入口路径：默认路径 404 时按顺序再试，仍然找不到就从站点首页的链接里自动发现
+FALLBACK_SIGNIN_PATHS = ("/attendance.php", "/signin.php", "/sign_in.php", "/checkin.php",
+                         "/plugin_sign-in.php", "/attendance.php?action=sign")
+# 首页里「签到」入口的链接文字
+SIGNIN_LINK_WORDS = ("签到", "簽到", "打卡")
+_SIGNIN_LINK_RE = re.compile(
+    r"<a\b[^>]*href\s*=\s*[\"']([^\"']+)[\"'][^>]*>(.*?)</a>", re.IGNORECASE | re.DOTALL)
+
+
+def fetch_page(url: str, cookie: str, timeout: int = 30,
+               proxies: Optional[Dict[str, str]] = None, user_agent: str = "") -> str:
+    """GET 一个页面并返回 HTML（失败返回空串），用于发现签到入口。"""
+    import requests
+
+    session = requests.Session()
+    session.headers.update({"User-Agent": user_agent or DEFAULT_USER_AGENT,
+                            "Cookie": str(cookie or ""),
+                            "Accept": "text/html,application/xhtml+xml,*/*;q=0.8"})
+    try:
+        response = session.get(url, timeout=timeout, allow_redirects=True, proxies=proxies)
+    except Exception:
+        return ""
+    if response.status_code >= 400:
+        return ""
+    return response.text or ""
+
+
+def same_site_path(base_url: str, href: str) -> str:
+    """把页面里的链接转成同站路径；跨域、锚点、javascript: 一律丢弃。"""
+    value = str(href or "").strip()
+    if not value or value.startswith(("#", "javascript:", "mailto:", "data:")):
+        return ""
+    target = urllib.parse.urljoin(base_url.rstrip("/") + "/", value)
+    parsed, base = urllib.parse.urlparse(target), urllib.parse.urlparse(base_url)
+    if not parsed.hostname or parsed.hostname != base.hostname:
+        return ""
+    path = parsed.path or "/"
+    if parsed.query:
+        path += "?" + parsed.query
+    return path if path.startswith("/") else ""
+
+
+def discover_signin_path(html: str, base_url: str) -> str:
+    """从首页 HTML 里找文字含「签到 / 打卡」的链接，返回同站路径（找不到返回空串）。
+
+    链接文字里的空白先全部去掉，兼容「每 日 签 到」这类带空格的排版。
+    """
+    for href, label in _SIGNIN_LINK_RE.findall(html or ""):
+        text = re.sub(r"\s+", "", plain_text(label))
+        if not any(word in text for word in SIGNIN_LINK_WORDS):
+            continue
+        path = same_site_path(base_url, href)
+        if path:
+            return path
+    return ""
+
+
+def http_sign_auto(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: int = 30,
+                   proxies: Optional[Dict[str, str]] = None) -> SignResult:
+    """HTTP 签到：默认路径 404 / 405 时自动换签到入口，并把找法写进失败原因。
+
+    站点用的签到路径五花八门（`/attendance.php`、`/signin.php`、自定义路由……）。以前路径写死，
+    碰上没有 `/attendance.php` 的站点只会得到一句「请求失败（HTTP 404）」。现在的顺序是：
+    先试规则里的 path → 从站点首页「签到」链接自动发现 → 再试几个常见路径。
+    """
+    result = http_sign(site, rule, timeout=timeout, proxies=proxies)
+    if not result.missing_path:
+        return result
+    base_url = str(site.get("url") or "").rstrip("/")
+    cookie = str(site.get("cookie") or "").strip()
+    user_agent = str(site.get("ua") or "").strip()
+    tried = [str(rule.get("path") or DEFAULT_HTTP_PATH)]
+    candidates: List[str] = []
+    discovered = discover_signin_path(
+        fetch_page(target_url(base_url, DEFAULT_INDEX_PATH), cookie, timeout, proxies, user_agent),
+        base_url)
+    if discovered and discovered not in tried:
+        candidates.append(discovered)
+    for path in FALLBACK_SIGNIN_PATHS:
+        if path not in tried and path not in candidates:
+            candidates.append(path)
+    if not discovered and not candidates:
+        return result
+    for path in candidates[:4]:
+        tried.append(path)
+        retry = http_sign(site, dict(rule, path=path), timeout=timeout, proxies=proxies)
+        if not retry.missing_path:
+            if retry.status in {"success", "already"}:
+                return SignResult(retry.status, f"{retry.message}（签到入口：{path}）")
+            return retry
+    return SignResult("failed", f"没找到可用的签到入口（HTTP 404）：已试过 {'、'.join(tried)}；"
+                                "可在自定义规则里用 path 指定该站的签到路径")
 
 
 def plain_text(content: str) -> str:

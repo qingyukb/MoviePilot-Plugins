@@ -266,6 +266,39 @@ class LoginCoreTests(unittest.TestCase):
                 self.assertEqual(result.status, "failed")
                 self.assertIn("最近动向", result.message)
 
+    def test_http_sign_auto_discovers_signin_path(self):
+        # 站点没有 /attendance.php（学校那种 404）时，从头版「签到」链接自动发现入口
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                session = FakeSession({
+                    "index.php": lambda s, u: FakeResponse(
+                        u, '<html><body><a href="/signin.php">签到</a></body></html>'),
+                    "attendance.php": lambda s, u: FakeResponse(u, "not found", status_code=404),
+                    "signin.php": lambda s, u: FakeResponse(u, "<html><body>签到成功！</body></html>"),
+                })
+                rule = core.resolve_rule({"url": "https://pt.example/"}, {})
+                with mock.patch.dict(sys.modules, {"requests": fake_requests(session)}):
+                    result = core.http_sign_auto({"url": "https://pt.example/", "cookie": "c=1"}, rule)
+                self.assertEqual(result.status, "success")
+                self.assertIn("签到入口：/signin.php", result.message)
+
+    def test_http_sign_auto_reports_tried_paths(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                session = FakeSession({
+                    "index.php": lambda s, u: FakeResponse(u, "<html><body>没有签到链接</body></html>"),
+                    "attendance.php": lambda s, u: FakeResponse(u, "not found", status_code=404),
+                    "signin.php": lambda s, u: FakeResponse(u, "not found", status_code=404),
+                })
+                rule = core.resolve_rule({"url": "https://pt.example/"}, {})
+                with mock.patch.dict(sys.modules, {"requests": fake_requests(session)}), \
+                        mock.patch.object(core, "FALLBACK_SIGNIN_PATHS", ("/signin.php",)):
+                    result = core.http_sign_auto({"url": "https://pt.example/", "cookie": "c=1"}, rule)
+                self.assertEqual(result.status, "failed")
+                self.assertIn("签到入口", result.message)
+                self.assertIn("/attendance.php", result.message)
+                self.assertIn("/signin.php", result.message)
+
     def test_read_activity_requires_cookie(self):
         for core in CORES:
             with self.subTest(core=core.__name__):

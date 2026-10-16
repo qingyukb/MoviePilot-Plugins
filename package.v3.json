@@ -3,13 +3,13 @@
     "name": "PT站点签到",
     "description": "双引擎 PT 签到，可选真实登录刷新 Cookie 并读取站点「最近动向」：HTTP 直连签到接口，或经 Browserless 完成图片验证码 / Cloudflare / Turnstile 挑战。",
     "labels": "站点,签到",
-    "version": "1.4.4",
+    "version": "1.4.5",
     "icon": "https://raw.githubusercontent.com/qingyukb/MoviePilot-Plugins/main/icons/ptsignin.png",
     "author": "qingyu",
     "level": 2,
     "system_version": ">=3.0.0",
     "history": {
-      "v1.4.4": "修复「最近动向」被填成假日期（例如皇后显示 2026-09-18）：关键词后面必须紧跟时间才算命中，多个关键词命中时取距离最近的那个，没有关键词时只接受带时分的时间——裸日期在种子列表 / 公告里到处都是，不再当成最近动向（宁可显示未读取到并可配 activity_path）。同时新增 cookie_uid()：从 NexusPHP 的 c_secure_uid（base64）解出用户 ID，自定义主题站点首页不挂 userdetails 链接时也能打开用户页读取最近动向；关键词补上「最近访问 / 上次活动 / 最后活动 / 最后上线 / 最后活跃」等。通知改为简短模式：只报「站点 N 个｜成功 X｜失败 Y」，有失败才附「站点：原因」列表，原因超过 180 字截断。"
+      "v1.4.5": "代理改为跟随 MoviePilot「站点管理 → 使用代理访问」：去掉插件自己的「HTTP 引擎使用代理」开关，站点记录勾了才走 MoviePilot 全局代理（设置 → 系统 → 代理），Browserless 引擎走它自己的出口；勾了但全局代理为空时日志会写明「本次仍走直连」，不会再有『勾了却没效果』的困惑。另外修复签到路径写死导致 404 的问题（学校 pt.btschool.club）：HTTP 引擎在默认路径返回 404 / 405 时会自动换签到入口——先从站点首页找文字含「签到 / 打卡」的同站链接，再依次试 /signin.php、/sign_in.php、/checkin.php、/plugin_sign-in.php、/attendance.php?action=sign；都找不到时失败原因会列出试过的路径，并提示可用 path 指定。http_sign 改用 requests.Session，便于测试与复用。"
     }
   }
 }
