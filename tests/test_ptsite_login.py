@@ -209,6 +209,37 @@ class LoginCoreTests(unittest.TestCase):
                 self.assertEqual(result.status, "failed")
                 self.assertIn("登录态无效", result.message)
 
+    def test_read_activity_skips_cloudflare_challenge_page(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                challenge = ("<html><head><title>Just a moment...</title></head><body>"
+                             "<script>window._cf_chl_opt={};</script>"
+                             "<div>最近动向：2020-01-01 00:00:00</div></body></html>")
+                session = FakeSession({
+                    "index.php": lambda s, u: FakeResponse(u, INDEX_HTML),
+                    "attendance.php": lambda s, u: FakeResponse(u, challenge),
+                    "userdetails.php?id=123": lambda s, u: FakeResponse(u, DETAIL_HTML),
+                })
+                with mock.patch.dict(sys.modules, {"requests": fake_requests(session)}):
+                    result = core.read_activity({"url": "https://audiences.me/"}, "c_secure_uid=1",
+                                                timeout=5, paths=["/attendance.php"])
+                self.assertEqual(result.status, "success")
+                # 挑战页里的「最近动向」是假的，必须跳过并换下一个候选页
+                self.assertIn("userdetails.php?id=123", result.source)
+                self.assertEqual(result.last_seen, "2026-10-16 08:12:03")
+
+    def test_read_activity_reports_cloudflare_on_index(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                session = FakeSession({"index.php": lambda s, u: FakeResponse(
+                    u, "<html><head><title>Just a moment...</title></head>"
+                       "<script>window._cf_chl_opt={};</script></html>")})
+                with mock.patch.dict(sys.modules, {"requests": fake_requests(session)}):
+                    result = core.read_activity({"url": "https://audiences.me/"},
+                                                "c_secure_uid=1", timeout=5)
+                self.assertEqual(result.status, "failed")
+                self.assertIn("Cloudflare", result.message)
+
     def test_read_activity_requires_cookie(self):
         for core in CORES:
             with self.subTest(core=core.__name__):

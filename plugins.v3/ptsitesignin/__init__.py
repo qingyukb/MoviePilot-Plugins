@@ -48,12 +48,39 @@ from .core import (
     account_ready,
     fallback_rule,
     http_sign,
+    is_login_record,
+    is_signin_record,
     login as site_login,
     parse_rules,
     read_activity,
+    record_meta,
     resolve_rule,
+    site_record_counts,
     site_state_key,
+    summarize_records,
     target_url,
+)
+
+# ---------------------------------------------------------------- 常量
+# 站点选择里的哨兵值：勾选它等于「全部站点」，并且以后新增的站点自动包含进来。
+ALL_SITES = "all"
+# 每个站点面板里最多展示多少条历史记录（历史本身按天保留最近 30 天）。
+HISTORY_SHOW = 10
+# 详情页样式（MoviePilot 插件页支持内联 style 组件）。
+PAGE_STYLE = (
+    ".ptsignin-summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px}"
+    ".ptsignin-stat{padding:12px}"
+    ".ptsignin-stat__label{color:rgba(var(--v-theme-on-surface),.62);font-size:.78rem}"
+    ".ptsignin-stat__value{margin-top:6px;font-size:1.35rem;font-weight:700}"
+    ".ptsignin-section{display:flex;align-items:center;margin:18px 0 6px;font-weight:600;font-size:.95rem}"
+    ".ptsignin-form-title{margin:6px 0 2px;font-weight:600;font-size:.95rem;color:rgb(var(--v-theme-primary))}"
+    ".ptsignin-message{margin-top:6px;font-size:.84rem;word-break:break-word}"
+    ".ptsignin-sub{margin-top:4px;font-size:.8rem;color:rgba(var(--v-theme-on-surface),.72);"
+    "word-break:break-word}"
+    ".ptsignin-record{display:flex;align-items:baseline;gap:8px;padding:4px 0;"
+    "border-bottom:1px dashed rgba(var(--v-theme-on-surface),.1)}"
+    ".ptsignin-record__time{font-size:.76rem;color:rgba(var(--v-theme-on-surface),.6);white-space:nowrap}"
+    ".ptsignin-record__msg{font-size:.8rem;word-break:break-word}"
 )
 
 
@@ -62,7 +89,7 @@ class PTSiteSignIn(_PluginBase):
     plugin_desc = ("双引擎 PT 签到，可选真实登录刷新 Cookie 并读取站点「最近动向」：HTTP 直连签到接口，"
                    "或经 Browserless 完成验证码 / Cloudflare / Turnstile 挑战。")
     plugin_icon = "signin.png"
-    plugin_version = "1.3.3"
+    plugin_version = "1.4.0"
     plugin_author = "qingyu"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "ptsignin_"
@@ -74,6 +101,8 @@ class PTSiteSignIn(_PluginBase):
     _cron = "25 8 * * *"
     _site_ids: List[int] = []
     _login_site_ids: List[int] = []
+    _all_sites = False          # 签到站点勾了「全部站点」
+    _all_login_sites = False    # 登录站点勾了「全部站点」
     _concurrency = 2
     _timeout = 30
     _retry_delay_minutes = 10
@@ -106,8 +135,9 @@ class PTSiteSignIn(_PluginBase):
         self._enabled = bool(config.get("enabled", False))
         self._notify_mode = self._parse_notify_mode(config)
         self._cron = str(config.get("cron") or "25 8 * * *")
-        self._site_ids = [int(v) for v in (config.get("site_ids") or []) if str(v).isdigit()]
-        self._login_site_ids = [int(v) for v in (config.get("login_site_ids") or []) if str(v).isdigit()]
+        self._site_ids, self._all_sites = self._parse_site_ids(config.get("site_ids"))
+        self._login_site_ids, self._all_login_sites = self._parse_site_ids(
+            config.get("login_site_ids"))
         self._concurrency = max(1, min(int(config.get("concurrency") or 2), 5))
         self._timeout = max(5, min(int(config.get("timeout") or 30), 120))
         retry_count = config.get("retry_count")
@@ -152,13 +182,27 @@ class PTSiteSignIn(_PluginBase):
         except Exception:
             logger.exception("PT站点签到：保存后立即执行失败")
 
+    @staticmethod
+    def _parse_site_ids(raw: Any) -> Tuple[List[int], bool]:
+        """解析站点选择：返回（站点 ID 列表，是否勾了「全部站点」）。"""
+        values = raw if isinstance(raw, (list, tuple, set)) else ([raw] if raw else [])
+        ids: List[int] = []
+        all_selected = False
+        for value in values:
+            text_value = str(value).strip()
+            if text_value == ALL_SITES:
+                all_selected = True
+            elif text_value.isdigit():
+                ids.append(int(text_value))
+        return ids, all_selected
+
     def _config(self) -> Dict[str, Any]:
         return {
             "enabled": self._enabled,
             "notify_mode": self._notify_mode,
             "cron": self._cron,
-            "site_ids": self._site_ids,
-            "login_site_ids": self._login_site_ids,
+            "site_ids": self._site_ids + ([ALL_SITES] if self._all_sites else []),
+            "login_site_ids": self._login_site_ids + ([ALL_SITES] if self._all_login_sites else []),
             "concurrency": self._concurrency,
             "timeout": self._timeout,
             "retry_count": self._retry_count,
@@ -208,65 +252,87 @@ class PTSiteSignIn(_PluginBase):
             sites = SiteOper().list_order_by_pri()
         except Exception:
             sites = []
-        options = [{"title": site.name, "value": site.id}
-                   for site in sites if getattr(site, "cookie", None)]
+        # 第一个选项是哨兵值 all：等于「全部站点，且自动包含以后新增的站点」
+        options: List[Dict[str, Any]] = [{"title": "全部站点（含后续新增）", "value": ALL_SITES}]
+        options += [{"title": site.name, "value": site.id}
+                    for site in sites if getattr(site, "cookie", None)]
         notify_items = [
             {"title": "每次执行后通知", "value": "always"},
             {"title": "仅失败时通知", "value": "failed"},
             {"title": "不通知", "value": "off"},
         ]
         return [{"component": "VForm", "content": [
+            self._form_title("基础"),
             {"component": "VRow", "content": [
-                {"component": "VCol", "props": {"cols": 12, "md": 3},
+                {"component": "VCol", "props": {"cols": 12, "md": 4},
                  "content": [{"component": "VSwitch", "props": {"model": "enabled", "label": "启用插件"}}]},
-                {"component": "VCol", "props": {"cols": 12, "md": 3},
-                 "content": [{"component": "VSwitch", "props": {"model": "proxy", "label": "HTTP 引擎使用代理"}}]},
-                {"component": "VCol", "props": {"cols": 12, "md": 3},
-                 "content": [{"component": "VSwitch", "props": {"model": "fallback_browserless",
-                             "label": "遇验证码 / CF 自动用浏览器",
-                             "hint": "内置预设或未声明引擎的站点遇盾时生效；手工在规则里写了 engine 则不生效，需填写 Browserless Token", "persistent-hint": True}}]},
-                {"component": "VCol", "props": {"cols": 12, "md": 3},
-                 "content": [{"component": "VSwitch", "props": {"model": "run_once", "label": "保存后立即执行一次"}}]},
-            ]},
-            {"component": "VRow", "content": [
-                {"component": "VCol", "props": {"cols": 12, "md": 6},
+                {"component": "VCol", "props": {"cols": 12, "md": 4},
                  "content": [{"component": "VCronField", "props": {"model": "cron", "label": "执行周期",
                              "placeholder": "5 位 Cron；例如 25 8 * * *"}}]},
-                {"component": "VCol", "props": {"cols": 12, "md": 6},
-                 "content": [{"component": "VSelect", "props": {"model": "site_ids", "label": "签到站点",
-                             "items": options, "multiple": True, "chips": True,
-                             "hint": "仅显示已在 MoviePilot 保存 Cookie 的站点", "persistent-hint": True}}]},
+                {"component": "VCol", "props": {"cols": 12, "md": 4},
+                 "content": [{"component": "VSwitch", "props": {"model": "run_once", "label": "保存后立即执行一次",
+                             "hint": "保存配置后延后 3 秒在后台跑一轮，不阻塞设置页", "persistent-hint": True}}]},
             ]},
+            self._form_title("站点选择"),
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12, "md": 6},
-                 "content": [{"component": "VSelect", "props": {"model": "login_site_ids", "label": "仅登录站点",
-                             "items": options, "multiple": True, "chips": True,
-                             "hint": "只执行真实登录并读取「最近动向」，不签到；与签到站点重复时按签到处理", "persistent-hint": True}}]},
+                 "content": [{"component": "VSelect", "props": {"model": "site_ids", "label": "签到站点",
+                             "items": options, "multiple": True, "chips": True, "clearable": True,
+                             "hint": "只执行签到；列表仅显示已在 MoviePilot 保存 Cookie 的站点，选「全部站点」后自动包含后续新增的站点",
+                             "persistent-hint": True}}]},
+                {"component": "VCol", "props": {"cols": 12, "md": 6},
+                 "content": [{"component": "VSelect", "props": {"model": "login_site_ids", "label": "登录站点",
+                             "items": options, "multiple": True, "chips": True, "clearable": True,
+                             "hint": "只做真实登录并读取「最近动向」，不签到；选「全部站点」后自动包含后续新增的站点",
+                             "persistent-hint": True}}]},
             ]},
+            {"component": "VAlert", "props": {"type": "info", "variant": "tonal", "density": "compact",
+                                              "class": "mt-2"},
+             "content": [{"component": "span", "text":
+                          "同一站点两边都选时，一轮里会把两件事都做掉：真实登录刷新 Cookie + 签到 + 读取「最近动向」，"
+                          "并且同时计入详情页的「签到状态」与「登录状态」（不会为了登录再登一次）。"}]},
+            self._form_title("执行与重试"),
+            {"component": "VRow", "content": [
+                {"component": "VCol", "props": {"cols": 12, "md": 3},
+                 "content": [{"component": "VTextField", "props": {"model": "concurrency", "label": "并发数",
+                             "type": "number", "min": 1, "max": 5,
+                             "hint": "建议 2；Browserless 按额度计费，建议 1–2", "persistent-hint": True}}]},
+                {"component": "VCol", "props": {"cols": 12, "md": 3},
+                 "content": [{"component": "VTextField", "props": {"model": "timeout", "label": "HTTP 超时（秒）",
+                             "type": "number", "min": 5, "max": 120, "persistent-hint": True}}]},
+                {"component": "VCol", "props": {"cols": 12, "md": 3},
+                 "content": [{"component": "VTextField", "props": {"model": "retry_count",
+                             "label": "失败重试次数", "type": "number", "min": 0, "max": 5,
+                             "hint": "0 为关闭，默认 1 次", "persistent-hint": True}}]},
+                {"component": "VCol", "props": {"cols": 12, "md": 3},
+                 "content": [{"component": "VTextField", "props": {"model": "retry_delay_minutes",
+                             "label": "失败后等待分钟数", "type": "number", "min": 1, "max": 1440,
+                             "hint": "仅失败站点重试前等待；默认 10 分钟", "persistent-hint": True}}]},
+            ]},
+            self._form_title("网络与引擎"),
+            {"component": "VRow", "content": [
+                {"component": "VCol", "props": {"cols": 12, "md": 6},
+                 "content": [{"component": "VSwitch", "props": {"model": "proxy", "label": "HTTP 引擎使用代理",
+                             "hint": "复用 MoviePilot 全局代理设置", "persistent-hint": True}}]},
+                {"component": "VCol", "props": {"cols": 12, "md": 6},
+                 "content": [{"component": "VSwitch", "props": {"model": "fallback_browserless",
+                             "label": "遇验证码 / CF 自动用浏览器",
+                             "hint": "内置预设或未声明引擎的站点遇盾时生效；手工在规则里写了 engine 则不生效，需填写 Browserless Token",
+                             "persistent-hint": True}}]},
+            ]},
+            self._form_title("通知"),
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12, "md": 6},
                  "content": [{"component": "VSelect", "props": {"model": "notify_mode", "label": "通知模式",
                              "items": notify_items,
                              "hint": "签到结束后通过 MoviePilot 通知渠道推送结果", "persistent-hint": True}}]},
-                {"component": "VCol", "props": {"cols": 12, "md": 3},
-                 "content": [{"component": "VTextField", "props": {"model": "concurrency", "label": "并发数",
-                             "type": "number", "min": 1, "max": 5,
-                             "hint": "建议 2；Browserless 为付费额度，建议 1–2", "persistent-hint": True}}]},
-                {"component": "VCol", "props": {"cols": 12, "md": 3},
-                 "content": [{"component": "VTextField", "props": {"model": "timeout", "label": "HTTP 超时（秒）",
-                             "type": "number", "min": 5, "max": 120, "persistent-hint": True}}]},
-            ]},
-            {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12, "md": 6},
-                 "content": [{"component": "VTextField", "props": {"model": "retry_count",
-                             "label": "失败重试次数", "type": "number", "min": 0, "max": 5,
-                             "hint": "0 为关闭，默认 1 次", "persistent-hint": True}}]},
-                {"component": "VCol", "props": {"cols": 12, "md": 6},
-                 "content": [{"component": "VTextField", "props": {"model": "retry_delay_minutes",
-                             "label": "失败后等待分钟数", "type": "number", "min": 1, "max": 1440,
-                             "hint": "仅失败站点重试前等待；默认 10 分钟", "persistent-hint": True}}]},
+                 "content": [{"component": "VSwitch", "props": {"model": "read_activity",
+                             "label": "读取「最近动向」",
+                             "hint": "用站点 Cookie（站点管理里配置了账号时会真实登录换回的新 Cookie）打开用户页 / 签到页，抓取「最近动向」写入结果与通知",
+                             "persistent-hint": True}}]},
             ]},
-            {"component": "VDivider", "props": {"class": "my-4"}},
+            self._form_title("Browserless（图片验证码 / Cloudflare / Turnstile）"),
             {"component": "VAlert", "props": {"type": "info", "variant": "tonal", "density": "compact"},
              "content": [{"component": "span", "text": "引擎按站点规则自动判定：需要图片验证码、Cloudflare / Turnstile 挑战、弹窗签到或 Altcha 的站点自动走 Browserless（内置预设已声明，也可在下方自定义规则中用 engine 指定），其余站点一律走 HTTP 直连、不消耗额度；HTTP 直连撞上 Cloudflare 或验证码时会自动改用浏览器引擎重试一次（手工在自定义规则里写了 engine 的站点除外，可在上方关闭）；内置的 Cloudflare「Just a moment...」交互挑战会在浏览器里等待自动放行，默认 10 秒。首次使用 Browserless 请先 "},
                          {"component": "a", "props": {"href": "https://www.browserless.io/signup/email?plan=free",
@@ -278,96 +344,221 @@ class PTSiteSignIn(_PluginBase):
                           "text": "账户控制台"},
                          {"component": "span", "text": " 的 API Key 区域复制 Token 填入下方。Token 不会写入日志。"}]},
             {"component": "VRow", "content": [
-                {"component": "VCol", "props": {"cols": 12, "md": 6},
+                {"component": "VCol", "props": {"cols": 12, "md": 4},
                  "content": [{"component": "VTextField", "props": {"model": "browserless_url",
                              "label": "Browserless 地址", "placeholder": DEFAULT_BROWSERLESS_URL,
                              "hint": "可填服务根地址或完整 /stealth/bql 地址", "persistent-hint": True}}]},
-                {"component": "VCol", "props": {"cols": 12, "md": 6},
+                {"component": "VCol", "props": {"cols": 12, "md": 4},
                  "content": [{"component": "VTextField", "props": {"model": "browserless_token",
                              "label": "Browserless Token", "type": "password",
                              "hint": "仅在使用 Browserless 引擎时需要", "persistent-hint": True}}]},
-            ]},
-            {"component": "VRow", "content": [
-                {"component": "VCol", "props": {"cols": 12, "md": 6},
+                {"component": "VCol", "props": {"cols": 12, "md": 4},
                  "content": [{"component": "VTextField", "props": {"model": "browserless_timeout",
                              "label": "Browserless 超时（秒）", "type": "number", "min": 15, "max": 300,
-                             "hint": "含验证码求解与页面等待时间；插件会自动保证不低于页面内等待预算，建议 120–180", "persistent-hint": True}}]},
+                             "hint": "含验证码求解与页面等待；插件会自动保证不低于页面内等待预算，建议 120–180",
+                             "persistent-hint": True}}]},
             ]},
+            self._form_title("高级"),
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12},
                  "content": [{"component": "VTextarea", "props": {"model": "site_rules",
-                             "label": "自定义站点规则 JSON（可留空）", "rows": 10,
+                             "label": "自定义站点规则 JSON（可留空）", "rows": 8,
                              "hint": '键为域名或站点 ID。HTTP：{"path":"/attendance.php","success":"正则","already":"正则"}；'
                                      'Browserless：{"engine":"browserless","mode":"cloudflare|image|trigger_image|altcha|open_page", ...}；'
                                      '页面内嵌 Turnstile、验证通过后由站点自己提交的站点（如观众）用 {"submit_method":"auto","solve_count":1}：'
                                      '插件先 solve 取回 token，再在同一个浏览器会话里把 token 注入页面并提交（auto_wait 控等 token 时间、reconnect_wait 控会话保留时间）；'
-                                     'Cloudflare「Just a moment...」交互挑战默认在页面等待 10 秒自动放行，可用 {"cloudflare_wait": 20} 调大',
+                                     'Cloudflare「Just a moment...」交互挑战默认在页面等待 10 秒自动放行，可用 {"cloudflare_wait": 20} 调大；'
+                                     '「最近动向」读不到时可加 {"activity_path":"/userdetails.php?id=1"} 指定页面',
                              "persistent-hint": True}}]},
-            ]},
-            {"component": "VRow", "content": [
-                {"component": "VCol", "props": {"cols": 12, "md": 6},
-                 "content": [{"component": "VSwitch", "props": {"model": "read_activity",
-                             "label": "签到后读取「最近动向」",
-                             "hint": "用站点 Cookie（站点管理里配置了账号时会真实登录换回的新 Cookie）打开用户页，抓取「最近动向」写入结果与通知", "persistent-hint": True}}]},
             ]},
         ]}], self._config()
 
+    @staticmethod
+    def _form_title(text: str) -> Dict[str, Any]:
+        """设置页的分区小标题，把长表单切成几块，便于查找。
+
+        用 Vuetify 工具类 + 内联颜色，不依赖详情页注入的 CSS（设置页拿不到那段 style）。
+        """
+        return {"component": "VRow", "content": [
+            {"component": "VCol", "props": {"cols": 12},
+             "content": [{"component": "div",
+                          "props": {"class": "ptsignin-form-title text-subtitle-2 font-weight-bold mt-2",
+                                    "style": "color:rgb(var(--v-theme-primary))"},
+                          "text": text}]}]}
+
     def get_page(self) -> List[dict]:
-        records = self.get_data("latest") or []
-        if not isinstance(records, list):
-            records = []
-        records = [row for row in records if isinstance(row, dict)]
-        total = len(records)
-        success = sum(row.get("status") in {"success", "already", "login"} for row in records)
-        failed = total - success
-        if not records:
+        """插件详情页：「签到状态」「登录状态」两块分开显示，每站一张可展开卡片。"""
+        latest = self._records_of("latest")
+        history = self._history_records()
+        if not latest and not history:
             return [{"component": "VAlert", "props": {"type": "info", "variant": "tonal",
-                     "text": "暂无签到记录；保存配置后使用「保存后立即执行一次」开始签到。"}}]
-        rows = []
-        for row in records:
-            meta = self._status_meta(str(row.get("status") or ""))
-            rows.append({"component": "tr", "content": [
-                {"component": "td", "text": str(row.get("site") or "未知站点")},
-                {"component": "td", "text": "浏览器" if row.get("engine") == "browserless" else "HTTP"},
-                {"component": "td", "content": [{"component": "VChip", "props": {
-                    "size": "x-small", "variant": "tonal", "color": meta["color"],
-                    "prepend-icon": meta["icon"]}, "text": meta["label"]}]},
-                {"component": "td", "text": str(row.get("login") or "-")},
-                {"component": "td", "text": str(row.get("activity") or "-")},
-                {"component": "td", "text": str(row.get("ran_at") or "-")},
-                {"component": "td", "text": str(row.get("message") or "-")},
-            ]})
-        return [
-            {"component": "style", "text":
-             ".ptsignin-summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}"
-             ".ptsignin-stat{padding:12px}.ptsignin-stat__label{color:rgba(var(--v-theme-on-surface),.62);font-size:.78rem}"
-             ".ptsignin-stat__value{margin-top:6px;font-size:1.35rem;font-weight:700}"
-             ".ptsignin-table-wrap{overflow-x:auto;border:1px solid rgba(var(--v-theme-on-surface),.08);border-radius:8px}"},
+                     "text": "暂无签到记录；保存配置后点「保存后立即执行一次」，或等 Cron 触发。"}}]
+        summary = summarize_records(latest, self._selected_site_names())
+        # 双选站点的记录带 dual 标记：两块都要出现（签到状态看签到结果，登录状态看登录结果）
+        signin_rows = [row for row in latest if is_signin_record(row)]
+        login_rows = [row for row in latest if is_login_record(row)]
+        page: List[dict] = [
+            {"component": "style", "text": PAGE_STYLE},
             {"component": "div", "props": {"class": "ptsignin-summary"}, "content": [
-                self._stat("本次站点", str(total), "已选择并完成处理", "info"),
-                self._stat("成功/已签到/登录", f"{success}/{total}", "含仅登录站点", "success"),
-                self._stat("失败", str(failed), "请查看失败原因或更新 Cookie", "error" if failed else "success"),
+                self._stat("站点", str(summary["total"]), "最近一轮产生记录的站点数", "info"),
+                self._stat("成功", str(summary["success"]), "签到成功 / 今日已签到 / 登录成功", "success"),
+                self._stat("失败", str(summary["failed"]), "可判定的失败，如 Cookie 失效",
+                           "error" if summary["failed"] else "success"),
+                self._stat("未确认", str(summary["uncertain"]), "结果未知，建议人工核对",
+                           "warning" if summary["uncertain"] else "success"),
+                self._stat("未记录", str(summary["missing"]), "本轮勾选但一条记录都没有的站点",
+                           "warning" if summary["missing"] else "success"),
             ]},
-            {"component": "div", "props": {"class": "ptsignin-table-wrap mt-3"},
-             "content": [{"component": "VTable", "props": {"density": "compact", "hover": True}, "content": [
-                 {"component": "thead", "content": [{"component": "tr", "content": [
-                     {"component": "th", "text": "站点"}, {"component": "th", "text": "方式"},
-                     {"component": "th", "text": "状态"}, {"component": "th", "text": "登录"},
-                     {"component": "th", "text": "最近动向"}, {"component": "th", "text": "时间"},
-                     {"component": "th", "text": "结果"}]}]},
-                 {"component": "tbody", "content": rows},
-             ]}]},
         ]
+        page += self._status_section("签到状态", "mdi-calendar-check", signin_rows, history,
+                                     "本轮没有签到记录；在设置里勾选「签到站点」后重跑一次即可。")
+        page += self._status_section("登录状态", "mdi-login-variant", login_rows, history,
+                                     "本轮没有登录记录；在设置里勾选「登录站点」即可读取「最近动向」。",
+                                     login_view=True)
+        recorded = {str(row.get("site") or "") for row in latest}
+        missing = [name for name in self._selected_site_names() if name not in recorded]
+        if missing:
+            page.append({"component": "VAlert",
+                         "props": {"type": "warning", "variant": "tonal", "density": "compact",
+                                   "class": "mt-3"},
+                         "text": "本轮没有记录的站点：" + "、".join(missing)
+                                 + "（站点管理里没保存 Cookie、或本轮没执行到）"})
+        return page
+
+    def _status_section(self, title: str, icon: str, rows: List[Dict[str, Any]],
+                        history: List[Dict[str, Any]], empty_hint: str,
+                        login_view: bool = False) -> List[dict]:
+        """一块状态区：小标题 + 每个站点一张面板，面板标题里带「N 条记录」。"""
+        belongs = is_login_record if login_view else is_signin_record
+        section_history = [row for row in history if belongs(row)]
+        counts = site_record_counts(section_history)
+        order: List[str] = []
+        for row in rows + section_history:
+            name = str(row.get("site") or "未知站点")
+            if name not in order:
+                order.append(name)
+        header = {"component": "div", "props": {"class": "ptsignin-section"}, "content": [
+            {"component": "VIcon", "props": {"icon": icon, "size": "18", "class": "mr-2"}},
+            {"component": "span", "text": title},
+            {"component": "span", "props": {"class": "text-caption text-medium-emphasis ml-2"},
+             "text": f"{len(order)} 个站点"},
+        ]}
+        if not order:
+            return [header, {"component": "VAlert",
+                             "props": {"type": "info", "variant": "tonal", "density": "compact"},
+                             "text": empty_hint}]
+        panels = []
+        for name in order:
+            items = [row for row in section_history
+                     if str(row.get("site") or "未知站点") == name]
+            panels.append({"component": "VExpansionPanel",
+                           "props": {"title": f"{name} · {counts.get(name, 0)} 条记录"},
+                           "content": self._site_panel(name, rows, items, login_view)})
+        return [header, {"component": "VExpansionPanels",
+                         "props": {"variant": "accordion", "flat": True}, "content": panels}]
+
+    def _site_panel(self, name: str, rows: List[Dict[str, Any]], items: List[Dict[str, Any]],
+                    login_view: bool) -> List[dict]:
+        """单个站点面板：最近一轮的结果 + 最近若干条历史记录。"""
+        content: List[dict] = []
+        current = next((row for row in rows if str(row.get("site") or "未知站点") == name), None)
+        if current is not None:
+            meta = record_meta(self._login_view(current) if login_view else current)
+            head: List[dict] = [{"component": "VChip", "props": {
+                "size": "small", "variant": "tonal", "color": meta["color"],
+                "prepend-icon": meta["icon"]}, "text": meta["label"]}]
+            engine = str(current.get("engine") or "")
+            if engine:
+                head.append({"component": "VChip", "props": {"size": "small", "variant": "text",
+                             "color": "info"},
+                             "text": "浏览器" if engine == "browserless" else "HTTP"})
+            if current.get("ran_at"):
+                head.append({"component": "span",
+                             "props": {"class": "text-caption text-medium-emphasis"},
+                             "text": str(current["ran_at"])})
+            content.append({"component": "div",
+                            "props": {"class": "d-flex flex-wrap align-center ga-2"},
+                            "content": head})
+            message = str(current.get("message") or "").strip()
+            if message:
+                content.append({"component": "div", "props": {"class": "ptsignin-message"},
+                                "text": message})
+            if login_view:
+                login_text = str(current.get("login") or "").strip()
+                if login_text:
+                    content.append({"component": "div", "props": {"class": "ptsignin-sub"},
+                                    "text": "登录：" + login_text})
+                activity = str(current.get("activity") or "").strip()
+                content.append({"component": "div", "props": {"class": "ptsignin-sub"},
+                                "text": "最近动向：" + (activity or self._activity_hint())})
+        if items:
+            content.append({"component": "div", "props": {"class": "ptsignin-sub mt-2"},
+                            "text": f"最近 {min(len(items), HISTORY_SHOW)} 条记录"})
+            for row in items[:HISTORY_SHOW]:
+                meta = record_meta(self._login_view(row) if login_view else row)
+                content.append({"component": "div", "props": {"class": "ptsignin-record"},
+                                "content": [
+                                    {"component": "span",
+                                     "props": {"class": "ptsignin-record__time"},
+                                     "text": str(row.get("ran_at") or "-")},
+                                    {"component": "VChip", "props": {
+                                        "size": "x-small", "variant": "tonal",
+                                        "color": meta["color"]}, "text": meta["label"]},
+                                    {"component": "span",
+                                     "props": {"class": "ptsignin-record__msg"},
+                                     "text": self._record_detail(row, login_view)}]})
+        else:
+            content.append({"component": "div", "props": {"class": "ptsignin-sub mt-2"},
+                            "text": "还没有历史记录"})
+        return content
+
+    @staticmethod
+    def _record_detail(row: Dict[str, Any], login_view: bool) -> str:
+        """面板里每条历史记录的明细文案。"""
+        if login_view:
+            detail = str(row.get("login") or "").strip() or str(row.get("message") or "").strip()
+            activity = str(row.get("activity") or "").strip()
+            if activity and activity not in detail:
+                return f"{detail}｜最近动向：{activity}" if detail else f"最近动向：{activity}"
+            return detail
+        return str(row.get("message") or "").strip()
+
+    @staticmethod
+    def _login_view(row: Dict[str, Any]) -> Dict[str, Any]:
+        """「登录状态」用的投影：双选站点取登录结果（login_status），而不是签到结果。"""
+        login_status = str(row.get("login_status") or "")
+        return dict(row, status=login_status) if login_status else row
+
+    def _records_of(self, key: str) -> List[Dict[str, Any]]:
+        data = self.get_data(key) or []
+        return [row for row in data if isinstance(row, dict)] if isinstance(data, list) else []
+
+    def _history_records(self) -> List[Dict[str, Any]]:
+        """按天读回历史记录（新的在前），用于统计每站「N 条记录」。"""
+        index = self.get_data("history_index") or []
+        keys = [str(key) for key in index if isinstance(key, str)] if isinstance(index, list) else []
+        return [row for key in sorted(keys, reverse=True) for row in self._records_of(key)]
+
+    def _selected_site_names(self) -> List[str]:
+        """本轮勾选的站点名（「全部站点」按站点管理里的全部站点算）。"""
+        try:
+            sites = {site.id: site for site in SiteOper().list_order_by_pri()}
+        except Exception:
+            return []
+        if self._all_sites or self._all_login_sites:
+            ids = list(sites)
+        else:
+            ids = self._site_ids + self._login_site_ids
+        return [str(sites[sid].name) for sid in ids if sid in sites]
+
+    @staticmethod
+    def _activity_hint() -> str:
+        return "未读取到（可确认「读取最近动向」开关，或用站点规则 activity_path 指定页面）"
 
     @staticmethod
     def _status_meta(status: str) -> Dict[str, str]:
-        if status in {"success", "already"}:
-            return {"label": "签到成功", "color": "success", "icon": "mdi-check-circle"}
-        if status == "login":
-            return {"label": "登录成功", "color": "success", "icon": "mdi-login"}
-        if status == "login_failed":
-            return {"label": "登录失败", "color": "error", "icon": "mdi-alert-circle"}
-        return {"label": "签到失败", "color": "error", "icon": "mdi-alert-circle"}
+        """状态标签（通知与页面共用，保证两处文案一致）。"""
+        return record_meta({"status": status})
 
     @staticmethod
     def _stat(label: str, value: str, hint: str, color: str) -> Dict[str, Any]:
@@ -376,9 +567,12 @@ class PTSiteSignIn(_PluginBase):
                           "style": f"--app-card-accent-rgb: var(--v-theme-{color});"},
                 "content": [
                     {"component": "div", "props": {"class": "ptsignin-stat__label"}, "text": label},
-                    {"component": "div", "props": {"class": f"ptsignin-stat__value text-{color}"}, "text": value},
-                    {"component": "div", "props": {"class": "text-caption text-medium-emphasis mt-1"}, "text": hint},
+                    {"component": "div", "props": {"class": f"ptsignin-stat__value text-{color}"},
+                     "text": value},
+                    {"component": "div", "props": {"class": "text-caption text-medium-emphasis mt-1"},
+                     "text": hint},
                 ]}
+
 
     # ---------------- 签到核心 ----------------
 
@@ -418,6 +612,10 @@ class PTSiteSignIn(_PluginBase):
         logger.info("PT站点签到：开始 %s", site_name)
         engine = "http"
         login_text = ""
+        # 同时勾了「签到站点」和「登录站点」的站点：一轮里把真实登录 + 签到 + 读最近动向都做掉，
+        # 记录带 dual 标记，详情页的「签到状态」与「登录状态」都能看到它。
+        dual = bool(info.get("dual"))
+        login_broken = False
         rule: Dict[str, Any] = {}
         # 站点登录：凭证只取 MoviePilot「站点管理」里该站的附加信息 / 账号字段；
         # 没有账号密码时直接复用站点管理保存的 Cookie 签到。登录失败不直接判整站失败
@@ -437,14 +635,17 @@ class PTSiteSignIn(_PluginBase):
                     logger.info("PT站点签到：%s 真实登录成功，改用新 Cookie", site_name)
                 else:
                     login_text = "失败：" + login_result.message
-                    logger.warning("PT站点签到：%s 真实登录失败 - %s", site_name, login_result.message)
+                    login_broken = True
+                    logger.warning("PT站点签到：%s 真实登录失败 - %s", site_name,
+                                   login_result.message)
         elif account:
             # 站点管理里只写了半截凭证（比如只有用户名），没法做真实登录
             login_text = "未提供可用的账号密码"
+            login_broken = True
             logger.info("PT站点签到：%s 的账号信息不完整，只复用站点管理里的 Cookie", site_name)
         elif str(info.get("cookie") or "").strip():
-            # 站点管理里只有 Cookie：直接拿它签到，不再额外提示（默认行为无需说明）
-            pass
+            # 站点管理里只有 Cookie：直接拿它签到；dual 站点要把结论写进「登录状态」
+            login_text = "复用站点管理 Cookie" if dual else ""
         try:
             rule = resolve_rule(info, rules)
             engine = str(rule["engine"])
@@ -471,7 +672,10 @@ class PTSiteSignIn(_PluginBase):
         return {"site": site_name, "site_id": str(info.get("id") or ""),
                 "state_key": site_state_key(info), "engine": engine,
                 "status": outcome.status, "message": outcome.message,
-                "login": login_text, "activity": activity_text, "ran_at": self._now()}
+                "login": login_text, "activity": activity_text, "ran_at": self._now(),
+                "dual": dual,
+                # dual 站点在「登录状态」里要显示登录结论，而不是签到结论
+                "login_status": ("login_failed" if login_broken else "login") if dual else ""}
 
     def _login_one(self, info: Dict[str, Any]) -> Dict[str, str]:
         """仅登录站点：真实登录（或复用站点管理 Cookie）后读取最近动向，不触发签到。"""
@@ -602,10 +806,15 @@ class PTSiteSignIn(_PluginBase):
             self._finish([{"site": "配置", "status": "failed", "engine": "-",
                            "message": f"读取站点失败：{error}", "ran_at": self._now()}])
             return
-        signin_ids = set(self._site_ids)
-        selected = [all_sites[sid] for sid in self._site_ids if sid in all_sites]
-        login_selected = [all_sites[sid] for sid in self._login_site_ids
-                          if sid in all_sites and sid not in signin_ids]
+        # 「全部站点」哨兵展开成站点管理里的全部站点；两边都勾的站点只跑一次（_sign_one
+        # 里已经把登录与读最近动向做掉），带 dual 标记后同时进两块统计。
+        signin_order = [sid for sid in (list(all_sites) if self._all_sites else self._site_ids)
+                        if sid in all_sites]
+        login_order = [sid for sid in (list(all_sites) if self._all_login_sites
+                                       else self._login_site_ids) if sid in all_sites]
+        dual_ids = set(signin_order) & set(login_order)
+        selected = [all_sites[sid] for sid in signin_order]
+        login_selected = [all_sites[sid] for sid in login_order if sid not in dual_ids]
         if not selected and not login_selected:
             self._finish([{"site": "配置", "status": "failed", "engine": "-",
                            "message": "未选择可用的 MoviePilot 站点", "ran_at": self._now()}])
@@ -616,7 +825,8 @@ class PTSiteSignIn(_PluginBase):
             self._finish([{"site": "配置", "status": "failed", "engine": "-",
                            "message": str(error), "ran_at": self._now()}])
             return
-        infos = [self._site_dict(site) for site in selected]
+        infos = [dict(self._site_dict(site), dual=sid in dual_ids)
+                 for site, sid in zip(selected, signin_order)]
         login_infos = [self._site_dict(site) for site in login_selected]
         signer: Optional[BrowserlessSigner] = None
         if self._should_init_signer(infos, rules):

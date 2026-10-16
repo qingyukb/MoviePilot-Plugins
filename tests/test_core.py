@@ -280,6 +280,54 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertFalse(self.core.navigation_ok("open_page", 403, real))
         self.assertFalse(self.core.navigation_ok("cloudflare", None, real))
 
+    def test_summarize_records_separates_uncertain_and_missing(self):
+        rows = [
+            {"site": "A", "status": "success", "message": "签到成功"},
+            {"site": "B", "status": "already", "message": "今日已签到"},
+            {"site": "C", "status": "failed", "message": "Cookie 无效或已过期"},
+            {"site": "D", "status": "failed",
+             "message": "签到后二次核验未显示签到成功状态；诊断：…"},
+            {"site": "E", "status": "login", "message": "成功（已换用新 Cookie）"},
+        ]
+        summary = self.core.summarize_records(rows, ["A", "B", "C", "D", "E", "F"])
+        self.assertEqual(summary["total"], 5)
+        self.assertEqual(summary["success"], 3)     # success / already / login
+        self.assertEqual(summary["failed"], 1)      # Cookie 失效这类明确失败
+        self.assertEqual(summary["uncertain"], 1)   # 二次核验没确认 → 需要人工核对
+        self.assertEqual(summary["missing"], 1)     # 选了 F 但没有记录
+
+    def test_record_meta_marks_uncertain_failure(self):
+        self.assertEqual(self.core.record_meta({"status": "failed", "transient": True})["label"],
+                         "未确认")
+        self.assertEqual(self.core.record_meta(
+            {"status": "failed", "message": "Browserless 请求超时（响应丢失）"})["label"], "未确认")
+        self.assertEqual(self.core.record_meta(
+            {"status": "failed", "message": "Cookie 无效或已过期"})["label"], "签到失败")
+        self.assertEqual(self.core.record_meta({"status": "already"})["label"], "今日已签到")
+        self.assertEqual(self.core.record_meta({"status": "login"})["label"], "登录成功")
+
+    def test_dual_record_enters_both_sections(self):
+        dual = {"site": "观众", "status": "success", "dual": True}
+        self.assertTrue(self.core.is_login_record(dual))
+        self.assertFalse(self.core.is_login_record({"site": "B", "status": "success"}))
+        self.assertTrue(self.core.is_login_record({"site": "C", "status": "login"}))
+        self.assertTrue(self.core.is_login_record({"site": "D", "status": "login_failed"}))
+        # 1.4.0 之前的记录没有 dual 标记：带了登录结论 / 最近动向同样算登录记录
+        self.assertTrue(self.core.is_login_record(
+            {"site": "E", "status": "success", "login": "成功（已换用新 Cookie）"}))
+        self.assertTrue(self.core.is_login_record(
+            {"site": "F", "status": "already", "activity": "2026-10-16 23:44:21"}))
+        self.assertTrue(self.core.is_signin_record({"site": "观众", "status": "success", "dual": True}))
+        self.assertFalse(self.core.is_signin_record({"site": "C", "status": "login"}))
+
+    def test_group_and_count_records(self):
+        rows = [{"site": "A", "status": "success"}, {"site": "B", "status": "failed"},
+                {"site": "A", "status": "already"}]
+        grouped = self.core.group_records_by_site(rows)
+        self.assertEqual(list(grouped), ["A", "B"])          # 保持首次出现顺序
+        self.assertEqual(len(grouped["A"]), 2)
+        self.assertEqual(self.core.site_record_counts(rows), {"A": 2, "B": 1})
+
     def test_fallback_rule_carries_cloudflare_wait(self):
         fallback = self.core.fallback_rule(
             {"engine": "http", "path": "/attendance.php", "cloudflare_wait": 25}, "cloudflare")

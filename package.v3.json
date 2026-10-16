@@ -3,32 +3,13 @@
     "name": "PT站点签到",
     "description": "双引擎 PT 签到，可选真实登录刷新 Cookie 并读取站点「最近动向」：HTTP 直连签到接口，或经 Browserless 完成图片验证码 / Cloudflare / Turnstile 挑战。",
     "labels": "站点,签到",
-    "version": "1.3.3",
+    "version": "1.4.0",
     "icon": "https://raw.githubusercontent.com/qingyukb/MoviePilot-Plugins/main/icons/ptsignin.png",
     "author": "qingyu",
     "level": 2,
     "system_version": ">=3.0.0",
     "history": {
-      "v1.3.3": "用真实 Browserless + 站点 Cookie 对观众（Audiences）做了端到端实测并修掉三处问题——实测已签到成功（获得 20 粒爆米花），「今日已签到」路径预检即返回不再重复提交：① _request 漏加 endpoint 参数，第二段复用会话时直接抛 TypeError，现在真的会打到 reconnect 返回的 browserQLEndpoint；② 实测 reconnect 复用会话拿到的是新页面（第一段 solve 过的那个页面并不保留），第二段改为一律重新 goto 打开签到页并带上导航放行等待；③ 注入脚本在注入前先等 Vue / Turnstile 组件渲染出来（最多 12 秒，避免「注入时页面上没有验证组件」），并把页面 URL 与注入结果写进诊断，失败原因不再无头绪。",
-      "v1.3.2": "修复观众（Audiences）签到一直停在「验证通过后将自动完成签到」：官方文档确认 Browserless 的 solve 只负责生成 token（写在响应的 token 字段里），插件此前只取 found/solved/time，却让页面脚本自己去 DOM 里找 token——该站 Turnstile 渲染在 closed shadow DOM 里，必然找不到；而 auto 脚本自身等待 30000ms 又正好等于 evaluate 步骤默认的 30000ms 超时，脚本每次都被掐死在等待循环里，日志里的「未拿到 Turnstile token / 页面没有 data-callback 回调」其实只是脚本启动瞬间的初始快照。现改为两段式：第一段 solve 取回 token 并用 reconnect 留住同一个浏览器会话；第二段打到该会话地址，把 token 回填 cf-turnstile-response、逐个尝试站点回调（data-callback 属性 + cfCallback 等常见全局名），页面仍停在验证中时按表单真实 action 同源 POST 兜底（上游 NexusPHP 契约即 POST /attendance.php 带 cf-turnstile-response），最后在会话内重新打开 attendance.php 核验。evaluate 显式带 timeout（auto_wait+12s），诊断改为逐步真实观测（token 来源与长度、回调候选与调用结果、兜底 POST 状态、widget 是否在 closed shadow DOM、页面是否仍停在验证中）；自建 / 旧版 Browserless 没有 reconnect 时自动去掉会话复用重试。",
-      "v1.3.1": "修复观众（Audiences）签到仍卡在「验证通过后将自动完成签到」：solve 只生成 Turnstile token、不会触发站点回调，改为 submit_method=auto 在拿到 token 后显式补一次提交，真正把签到发出去；同时清理「未配置账号密码，复用站点管理里的 Cookie」提示，凭证统一复用站点管理。",
-      "v1.3.0": "把「站点登录」与「站点签到」分开选择：新增「仅登录站点」，只执行真实登录并读取「最近动向」，不签到；签到站点优先，重复选择按签到处理。",
-      "v1.2.1": "删除插件配置里的站点登录账号 JSON，登录凭证只读 MoviePilot「站点管理」的附加信息 / Cookie；观众（Audiences）签到改为等待型（submit_method=none、solve_count=1），不再依赖二次 solve / data-callback，签到后回查 attendance.php 确认真实状态。",
-      "v1.2.0": "站点登录凭证改为优先复用 MoviePilot「站点管理」：插件配置的账号 JSON 仍最优先（可覆盖），留空时自动读该站「附加信息」(note) 里的账号密码（V3 是 JSON 对象、V2 是 JSON 字符串），并兼容站点记录里以后可能出现的 username / password 字段；只有 Cookie 时直接用它签到，结果表「登录」列标注「复用站点管理 Cookie」。同时补全「最近动向」读取：按站点规则把签到页 / 校验页（如观众 attendance.php）一并作为候选页，并把站点自带的相对时间一起取出，输出形如 2026-10-16 23:44:21 ( < 1分前 )。",
-      "v1.1.0": "新增站点登录与最近动向：可在插件配置里按域名 / 站点 ID 填写账号 JSON，签到前先用账号密码真实登录 NexusPHP（默认 /login.php → /takelogin.php）换回新 Cookie，再用新 Cookie 签到；签到后用登录态打开用户页读取「最近动向」，在结果表与通知中展示。支持 login_path / login_action / username_field / password_field / fields / activity_path 等可选字段；未配置账号时保持原签到行为，登录失败会如实提示并回退使用站点管理中已有的 Cookie。",
-      "v1.0.12": "修复观众（Audiences）签到仍报「未等到 Cloudflare Turnstile 复选框」：本地 Edge 复现确认该站 Turnstile 渲染在 closed shadow DOM 中，DOM/CSS 与 BrowserQL 深度选择器都命不中 checkbox，1.0.10/1.0.11 的「等待并原生点击」方案原理上不可行。现改用官方 solve（内置支持 iframe / shadow DOM 内的验证码）生成 token，再由 auto 脚本触发站点 cfCallback / 表单兜底 POST；两段验证分别用 solve_timeout=40s、solve2_timeout=50s、solve2_wait=5s、cloudflare_wait=15s、auto_wait=30s 覆盖，未命中时给出 found/solved/time 与 BrowserQL 步骤诊断。同时修复 BrowserQL 响应处理：官方文档确认单个步骤失败（如 solve 超时）不会中止整个 mutation，失败步骤只在 data 里返回 null；插件不再把 errors 当成整轮失败，而是把步骤错误并入失败诊断，页面或回查已签到仍正常上报成功。",
-      "v1.0.11": "修复观众签到报「Browserless 请求失败：The read operation timed out」：BrowserQL 是整段执行完才返回响应的整包请求，而观众预设的页面内等待（cloudflare_wait 5s + turnstile_wait 45s + wait 8s + verify_wait 8s）已接近默认 100 秒读超时，插件会自己先掐断连接。现读超时自动抬升到不低于「页面内等待预算 + 45 秒余量」（上限 300 秒）；预检请求遇到网络抖动重试一次；主流程响应丢失时自动只读回查一次，已签到不会误报成失败；超时错误写明步骤、已等待秒数与换节点建议。",
-      "v1.0.10": "修复观众（Audiences）依然无法签到：在本地 Edge 手动复现确认，该页 Turnstile 复选框位于 challenges.cloudflare.com 跨域 iframe 内，必须原生点击该复选框才会生成 token 并触发站点 cfCallback 自动 POST 签到，单纯停留等待并不会通过。现观众预设改为 submit_method=turnstile_click、solve_count=0，用 BrowserQL 深度选择器 < *challenges.cloudflare.com* input[type='checkbox'] 先 waitForSelector(visible) 再原生 click；新增 turnstile_wait（默认 45000ms）等待复选框渲染，cloudflare_wait 降为 5 秒；BrowserQL 失败时区分“未等到复选框”和“复选框不可点击”，给出可诊断提示。",
-      "v1.0.9": "修复观众（Audiences）签到仍报 “Captcha solving timed out after 20000 ms”：该站 Cloudflare 是等待后自动放行的托管挑战，Browserless solve 会在不可解挑战上等待并超时。现观众预设改为 submit_method=none、solve_count=0，cloudflare_wait=30、wait=8000，只让真实浏览器等待页面自行完成验证和签到；签到后仍在同一会话回查 attendance.php 确认真实状态；BrowserQL 错误日志增加出错步骤路径。",
-      "v1.0.8": "修复观众（Audiences）仍无法签到：该站实际包含“外层 Cloudflare 交互挑战 + 签到页内嵌 Turnstile”两段验证，之前一次 solve 返回时第二段验证尚未完成，因此拿不到 Turnstile token。现为 Audiences 预设启用 solve_count=2，在第一段挑战通过并等待页面切换后再执行第二次 solve，并把首次 / 二次 solve 的 found / solved / time 一并写入失败诊断；同时缩短签到后等待，避免双 solve 超过 Browserless 超时",
-      "v1.0.7": "修复观众（Audiences）仍无法签到：Browserless 的 solve 只生成 Turnstile token、不会触发站点提交，现新增 submit_method=auto，在解题后先触发站点 data-callback 回调，必要时再按表单真实 action 带 token 同源 POST 兜底，并把 token / 回调 / 表单的现场诊断写进失败原因；签到页被 302 到 login.php 时明确提示 Cookie 无效或已过期，不再笼统报人机验证失败",
-      "v1.0.6": "进一步修复观众（Audiences）实际未签到但主页面已跳回首页的问题：签到后在同一个 Browserless 会话中重新打开 attendance.php，等待页面稳定后再核验真实的已签到 / 签到成功状态；只有确认签到成功才上报成功，若仍停留在人机验证页或首页没有签到状态则明确报失败，不再把跳回首页误判成结果",
-      "v1.0.5": "修复观众（Audiences）仍无法签到：该站 attendance.php 是 Vue + Cloudflare Turnstile 人机验证页，页面上没有提交按钮，验证通过后由页面 JS 自动提交。现改为内置 Browserless 预设并设置 submit_method=none，等待 Turnstile 自动放行及签到请求完成；补充 pending 状态诊断，并避免「已获得」奖励文案把已签到状态误判为新签到",
-      "v1.0.4": "修复观众（Audiences）无法签到：该站常驻 Cloudflare「Just a moment...」交互挑战，HTTP 直连必然被盾挡下，浏览器回退也会因 goto 返回挑战页的 403 而直接判定「打开签到页失败」。现在 cloudflare 模式会在页面等待挑战自动跑完 JS 放行（默认 10 秒，可用规则字段 cloudflare_wait 调大），并在等待后按页面内容而非状态码判断是否放行；自动回退规则会沿用你在站点规则里写的 cloudflare_wait / wait",
-      "v1.0.3": "修复观众（Audiences）签到误判：成功页「您已连续签到 N 天」会命中裸「已签到」规则，现改为先判成功且只在可见正文匹配，并避免命中 script 内的成功分支；Cron 与「保存后立即执行一次」增加进程级互斥，失败重试改为后台 Timer 延迟执行、停用/重载时可取消；history_YYYYMMDD 仅保留最近 30 天，避免插件数据无限增长",
-      "v1.0.2": "修复「保存后立即执行一次」卡住设置页：改为后台调度器延后执行（与官方插件一致），不再阻塞保存配置的请求；手动触发跳过失败重试等待（定时任务仍按配置重试）",
-      "v1.0.1": "未声明引擎的站点在 HTTP 直连遇到 Cloudflare 验证页或图片验证码时，自动改用 Browserless 重试一次（新增配置开关，默认开启）；已显式声明 engine=http 的站点不受影响",
-      "v1.0.0": "初始版本：attendance.php 标准签到、自定义规则 JSON、并发与失败重试、结果统计页"
+      "v1.4.0": "详情页把「签到」和「登录」拆成两块显示：顶部统计「站点 / 成功 / 失败 / 未确认 / 未记录」，每个站点一张可展开卡片、标题直接写「N 条记录」（按天累积的历史，展开看最近 10 条明细）；设置页按「基础 / 站点选择 / 执行与重试 / 网络与引擎 / 通知 / Browserless / 高级」分块，站点多选新增「全部站点（含后续新增）」选项；签到站点与登录站点同时选中时两件事都执行（一轮内完成真实登录 + 签到 + 读最近动向，不会重复登录），并同时计入两块状态；「最近动向」读取会跳过 Cloudflare 挑战页并记录来源页面，读不到时给出可操作提示。"
     }
   }
 }

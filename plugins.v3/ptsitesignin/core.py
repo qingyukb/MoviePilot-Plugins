@@ -547,6 +547,7 @@ class ActivityResult:
     message: str
     last_seen: str = ""
     snippet: str = ""
+    source: str = ""   # 从哪个候选页读到的，便于排查「最近动向」读不到的问题
 
 
 def parse_accounts(raw: Any) -> Dict[str, Dict[str, Any]]:
@@ -811,6 +812,8 @@ def read_activity(site: Mapping[str, Any], cookie: str, timeout: int = 30,
     index_html = index.text or ""
     if login_page(index_html):
         return ActivityResult("failed", "登录态无效：站点把请求跳回了登录页")
+    if cloudflare_pending(index_html):
+        return ActivityResult("failed", "站点首页返回 Cloudflare 验证页，未能读取最近动向")
     candidates: List[str] = []
     if path:
         candidates.append(str(path))
@@ -834,12 +837,116 @@ def read_activity(site: Mapping[str, Any], cookie: str, timeout: int = 30,
             continue
         if page.status_code >= 400:
             continue
+        if cloudflare_pending(page.text or ""):
+            # 撞盾时页面正文是挑战页，从中提取的「最近动向」是假的：直接换下一个候选页
+            continue
         found = extract_activity(page.text or "")
         if found:
-            return ActivityResult("success", "已读取最近动向",
+            return ActivityResult("success", f"已读取最近动向（{candidate}）",
                                   last_seen=found.get("last_seen", ""),
-                                  snippet=found.get("snippet", ""))
+                                  snippet=found.get("snippet", ""),
+                                  source=str(candidate))
     return ActivityResult("failed", "未在站点页面找到「最近动向」")
+
+
+# ---------------------------------------------------- 结果记录汇总（插件详情页用）
+# 一轮签到会留下两类记录：签到记录（success / already / failed）与登录记录（login /
+# login_failed）。同时勾了「签到站点」和「登录站点」的站点只跑一次（真实登录 + 签到 +
+# 读最近动向），同一条记录带上 dual 标记后同时进两块统计。
+SIGNIN_OK_STATUSES = {"success", "already"}
+LOGIN_STATUSES = {"login", "login_failed"}
+# 失败里属于「结果未知、需要人工确认」的那类：网络中断、二次核验没确认、token 注入没响应。
+# 单独计数，避免和「Cookie 失效」这种明确失败混在一起。
+UNCERTAIN_PATTERN = (r"(未确认|未能确认|响应丢失|未拿到可用响应|未显示签到成功状态"
+                     r"|未拿到 Turnstile token|未识别到签到成功结果|未找到图片验证码)")
+
+
+def record_uncertain(row: Mapping[str, Any]) -> bool:
+    """这条失败记录是不是「结果未知、需人工确认」的那类。"""
+    if str(row.get("status") or "") not in {"failed", "login_failed"}:
+        return False
+    if row.get("transient"):
+        return True
+    return bool(re.search(UNCERTAIN_PATTERN, str(row.get("message") or "")))
+
+
+def is_login_record(row: Mapping[str, Any]) -> bool:
+    """这条记录要不要进「登录状态」。
+
+    纯登录记录、双选站点的签到记录都算；此外只要这一轮确实做过登录（有登录结论）或读过
+    「最近动向」，也一并计入——1.4.0 之前的记录没有 dual 标记，这样历史条数不会因为升级
+    而突然变成 0。
+    """
+    if bool(row.get("dual")) or str(row.get("status") or "") in LOGIN_STATUSES:
+        return True
+    return bool(str(row.get("login") or "").strip() or str(row.get("activity") or "").strip())
+
+
+def is_signin_record(row: Mapping[str, Any]) -> bool:
+    """这条记录要不要进「签到状态」：签到记录（含双选站点）算，纯登录记录不算。"""
+    return str(row.get("status") or "") not in LOGIN_STATUSES
+
+
+def record_meta(row: Mapping[str, Any]) -> Dict[str, str]:
+    """记录的状态标签 / 颜色 / 图标；「未确认」的失败单独标色，提醒人工核对。"""
+    status = str(row.get("status") or "")
+    if record_uncertain(row):
+        return {"label": "未确认", "color": "warning", "icon": "mdi-help-circle"}
+    if status == "success":
+        return {"label": "签到成功", "color": "success", "icon": "mdi-check-circle"}
+    if status == "already":
+        return {"label": "今日已签到", "color": "success", "icon": "mdi-check-circle"}
+    if status == "login":
+        return {"label": "登录成功", "color": "success", "icon": "mdi-login"}
+    if status == "login_failed":
+        return {"label": "登录失败", "color": "error", "icon": "mdi-alert-circle"}
+    return {"label": "签到失败", "color": "error", "icon": "mdi-alert-circle"}
+
+
+def summarize_records(records: Sequence[Mapping[str, Any]],
+                      expected_sites: Sequence[str] = ()) -> Dict[str, int]:
+    """汇总一轮记录：成功 / 失败 / 未确认 / 未记录。
+
+    * 成功：success、already、login；
+    * 未确认：结果未知、需人工核对的失败（与「失败」互斥，单独计数）；
+    * 失败：其余可判定的失败（含 login_failed）；
+    * 未记录：expected_sites（本轮勾选的站点）里一条记录都没有的站点数。
+    """
+    success = failed = uncertain = 0
+    seen: set = set()
+    for row in records:
+        name = str(row.get("site") or "")
+        if name:
+            seen.add(name)
+        status = str(row.get("status") or "")
+        if record_uncertain(row):
+            uncertain += 1
+        elif status in SIGNIN_OK_STATUSES or status == "login":
+            success += 1
+        else:
+            failed += 1
+    missing = len({str(name) for name in expected_sites if str(name)} - seen)
+    return {"total": len(list(records)), "success": success, "failed": failed,
+            "uncertain": uncertain, "missing": missing}
+
+
+def group_records_by_site(records: Sequence[Mapping[str, Any]]
+                          ) -> Dict[str, List[Dict[str, Any]]]:
+    """按站点名分组，保持首次出现的顺序（详情页按这个顺序渲染站点卡片）。"""
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for row in records:
+        name = str(row.get("site") or "未知站点")
+        grouped.setdefault(name, []).append(dict(row))
+    return grouped
+
+
+def site_record_counts(records: Sequence[Mapping[str, Any]]) -> Dict[str, int]:
+    """每个站点的记录条数（详情页的「N 条记录」）。"""
+    counts: Dict[str, int] = {}
+    for row in records:
+        name = str(row.get("site") or "未知站点")
+        counts[name] = counts.get(name, 0) + 1
+    return counts
 
 
 # =========================================================== Browserless 引擎
