@@ -16,7 +16,7 @@
 ```
 ptsitesignin/
 ├── __init__.py    # 插件入口：配置页、结果页、Cron、调度与重试
-├── core.py        # 双引擎核心：HTTP 引擎 + Browserless(BrowserQL) 引擎、内置站点预设
+├── core.py        # 双引擎核心：HTTP 引擎 + Browserless(BrowserQL) 引擎、站点登录 + 最近动向、内置站点预设
 └── README.md
 ```
 
@@ -44,6 +44,34 @@ ptsitesignin/
 | 站点 | path | 说明 |
 |---|---|---|
 | Audiences (`audiences.me`) | `/attendance.php` | Vue + Cloudflare Turnstile 签到页，**没有提交按钮**。实测该站 Turnstile 渲染在 **closed shadow DOM** 中：DOM/CSS 里既没有 `input[type=checkbox]`，也没有可命中的 iframe，BrowserQL 深度选择器同样命不中，所以「等待并原生点击」的原理不成立。预设改走官方 `solve`（文档明确支持 iframe / shadow DOM 内的验证码），两段验证分别用 `solve_timeout=40000`（进站交互挑战）、`solve2_timeout=50000` + `solve2_wait=5000`（签到页内嵌 Turnstile）生成 token，再由 `submit_method=auto` 触发站点 `cfCallback`、必要时按表单 action 兜底 POST；`cloudflare_wait=15`、`auto_wait=30000`、`wait=8000`，随后在同一会话重新打开 `/attendance.php` 等待 8 秒核验（`verify_success_path` / `verify_wait=8000`） |
+
+## 站点登录 + 最近动向
+
+默认仍复用 MoviePilot「站点管理」里的 Cookie。部分 NexusPHP 站点的 Cookie 容易过期，表现为签到一直跳登录页；这时可在插件配置中按域名或站点 ID 填写账号 JSON，插件会在每次签到前先真实登录一次、换回新 Cookie 再交给 HTTP / Browserless 引擎。
+
+```json
+{
+  "audiences.me": {
+    "username": "your-user",
+    "password": "your-password"
+  },
+  "7": {
+    "username": "another-user",
+    "password": "another-password",
+    "username_field": "username",
+    "password_field": "password",
+    "fields": {"2fa": "123456"},
+    "activity_path": "/userdetails.php?id=123"
+  }
+}
+```
+
+- 匹配顺序：站点 ID → 完整域名 → `www.` 前缀域名；一个站点只需填一种键。
+- 默认登录路径为 `/login.php`，默认提交地址为 `/takelogin.php`；非标准 NexusPHP 站点可用 `login_path` / `login_action` 覆盖。
+- 默认字段名为 `username` / `password`，可用 `username_field` / `password_field` 覆盖；额外隐藏字段 / 两步验证字段可放进 `fields`。
+- 登录成功后会改用新 Cookie 签到。登录失败不会直接放弃整站：仍会用 MoviePilot 里已有的旧 Cookie 尝试签到，并在结果表「登录」列如实写明失败原因。
+- 打开「签到后读取「最近动向」」后，插件会用当前登录态打开站点首页，优先按 `activity_path`（可选）或首页发现的 `userdetails.php?id=...` 读取「最近动向 / 上次访问 / 上次签到」等时间，显示在结果表与通知中。
+- 账号密码只保存在 MoviePilot 插件配置中，不写入签到结果或日志；不填账号时行为与旧版一致。
 
 ## 并发与失败重试
 
@@ -138,6 +166,8 @@ ptsitesignin/
 | 执行周期 | 5 位 Cron | `25 8 * * *` |
 | 保存后立即执行一次 | 保存后由**后台调度器**延后 3 秒跑一轮，不阻塞设置页；跳过失败重试 | 关 |
 | 签到站点 | 多选，仅列出已保存 Cookie 的站点 | 空 |
+| 站点登录账号 JSON | 按域名 / 站点 ID 配置 username / password；签到前真实登录换新 Cookie，可选 login_path、login_action、username_field、password_field、fields、activity_path | 空 |
+| 签到后读取「最近动向」 | 用登录态打开用户页，把最近动向时间 / 片段写入结果表和通知 | 开 |
 | 通知模式 | 每次执行后 / 仅失败时 / 不通知 | 每次执行后 |
 | 并发数 | 同时签到站点数 | 2 |
 | HTTP 超时 | 秒 | 30 |

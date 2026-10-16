@@ -8,6 +8,9 @@
 引擎默认按站点规则自动判定；未显式声明引擎的站点在 HTTP 直连撞上 Cloudflare
 或验证码时，会自动改用 Browserless 重试一次（可在配置中关闭）。
 
+配置「站点登录账号 JSON」后，每次签到前会先用账号密码真实登录站点、换回新的 Cookie
+再交给签到引擎；签到结束后再打开用户页读取站点展示的「最近动向」，写入结果页与通知。
+
 参考 tmzg0000/moviepilot-plugins 的插件规范编写。
 """
 
@@ -38,9 +41,13 @@ from .core import (
     DEFAULT_BROWSERLESS_URL,
     BrowserlessSigner,
     SignResult,
+    account_for,
     fallback_rule,
     http_sign,
+    login as site_login,
+    parse_accounts,
     parse_rules,
+    read_activity,
     resolve_rule,
     site_state_key,
     target_url,
@@ -49,9 +56,10 @@ from .core import (
 
 class PTSiteSignIn(_PluginBase):
     plugin_name = "PT站点签到"
-    plugin_desc = "双引擎 PT 签到：HTTP 直连签到接口，或经 Browserless 完成验证码 / Cloudflare / Turnstile 挑战。"
+    plugin_desc = ("双引擎 PT 签到，可选真实登录刷新 Cookie 并读取站点「最近动向」：HTTP 直连签到接口，"
+                   "或经 Browserless 完成验证码 / Cloudflare / Turnstile 挑战。")
     plugin_icon = "signin.png"
-    plugin_version = "1.0.12"
+    plugin_version = "1.1.0"
     plugin_author = "qingyu"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "ptsignin_"
@@ -72,6 +80,8 @@ class PTSiteSignIn(_PluginBase):
     _browserless_token = ""
     _browserless_timeout = 100
     _site_rules = ""
+    _site_accounts = ""
+    _read_activity = True
     _run_once = False
     _run_once_scheduler: Optional[BackgroundScheduler] = None
 
@@ -105,6 +115,9 @@ class PTSiteSignIn(_PluginBase):
         self._browserless_token = str(config.get("browserless_token") or "").strip()
         self._browserless_timeout = max(15, min(int(config.get("browserless_timeout") or 100), 300))
         self._site_rules = str(config.get("site_rules") or "")
+        self._site_accounts = str(config.get("site_accounts") or "")
+        self._read_activity = bool(config.get("read_activity", True))
+        self._accounts: Dict[str, Dict[str, Any]] = {}
         self._run_once = bool(config.get("run_once", False))
         if self._run_once:
             self._run_once = False
@@ -153,6 +166,8 @@ class PTSiteSignIn(_PluginBase):
             "browserless_token": self._browserless_token,
             "browserless_timeout": self._browserless_timeout,
             "site_rules": self._site_rules,
+            "site_accounts": self._site_accounts,
+            "read_activity": self._read_activity,
             "run_once": self._run_once,
         }
 
@@ -279,6 +294,21 @@ class PTSiteSignIn(_PluginBase):
                                      'Cloudflare「Just a moment...」交互挑战默认在页面等待 10 秒自动放行，可用 {"cloudflare_wait": 20} 调大',
                              "persistent-hint": True}}]},
             ]},
+            {"component": "VRow", "content": [
+                {"component": "VCol", "props": {"cols": 12, "md": 6},
+                 "content": [{"component": "VSwitch", "props": {"model": "read_activity",
+                             "label": "签到后读取「最近动向」",
+                             "hint": "用站点 Cookie（配置了账号时改用真实登录换回的新 Cookie）打开用户页，抓取「最近动向」写入结果与通知", "persistent-hint": True}}]},
+            ]},
+            {"component": "VRow", "content": [
+                {"component": "VCol", "props": {"cols": 12},
+                 "content": [{"component": "VTextarea", "props": {"model": "site_accounts",
+                             "label": "站点登录账号 JSON（可留空）", "rows": 6,
+                             "hint": '键为域名或站点 ID，例如 {"audiences.me":{"username":"账号","password":"密码"}}。'
+                                     '填写后每次签到前先用账号密码真实登录（NexusPHP takelogin.php）换回新 Cookie 再签到；'
+                                     '可选字段 login_path / login_action / username_field / password_field / fields / activity_path',
+                             "persistent-hint": True}}]},
+            ]},
         ]}], self._config()
 
     def get_page(self) -> List[dict]:
@@ -301,6 +331,8 @@ class PTSiteSignIn(_PluginBase):
                 {"component": "td", "content": [{"component": "VChip", "props": {
                     "size": "x-small", "variant": "tonal", "color": meta["color"],
                     "prepend-icon": meta["icon"]}, "text": meta["label"]}]},
+                {"component": "td", "text": str(row.get("login") or "-")},
+                {"component": "td", "text": str(row.get("activity") or "-")},
                 {"component": "td", "text": str(row.get("ran_at") or "-")},
                 {"component": "td", "text": str(row.get("message") or "-")},
             ]})
@@ -319,7 +351,8 @@ class PTSiteSignIn(_PluginBase):
              "content": [{"component": "VTable", "props": {"density": "compact", "hover": True}, "content": [
                  {"component": "thead", "content": [{"component": "tr", "content": [
                      {"component": "th", "text": "站点"}, {"component": "th", "text": "方式"},
-                     {"component": "th", "text": "状态"}, {"component": "th", "text": "时间"},
+                     {"component": "th", "text": "状态"}, {"component": "th", "text": "登录"},
+                     {"component": "th", "text": "最近动向"}, {"component": "th", "text": "时间"},
                      {"component": "th", "text": "结果"}]}]},
                  {"component": "tbody", "content": rows},
              ]}]},
@@ -372,6 +405,25 @@ class PTSiteSignIn(_PluginBase):
         site_name = str(info.get("name") or info.get("url") or "未知站点")
         logger.info("PT站点签到：开始 %s", site_name)
         engine = "http"
+        login_text = ""
+        # 站点登录：配置了账号时先用账号密码真实登录，换回新的 Cookie 再签到。登录失败不
+        # 直接判整站失败——仍用站点管理里的旧 Cookie 试一次，并如实记录登录失败原因。
+        account = account_for(info, getattr(self, "_accounts", None) or {})
+        if account:
+            proxies = self._proxies() if self._proxy else None
+            try:
+                login_result = site_login(info, account, timeout=self._timeout, proxies=proxies)
+            except Exception:
+                logger.exception("PT站点签到：%s 真实登录异常", site_name)
+                login_text = "异常：真实登录出现未预期错误"
+            else:
+                if login_result.status == "success":
+                    info = dict(info, cookie=login_result.cookie)
+                    login_text = "成功（已换用新 Cookie）"
+                    logger.info("PT站点签到：%s 真实登录成功，改用新 Cookie", site_name)
+                else:
+                    login_text = "失败：" + login_result.message
+                    logger.warning("PT站点签到：%s 真实登录失败 - %s", site_name, login_result.message)
         try:
             rule = resolve_rule(info, rules)
             engine = str(rule["engine"])
@@ -394,9 +446,28 @@ class PTSiteSignIn(_PluginBase):
             logger.info("PT站点签到：%s %s", site_name, outcome.message)
         else:
             logger.warning("PT站点签到：%s 失败 - %s", site_name, outcome.message)
+        activity_text = self._read_site_activity(info) if self._read_activity else ""
         return {"site": site_name, "site_id": str(info.get("id") or ""),
                 "state_key": site_state_key(info), "engine": engine,
-                "status": outcome.status, "message": outcome.message, "ran_at": self._now()}
+                "status": outcome.status, "message": outcome.message,
+                "login": login_text, "activity": activity_text, "ran_at": self._now()}
+
+    def _read_site_activity(self, info: Dict[str, Any]) -> str:
+        """用登录态 Cookie 打开用户页，返回站点展示的「最近动向」文案。"""
+        cookie = str(info.get("cookie") or "").strip()
+        if not cookie:
+            return ""
+        account = account_for(info, getattr(self, "_accounts", None) or {}) or {}
+        try:
+            activity = read_activity(info, cookie, timeout=self._timeout,
+                                     proxies=self._proxies() if self._proxy else None,
+                                     path=str(account.get("activity_path") or "") or None)
+        except Exception:
+            logger.exception("PT站点签到：读取最近动向失败")
+            return ""
+        if activity.status != "success":
+            return ""
+        return activity.last_seen or activity.snippet or "已读取"
 
     def _maybe_fallback(self, info: Dict[str, Any], rule: Dict[str, Any], outcome: SignResult,
                         signer: Optional[BrowserlessSigner]) -> Tuple[SignResult, str]:
@@ -469,6 +540,12 @@ class PTSiteSignIn(_PluginBase):
             return
         try:
             rules = parse_rules(self._site_rules)
+        except ValueError as error:
+            self._finish([{"site": "配置", "status": "failed", "engine": "-",
+                           "message": str(error), "ran_at": self._now()}])
+            return
+        try:
+            self._accounts = parse_accounts(self._site_accounts)
         except ValueError as error:
             self._finish([{"site": "配置", "status": "failed", "engine": "-",
                            "message": str(error), "ran_at": self._now()}])
@@ -630,12 +707,19 @@ class PTSiteSignIn(_PluginBase):
         head = f"站点 {len(results)} 个｜新签到 {signed}｜今日已签到 {already}"
         if failed:
             head += f"｜失败 {failed}"
-        detail = "\n".join(
-            f"{item.get('site')}：{self._status_meta(item.get('status'))['label']}（{item.get('message')}）"
-            for item in results)
+        detail = "\n".join(self._notify_line(item) for item in results)
         self.post_message(mtype=NotificationType.SiteMessage,
                           title="PT站点签到",
                           text=f"{head}\n\n{detail}")
+
+    def _notify_line(self, item: Dict[str, Any]) -> str:
+        line = (f"{item.get('site')}：{self._status_meta(item.get('status'))['label']}"
+                f"（{item.get('message')}）")
+        if item.get("login"):
+            line += f"\n　登录：{item['login']}"
+        if item.get("activity"):
+            line += f"\n　最近动向：{item['activity']}"
+        return line
 
     def stop_service(self) -> None:
         """插件停用 / 重载时停止重试，并清理自有的「立即执行」调度器。"""

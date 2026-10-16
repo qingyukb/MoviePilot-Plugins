@@ -1,4 +1,4 @@
-"""PT 签到核心逻辑：HTTP 引擎 + Browserless(BrowserQL) 引擎。
+"""PT 签到核心逻辑：HTTP 引擎 + Browserless(BrowserQL) 引擎 + 站点登录 / 最近动向。
 
 本模块不含任何 MoviePilot 依赖，方便单独测试与复用。
 Browserless 相关实现参考 tmzg0000/moviepilot-plugins 的 captchasignin 插件
@@ -496,6 +496,263 @@ def judge_http(content: str, rule: Mapping[str, Any]) -> SignResult:
     if re.search(CAPTCHA_PATTERN, text, re.IGNORECASE):
         return SignResult("failed", "页面要求填写验证码", challenge="captcha")
     return SignResult("failed", f"未匹配到签到成功标志；{page_hint(text)}")
+
+
+# ======================================================== 站点登录 + 最近动向
+
+# 很多 NexusPHP 站点的站点 Cookie 会过期：签到失败其实是「没登录」。配置了账号后，
+# 插件会在签到前用账号密码真实登录一次、换回新的 Cookie，签到引擎随后用这份新 Cookie；
+# 登录后再打开用户页抓「最近动向」，作为该账号真实登录 / 活跃的证据。
+DEFAULT_LOGIN_PATH = "/login.php"
+DEFAULT_LOGIN_ACTION = "/takelogin.php"
+DEFAULT_INDEX_PATH = "/index.php"
+DEFAULT_USERDETAILS_PATH = "/userdetails.php"
+DEFAULT_USERNAME_FIELD = "username"
+DEFAULT_PASSWORD_FIELD = "password"
+# 登录成功的特征：页面出现登出 / 退出入口，或拿到了 NexusPHP 的登录 Cookie
+LOGIN_SUCCESS_PATTERN = r"(logout\.php|退出|登出|注销|我的控制面板|我的面板)"
+# 登录失败特征：明确提示账号密码错误
+LOGIN_FAILURE_PATTERN = (r"(用户名或密码错误|用户名或密碼錯誤|账号或密码错误|密碼錯誤"
+                         r"|登录失败|登入失敗|invalid (?:username|password)|incorrect password)")
+# 登录页要求人机校验时的特征
+LOGIN_CAPTCHA_PATTERN = r"(captcha|imagestring|验证码|驗證碼|turnstile)"
+# 用户页里「最近动向」相关关键词（含繁体）
+ACTIVITY_KEYWORDS = ("最近动向", "最近動向", "最近活动", "最近活動", "上次访问", "上次訪問",
+                     "上次签到", "上次簽到", "最后访问", "最後訪問", "上次登录", "上次登入")
+# 站点常见的时间格式（NexusPHP 多为 YYYY-MM-DD HH:MM:SS）
+DATETIME_PATTERN = r"(\d{4}[-/.]\d{1,2}[-/.]\d{1,2}(?:[ T]\d{1,2}:\d{2}(?::\d{2})?)?)"
+
+_FORM_BLOCK_RE = re.compile(r"<form\b([^>]*)>(.*?)</form>", re.IGNORECASE | re.DOTALL)
+_INPUT_RE = re.compile(r"<input\b[^>]*>", re.IGNORECASE)
+_ATTR_RE = re.compile(r"([a-zA-Z_:][-a-zA-Z0-9_:.]*)\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)")
+_UID_RE = re.compile(r"userdetails\.php\?id=(\d+)", re.IGNORECASE)
+
+
+@dataclass(frozen=True)
+class LoginResult:
+    status: str     # success / failed
+    message: str
+    cookie: str = ""
+
+
+@dataclass(frozen=True)
+class ActivityResult:
+    status: str     # success / failed
+    message: str
+    last_seen: str = ""
+    snippet: str = ""
+
+
+def parse_accounts(raw: Any) -> Dict[str, Dict[str, Any]]:
+    """解析站点账号配置；键为域名或站点 ID，值为账号对象。"""
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"站点账号必须是有效 JSON：{error}") from error
+    if not isinstance(value, Mapping):
+        raise ValueError("站点账号必须是以域名或站点 ID 为键的 JSON 对象")
+    result: Dict[str, Dict[str, Any]] = {}
+    for key, account in value.items():
+        if not isinstance(key, str) or not isinstance(account, Mapping):
+            continue
+        username = str(account.get("username") or "").strip()
+        password = str(account.get("password") or "")
+        if not username or not password:
+            continue
+        result[key.lower().strip()] = dict(account)
+    return result
+
+
+def account_for(site: Mapping[str, Any], accounts: Mapping[str, Mapping[str, Any]]
+                ) -> Optional[Dict[str, Any]]:
+    """按站点 ID 或域名取出该站的登录账号，未配置时返回 None。"""
+    if not accounts:
+        return None
+    site_id = str(site.get("id") or "").strip()
+    if site_id and site_id in accounts:
+        return dict(accounts[site_id])
+    host = normalize_host(str(site.get("url") or ""))
+    for key in (host, "www." + host):
+        if key and key in accounts:
+            return dict(accounts[key])
+    return None
+
+
+def _tag_attrs(tag: str) -> Dict[str, str]:
+    attrs: Dict[str, str] = {}
+    for match in _ATTR_RE.finditer(tag):
+        value = match.group(2)
+        if len(value) >= 2 and value[0] in "\"'" and value[-1] == value[0]:
+            value = value[1:-1]
+        attrs[match.group(1).lower()] = value
+    return attrs
+
+
+def find_login_form(html: str) -> Dict[str, Any]:
+    """从登录页里挑出含密码框的表单，返回 {"action": str, "fields": {...}}。"""
+    for raw_attrs, body in _FORM_BLOCK_RE.findall(html or ""):
+        attrs = _tag_attrs("<form " + raw_attrs + ">")
+        fields: Dict[str, str] = {}
+        has_password = False
+        for input_tag in _INPUT_RE.findall(body):
+            field = _tag_attrs(input_tag)
+            name = field.get("name")
+            if not name:
+                continue
+            kind = (field.get("type") or "text").lower()
+            if kind == "password":
+                has_password = True
+                continue
+            if kind in {"submit", "button", "image", "file", "reset", "checkbox", "radio"}:
+                continue
+            fields[name] = field.get("value", "")
+        if has_password:
+            return {"action": attrs.get("action") or "", "fields": fields}
+    return {"action": "", "fields": {}}
+
+
+def cookie_header(session: Any) -> str:
+    """把 requests.Session 的 Cookie 拼成请求头字符串。"""
+    return "; ".join(f"{cookie.name}={cookie.value}" for cookie in session.cookies)
+
+
+def _has_password_input(html: str) -> bool:
+    return bool(re.search(r"<input\b[^>]+type\s*=\s*[\"']?password", html or "", re.IGNORECASE))
+
+
+def login(site: Mapping[str, Any], account: Mapping[str, Any], timeout: int = 30,
+          proxies: Optional[Dict[str, str]] = None) -> LoginResult:
+    """用账号密码真实登录站点，换回新的 Cookie（NexusPHP takelogin.php 通用）。"""
+    base_url = str(site.get("url") or "").rstrip("/")
+    if not base_url:
+        return LoginResult("failed", "站点地址为空")
+    username = str(account.get("username") or "").strip()
+    password = str(account.get("password") or "")
+    if not username or not password:
+        return LoginResult("failed", "未配置账号或密码")
+    import requests
+    login_path = str(account.get("login_path") or DEFAULT_LOGIN_PATH)
+    login_action = str(account.get("login_action") or DEFAULT_LOGIN_ACTION)
+    username_field = str(account.get("username_field") or DEFAULT_USERNAME_FIELD)
+    password_field = str(account.get("password_field") or DEFAULT_PASSWORD_FIELD)
+    headers = {"User-Agent": str(site.get("ua") or "").strip() or DEFAULT_USER_AGENT,
+               "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"}
+    session = requests.Session()
+    try:
+        page = session.get(target_url(base_url, login_path), headers=headers,
+                           timeout=timeout, allow_redirects=True, proxies=proxies)
+    except Exception as error:
+        return LoginResult("failed", f"打开登录页失败：{error}")
+    if page.status_code >= 400:
+        return LoginResult("failed", f"打开登录页失败（HTTP {page.status_code}）")
+    form = find_login_form(page.text or "")
+    action = str(form.get("action") or "").strip()
+    post_url = urllib.parse.urljoin(base_url + "/", action or login_action.lstrip("/"))
+    data: Dict[str, str] = dict(form.get("fields") or {})
+    extra = account.get("fields")
+    if isinstance(extra, Mapping):
+        for name, value in extra.items():
+            data[str(name)] = str(value)
+    data[username_field] = username
+    data[password_field] = password
+    try:
+        response = session.post(post_url, data=data,
+                                headers={**headers, "Referer": page.url,
+                                         "Content-Type": "application/x-www-form-urlencoded"},
+                                timeout=timeout, allow_redirects=True, proxies=proxies)
+    except Exception as error:
+        return LoginResult("failed", f"提交登录表单失败：{error}")
+    if response.status_code >= 400:
+        return LoginResult("failed", f"登录请求失败（HTTP {response.status_code}）")
+    content = response.text or ""
+    text = plain_text(content)
+    cookie = cookie_header(session)
+    if re.search(LOGIN_FAILURE_PATTERN, text, re.IGNORECASE):
+        return LoginResult("failed", "登录被拒绝：账号或密码错误")
+    if ("c_secure_uid" in cookie or "c_secure_pass" in cookie
+            or re.search(LOGIN_SUCCESS_PATTERN, text, re.IGNORECASE)
+            or (not _has_password_input(content) and "login.php" not in str(response.url))):
+        return LoginResult("success", "登录成功", cookie)
+    if re.search(LOGIN_CAPTCHA_PATTERN, content, re.IGNORECASE):
+        return LoginResult("failed", "登录页要求验证码 / 人机校验，请改用站点 Cookie")
+    return LoginResult("failed", "登录后仍停留在登录页：账号密码错误或站点要求两步验证")
+
+
+def _normalize_time(value: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[/.]", "-", str(value or "").strip()))
+
+
+def extract_activity(html: str) -> Dict[str, str]:
+    """从用户页里抓「最近动向」片段与其中的时间，返回 keyword / snippet / last_seen。"""
+    text = plain_text(html or "")
+    for keyword in ACTIVITY_KEYWORDS:
+        index = text.find(keyword)
+        if index < 0:
+            continue
+        snippet = text[max(0, index - 12):index + 140].strip()
+        match = re.search(DATETIME_PATTERN, snippet)
+        if match is None:
+            match = re.search(DATETIME_PATTERN, text[index:index + 240])
+        return {"keyword": keyword, "snippet": snippet,
+                "last_seen": _normalize_time(match.group(1)) if match else ""}
+    match = re.search(DATETIME_PATTERN, text)
+    if match:
+        snippet = text[max(0, match.start() - 40):match.end() + 40].strip()
+        return {"keyword": "", "snippet": snippet, "last_seen": _normalize_time(match.group(1))}
+    return {}
+
+
+def read_activity(site: Mapping[str, Any], cookie: str, timeout: int = 30,
+                  proxies: Optional[Dict[str, str]] = None,
+                  path: Optional[str] = None) -> ActivityResult:
+    """用登录态 Cookie 打开用户页，读取站点展示的「最近动向」。"""
+    base_url = str(site.get("url") or "").rstrip("/")
+    cookie = str(cookie or "").strip()
+    if not base_url or not cookie:
+        return ActivityResult("failed", "站点地址或 Cookie 为空")
+    import requests
+    session = requests.Session()
+    session.headers.update({"User-Agent": str(site.get("ua") or "").strip() or DEFAULT_USER_AGENT,
+                            "Cookie": cookie,
+                            "Referer": base_url + DEFAULT_INDEX_PATH,
+                            "Accept": "text/html,application/xhtml+xml,xml;q=0.9,*/*;q=0.8"})
+    try:
+        index = session.get(target_url(base_url, DEFAULT_INDEX_PATH),
+                            timeout=timeout, allow_redirects=True, proxies=proxies)
+    except Exception as error:
+        return ActivityResult("failed", f"读取站点首页失败：{error}")
+    if index.status_code >= 400:
+        return ActivityResult("failed", f"读取站点首页失败（HTTP {index.status_code}）")
+    index_html = index.text or ""
+    if login_page(index_html):
+        return ActivityResult("failed", "登录态无效：站点把请求跳回了登录页")
+    candidates: List[str] = []
+    if path:
+        candidates.append(str(path))
+    match = _UID_RE.search(index_html)
+    if match:
+        candidates.append(f"{DEFAULT_USERDETAILS_PATH}?id={match.group(1)}")
+    candidates.append(DEFAULT_INDEX_PATH)
+    seen: set = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            page = session.get(target_url(base_url, candidate),
+                               timeout=timeout, allow_redirects=True, proxies=proxies)
+        except Exception:
+            continue
+        if page.status_code >= 400:
+            continue
+        found = extract_activity(page.text or "")
+        if found:
+            return ActivityResult("success", "已读取最近动向",
+                                  last_seen=found.get("last_seen", ""),
+                                  snippet=found.get("snippet", ""))
+    return ActivityResult("failed", "未在站点页面找到「最近动向」")
 
 
 # =========================================================== Browserless 引擎
