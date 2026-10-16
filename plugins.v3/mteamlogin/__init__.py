@@ -43,6 +43,7 @@ from .core import (
     LoginReport,
     MTeamClient,
     MTeamError,
+    api_host_candidates,
     derive_api_host,
     mask_account,
     pick_mteam_site,
@@ -53,7 +54,7 @@ class MTeamLogin(_PluginBase):
     plugin_name = "馒头登录"
     plugin_desc = "从「站点管理」读取馒头（M-Team）凭证，获取真实的「最近动向」时间。"
     plugin_icon = "mteam.png"
-    plugin_version = "1.0.1"
+    plugin_version = "1.0.2"
     plugin_author = "qingyu"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "mteamlogin_"
@@ -413,25 +414,44 @@ class MTeamLogin(_PluginBase):
                 "请在 设置 → 站点管理 里补全该站点的 API Key，或在本插件填写手动 API Key。")
         timeout = self._timeout or int(site.get("timeout") or 0) or 20
         timeout = max(5, min(int(timeout), 120))
-        client = MTeamClient(
-            host=self._api_host or derive_api_host(site_url),
-            timeout=timeout,
-            proxy=self._proxy or bool(site.get("proxy")),
-            user_agent=str(site.get("ua") or "").strip() or DEFAULT_USER_AGENT,
-        )
-        logger.info("馒头登录：站点 %s，凭证 %s，访问 %s",
-                    site_domain or "（未指定站点）", credential, client.host)
-        return client.fetch_last_browse(
-            username=self._username,
-            password=self._password,
-            api_key=api_key,
-            otp_secret=self._otp_secret,
-            otp_code=self._otp_code,
-            email_code=self._email_code,
-            tg_code=self._tg_code,
-            site_label=site_domain,
-            credential=credential,
-        )
+        proxy = self._proxy or bool(site.get("proxy"))
+        user_agent = str(site.get("ua") or "").strip() or DEFAULT_USER_AGENT
+        # 前后端分离：优先用按站点地址推导的后端地址，不可用时自动回退已知地址。
+        primary_host = self._api_host or derive_api_host(site_url)
+        hosts = api_host_candidates(primary_host)
+        logger.info("馒头登录：站点 %s，凭证 %s，候选接口 %s",
+                    site_domain or "（未指定站点）", credential,
+                    " → ".join(hosts))
+        report: Optional[LoginReport] = None
+        for host in hosts:
+            client = MTeamClient(host=host, timeout=timeout, proxy=proxy, user_agent=user_agent)
+            try:
+                report = client.fetch_last_browse(
+                    username=self._username,
+                    password=self._password,
+                    api_key=api_key,
+                    otp_secret=self._otp_secret,
+                    otp_code=self._otp_code,
+                    email_code=self._email_code,
+                    tg_code=self._tg_code,
+                    site_label=site_domain,
+                    credential=credential,
+                )
+            except MTeamError as error:
+                report = LoginReport(ok=False, message=str(error),
+                                     ran_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                     site=site_domain, credential=credential,
+                                     endpoint=client.last_request)
+            if report.api_ok:
+                if host != hosts[0]:
+                    logger.info("馒头登录：接口 %s 未返回 M-Team 数据，已改用 %s",
+                                hosts[0], host)
+                return report
+            logger.warning("馒头登录：接口 %s 未返回 M-Team 数据（%s），尝试下一个",
+                           host, report.message or report.endpoint or "未知响应")
+        if report is not None and not report.api_ok and report.endpoint:
+            report.message = (report.message + "；最后一次请求 " + report.endpoint).strip("；")
+        return report or LoginReport(ok=False, message="没有可用的 M-Team 接口地址。")
 
     def _finish(self, report: LoginReport) -> None:
         record = self._record(report)

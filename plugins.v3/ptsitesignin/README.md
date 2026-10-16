@@ -5,7 +5,7 @@
 | 引擎 | 原理 | 适用场景 | 成本 |
 |---|---|---|---|
 | **HTTP 直连** | `requests` 请求签到接口（NexusPHP `attendance.php`） | 普通站点、无验证码的标签到 | 免费、毫秒级 |
-| **Browserless** | BrowserQL 驱动真实浏览器，自动解题/点击/提交 | 图片验证码、Cloudflare、**Turnstile 点击打勾**、弹窗签到、Altcha | 消耗 Browserless 额度 |
+| **Browserless** | BrowserQL 驱动真实浏览器，自动解题/点击/提交 | 图片验证码、Cloudflare、**Turnstile 自动解题**、弹窗签到、Altcha | 消耗 Browserless 额度 |
 
 默认走 HTTP 直连；内置预设或「自定义站点规则 JSON」中用 `engine` 声明为 `browserless` 的站点会自动改用浏览器引擎，其余站点一律 HTTP，无需手动切换全局引擎。**未声明引擎的站点**在 HTTP 直连遇到 Cloudflare 或图片验证码时，会自动改用 Browserless 重试一次（可在配置中关闭，见下「自动回退到浏览器引擎」）。
 
@@ -43,7 +43,7 @@ ptsitesignin/
 
 | 站点 | path | 说明 |
 |---|---|---|
-| Audiences (`audiences.me`) | `/attendance.php` | Vue + Cloudflare Turnstile 签到页，**没有提交按钮**；真实浏览器复现确认：Turnstile 复选框位于 `challenges.cloudflare.com` 跨域 iframe 内，必须**原生点击该复选框**才会生成 token 并触发站点 `cfCallback` 自动 POST 签到，单纯等待不会通过。预设走 Browserless（`submit_method=turnstile_click`、`solve_count=0`），用 BrowserQL 深度选择器 `< *challenges.cloudflare.com* input[type='checkbox']` + `waitForSelector(visible)` + `click` 完成打勾；`cloudflare_wait=5` 等外层挑战放行、`turnstile_wait=45000` 等复选框渲染、`wait=8000` 给自动 POST 留时间；随后在同一会话重新打开 `/attendance.php` 等待 8 秒核验（`verify_success_path` / `verify_wait=8000`） |
+| Audiences (`audiences.me`) | `/attendance.php` | Vue + Cloudflare Turnstile 签到页，**没有提交按钮**。实测该站 Turnstile 渲染在 **closed shadow DOM** 中：DOM/CSS 里既没有 `input[type=checkbox]`，也没有可命中的 iframe，BrowserQL 深度选择器同样命不中，所以「等待并原生点击」的原理不成立。预设改走官方 `solve`（文档明确支持 iframe / shadow DOM 内的验证码），两段验证分别用 `solve_timeout=40000`（进站交互挑战）、`solve2_timeout=50000` + `solve2_wait=5000`（签到页内嵌 Turnstile）生成 token，再由 `submit_method=auto` 触发站点 `cfCallback`、必要时按表单 action 兜底 POST；`cloudflare_wait=15`、`auto_wait=30000`、`wait=8000`，随后在同一会话重新打开 `/attendance.php` 等待 8 秒核验（`verify_success_path` / `verify_wait=8000`） |
 
 ## 并发与失败重试
 
@@ -110,13 +110,14 @@ ptsitesignin/
 | HDSky (`hdsky.me`) | `trigger_image` | 先点开签到弹窗再解图片验证码 |
 | `dstudio.me` / `mua.xloli.cc` / `share.ilolicon.com` | `cloudflare` | Cloudflare 托管挑战自动通过 |
 
-### 关于 Cloudflare Turnstile「点击打勾」
+### 关于 Cloudflare Turnstile
 
 **HTTP 引擎不行，Browserless 引擎可以。**
 
 - Turnstile 需要执行 JS 并生成一次性 token，还要拿到 `cf_clearance` Cookie，纯 HTTP 无法伪造；
 - Browserless 使用 `solve:solve(...)`（**不限定类型**，由它自动识别挑战种类），官方支持 reCAPTCHA、hCaptcha、Cloudflare Turnstile，能点击 iframe / shadow DOM 内的复选框，并带拟人化点击、指纹规避；
-- 观众（Audiences）的签到页**没有提交按钮**：真实浏览器复现（在本地 Edge 手动签到）确认，页面的 Turnstile 复选框位于 `challenges.cloudflare.com` 跨域 iframe 内，**必须原生点击该复选框**才会生成 token 并触发站点挂在 `data-callback` 上的 `cfCallback`，随后表单自动 POST `/attendance.php` 完成签到；单纯停留等待并不会通过。预设改为 `submit_method=turnstile_click`、`solve_count=0`，用 BrowserQL 深度选择器 `< *challenges.cloudflare.com* input[type='checkbox']` 先 `waitForSelector(visible:true)` 再原生 `click`，等价于手动勾选；这同时避免了 `solve:solve` 在该挑战上等待并报 `Captcha solving timed out`。`cloudflare_wait=5` 等外层挑战放行、`turnstile_wait=45000` 等复选框渲染、`wait=8000` 给自动 POST 留时间。
+- 观众（Audiences）的签到页**没有提交按钮**：实测该站 Turnstile 渲染在 **closed shadow DOM** 中——DOM/CSS 里既没有 `input[type=checkbox]`，也没有可命中的 iframe，BrowserQL 的 `< *challenges.cloudflare.com* ...` 深度选择器同样命不中，所以「等复选框可见再原生点击」一定超时。预设改回官方 `solve`（`solve_count=2`，分别覆盖进站交互挑战与签到页内嵌 Turnstile），由它生成 token；`submit_method=auto` 会先触发站点挂在 `data-callback` 上的 `cfCallback`，必要时再按表单真实 action 带 token 同源 POST 兜底。`cloudflare_wait=15` 先等外层挑战自动放行，`solve_timeout=40000` / `solve2_timeout=50000` / `solve2_wait=5000` 给两段验证预算，`auto_wait=30000`、`wait=8000` 给 token 与签到请求留时间。
+- BrowserQL 的单个步骤失败（如 `solve` 超时）不会中止整个 mutation：失败步骤只在 `data` 里返回 `null`，其余步骤照常执行。插件据此把步骤错误并入失败诊断，不再整轮判失败——页面或回查已显示签到成功时仍上报成功。
 - 签到完成后页面可能跳回首页，因此预置规则会在同一个 Browserless 会话中重新打开 `/attendance.php` 并等待 8 秒核验，只有看到签到成功 / 今日已签到才上报成功；若仍停留在人机验证页，会明确报告未确认签到，而不是把首页误判成成功。
 - Cookie 失效时 NexusPHP 会把 `/attendance.php` 302 到 `login.php?returnto=attendance.php`：插件直接提示「Cookie 无效或已过期，请重新登录后更新 Cookie」，不再让人机验证超时背锅。
 - 普通「点击打勾」页面若另有提交按钮，可写成 `{"engine":"browserless","mode":"cloudflare","path":"/attendance.php"}`，由插件按默认 `click` 提交。
@@ -126,7 +127,7 @@ ptsitesignin/
 1. **IP 信誉决定成功率。** 云节点（含 Browserless 免费额度节点）更容易被 Cloudflare 反复挑战；自建 Browserless + 住宅代理成功率显著更高。
 2. 默认走 `https://production-sfo.browserless.io` + `/stealth/bql`，自建服务填根地址或完整 `/stealth/bql` 地址即可（会自动补全路径并带上 `?token=`）。
 3. 免费额度 1000 units/月，一次签到通常几十 units，建议并发设为 1–2。
-4. 若日志出现「找到验证码但未能完成验证」，多半是该挑战未通过（换节点/IP 或改用住宅代理重试）。
+4. 若日志出现「找到验证码但未能完成验证」「solve 超时」或「未拿到 Turnstile token」，多半是当前节点的 IP 被 Cloudflare 判定为可疑（观众站的 Turnstile 属托管挑战，机房 IP 常被判为必须人工交互）：换节点或改用住宅代理成功率最高，插件已把 solve 的 found/solved/time 与页面回调诊断写进失败原因。
 5. 出现「Browserless 请求超时（…秒内未收到响应）」通常是插件 / 服务器到 Browserless 的跨境链路抖动，或节点执行过慢。插件会自动把 HTTP 读超时抬到不低于「页面内等待预算 + 45 秒余量」，避免读超时比 BQL 内部等待还短而自己掐断连接；仍超时请调大「Browserless 超时」或换成更近的区域（如 `production-ams.browserless.io`）。主流程响应丢失时插件会自动只读回查一次，已签到不会被报成失败。
 
 ## 配置项
@@ -144,7 +145,7 @@ ptsitesignin/
 | HTTP 引擎使用代理 | 复用 MoviePilot 全局代理 | 关 |
 | 遇验证码 / CF 自动用浏览器 | 内置预设或未声明引擎的站点 HTTP 撞上 CF / 验证码时自动换浏览器重试（手工写了 engine 的除外） | 开 |
 | Browserless 地址 / Token / 超时 | Browserless 连接参数；读超时自动抬升到「页面内等待预算 + 45 秒余量」（上限 300 秒），避免读超时短于 BrowserQL 内部等待 | 官方地址 / 空 / 100 秒 |
-| 自定义站点规则 | JSON；Cloudflare 交互挑战可用 `cloudflare_wait`（秒）覆盖默认 10 秒；签到页内嵌 Turnstile 复选框（如观众 Audiences）可设 `submit_method: "turnstile_click"` + `submit_selector: "< *challenges.cloudflare.com* input[type='checkbox']"` 并配 `solve_count: 0`，由插件等复选框可见后原生点击；确需自动解题时再使用 `auto` / `solve_count` | 空 |
+| 自定义站点规则 | JSON；Cloudflare 交互挑战可用 `cloudflare_wait`（秒）覆盖默认 10 秒；签到页内嵌 Turnstile（如观众 Audiences）推荐 `submit_method: "auto"` + `solve_count: 1~2`，由官方 `solve`（支持 iframe / shadow DOM）生成 token 后触发 `data-callback`、必要时按表单 action 兜底 POST；只有确实能命中的站点才用 `turnstile_click` + `submit_selector` 原生点击 | 空 |
 
 ## 自定义规则示例
 
@@ -157,7 +158,7 @@ HTTP 站点：
     "success": "(签到成功|state[\"']?\\s*:\\s*[\"']?success)",
     "already": "(已签到|今日已签)"
   },
-  "audiences.me": { "engine": "browserless", "path": "/attendance.php", "cloudflare_wait": 5, "submit_method": "turnstile_click", "submit_selector": "< *challenges.cloudflare.com* input[type='checkbox']", "turnstile_wait": 45000, "solve_count": 0, "wait": 8000 },
+  "audiences.me": { "engine": "browserless", "mode": "cloudflare", "path": "/attendance.php", "cloudflare_wait": 15, "submit_method": "auto", "solve_count": 2, "solve_timeout": 40000, "solve2_timeout": 50000, "solve2_wait": 5000, "auto_wait": 30000, "wait": 8000 },
   "5": { "path": "/signin.php", "method": "POST" }
 }
 ```
@@ -183,10 +184,10 @@ Browserless 站点（键可用域名或站点 ID，`engine` 会覆盖全局默�
 |---|---|
 | `mode` | `http` / `open_page` / `cloudflare` / `image` / `trigger_image` / `altcha` |
 | `submit_selector` / `submit_text` | 提交按钮选择器或按钮文字 |
-| `submit_method` | `click`（原生点击）/ `turnstile_click`（先等跨域 iframe 内的 Turnstile 复选框可见再原生点击）/ `ajax` / `dom_click` / `confirm_click` / `altcha_click` / `auto`（页面内嵌 Turnstile，先触发 `data-callback`，必要时按真实 action 补一次 POST）/ `none`（什么都不点，纯等页面自己签完） |
+| `submit_method` | `click`（原生点击）/ `turnstile_click`（先等跨域 iframe 内的 Turnstile 复选框可见再原生点击；仅适用于选择器确实能命中的站点）/ `ajax` / `dom_click` / `confirm_click` / `altcha_click` / `auto`（页面内嵌 Turnstile，先触发 `data-callback`，必要时按真实 action 补一次 POST）/ `none`（什么都不点，纯等页面自己签完）。观众 Audiences 的 Turnstile 在 closed shadow DOM 中，必须用 `solve` + `auto` |
 | `captcha_selector` / `captcha_input_selector` | 图片验证码图片与输入框 |
 | `trigger_selector` / `trigger_wait` | 弹窗触发按钮与等待毫秒 |
-| `preflight_path` / `wait` / `preflight_wait` / `cloudflare_wait` / `turnstile_wait` / `auto_wait` / `solve_timeout` / `solve_count` / `solve2_wait` | 页面预检、签到后等待、Cloudflare 自动放行、Turnstile 复选框渲染等待（毫秒，5–60 秒）、Turnstile token 与 solve 找验证码的等待时间；`solve_count=0` 明确禁用 solve，`solve_count=2` 时对两段挑战依次 solve，`solve2_wait` 控制两段之间的等待毫秒数 |
+| `preflight_path` / `wait` / `preflight_wait` / `cloudflare_wait` / `turnstile_wait` / `auto_wait` / `solve_timeout` / `solve_count` / `solve2_wait` / `solve2_timeout` | 页面预检、签到后等待、Cloudflare 自动放行、Turnstile 复选框渲染等待（毫秒，5–60 秒）、Turnstile token 出现的等待时间、solve 找验证码的等待时间；`solve_count=0` 明确禁用 solve，`solve_count=2` 时对两段挑战依次 solve，`solve2_wait` / `solve2_timeout` 分别控制两段之间的等待与第二段的解题目预算（缺省继承 `solve_timeout`） |
 | `success_keywords` / `already_keywords` / `pending_keywords` | 文本关键词判定；`pending_keywords` 用于诊断仍停留在人机验证中的页面 |
 | `success_json` | 形如 `{"field":"/state","values":["success"]}` 的 AJAX JSON 判定 |
 | `strict_status_keywords` | `true` 时只认 `success_keywords`，忽略通用词 |

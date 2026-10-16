@@ -33,8 +33,9 @@ CF_INTERSTITIAL_PATTERN = r"(just a moment|_cf_chl_opt|chl_page)"
 TURNSTILE_PATTERN = r"(cf-turnstile|turnstile/v0|turnstile\.min\.js|turnstile\.render)"
 # 页面内嵌 Cloudflare Turnstile 组件的隐藏 token 输入框（观众 Audiences 的签到页用它承载验证结果）
 TURNSTILE_TOKEN_SELECTOR = 'input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"]'
-# Turnstile 的真实 checkbox 位于跨域 iframe 中；BrowserQL 用 "< URL通配符 CSS" 深度选择器
-# 直接点击它。该点击是浏览器原生鼠标事件，等同于用户手动勾选。
+# Turnstile 复选框的深度选择器（保留给确实能命中的自定义规则）。观众 Audiences 的
+# Turnstile 渲染在 closed shadow DOM 里：DOM 中既没有 checkbox，也没有可命中的 iframe，
+# 该选择器必然等不到元素，所以观众预设不再使用它，改用官方 solve（支持 iframe / shadow DOM）。
 TURNSTILE_CHECKBOX_SELECTOR = "< *challenges.cloudflare.com* input[type='checkbox']"
 # 站点把签到页踢回登录页的特征（NexusPHP login.php?returnto=... / takelogin.php）
 LOGIN_PAGE_PATTERN = r"(takelogin\.php|login\.php\?returnto)"
@@ -174,23 +175,30 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "path": "/attendance.php",
         "submit_selector": "form[action*='attendance.php'] input[type='submit']",
     },
-    # ---- 观众（Audiences）：签到页内嵌 Turnstile 复选框 ----
-    # 真实浏览器复现结果：页面不会因为“等一会儿”自动通过 Turnstile，必须点击一次
-    # 跨域 iframe 里的复选框。点击成功后站点的 cfCallback 会自动 POST attendance.php。
-    #   - submit_method=turnstile_click：用 BrowserQL 深度选择器原生点击真实 checkbox
-    #   - solve_count=0：不再调用 solve；此前实际结果是超时或拿不到 token
-    #   - turnstile_wait：等待外层 Cloudflare 放行、Turnstile iframe 渲染并可见
-    #   - pending_keywords：仍停留在「验证中」时给出明确诊断
+    # ---- 观众（Audiences）：签到页内嵌 Turnstile，验证通过后站点回调自动提交 ----
+    # 该站 /attendance.php 是 Vue 签到页：正文是「完成人机验证即可领取今日爆米花奖励」，
+    # 页面上没有可点的提交按钮，Turnstile 通过后由站点 cfCallback 自动 POST。
+    # 实测结论：
+    #   - Turnstile 渲染在 closed shadow DOM 中，DOM/CSS 里既没有 input[type=checkbox]，
+    #     也没有可命中的 iframe，BrowserQL 深度选择器同样命不中，所以「等待并原生点击」
+    #     的方案原理上不可行，turnstile_click 已从本站预设移除；
+    #   - 官方 solve 明确支持 iframe / shadow DOM 内的验证码，用它生成 token，再由 auto
+    #     提交脚本触发站点 cfCallback（失败时按表单 action 兜底 POST）；
+    #   - 官方文档：一个步骤失败不会中止整个 mutation（失败步骤在 data 里返回 null），
+    #     所以 solve 超时后 auto 脚本仍会等 token 并提交，页面真签上了也不会被误报失败；
+    #   - cloudflare_wait 先给外层交互挑战自动放行的机会；solve 分两段（外层挑战 + 签到页
+    #     内嵌 Turnstile），solve_timeout / solve2_timeout 分别给两段预算。
     "audiences.me": {
         "engine": "browserless",
         "mode": "cloudflare",
         "path": "/attendance.php",
-        "submit_method": "turnstile_click",
-        "submit_selector": TURNSTILE_CHECKBOX_SELECTOR,
-        # 外层挑战通常数秒内完成；真正的渲染等待交给 waitForSelector(turnstile_wait)。
-        "cloudflare_wait": 5,
-        "solve_count": 0,
-        "turnstile_wait": DEFAULT_TURNSTILE_WAIT,
+        "submit_method": "auto",
+        "cloudflare_wait": 15,
+        "solve_count": 2,
+        "solve_timeout": 40000,
+        "solve2_timeout": 50000,
+        "solve2_wait": 5000,
+        "auto_wait": 30000,
         "wait": 8000,
         # 签到成功后页面可能跳回首页；同一浏览器会话重新打开 attendance.php 再确认一次，
         # 避免只看到首页就误报失败，也避免把未完成的验证当成成功。
@@ -745,13 +753,13 @@ def build_query(rule: Mapping[str, Any], user_agent: Optional[str] = None) -> st
         # 再对签到页内嵌的 Turnstile 执行一次 solve。没有这一步时，第一次 solve 返回时
         # 第二段验证尚未发生，后续 autoSubmit 就只会看到空的 cf-turnstile-response。
         solve += ("\n      waitBetweenSolves:waitForTimeout(time:$solve2Wait){time}"
-                  "\n      solve2:solve(timeout:$solveTimeout){found solved time}")
+                  "\n      solve2:solve(timeout:$solve2Timeout){found solved time}")
     extra = "$captchaSelector:String! $captchaInputSelector:String!" if image else ""
     set_user_agent = "userAgent(userAgent:$userAgent){time}" if user_agent else ""
     user_agent_variable = " $userAgent:String!" if user_agent else ""
     variable_suffix = (" $solveTimeout:Float!" if needs_solver else "")
     if second_solve:
-        variable_suffix += " $solve2Wait:Float!"
+        variable_suffix += " $solve2Wait:Float! $solve2Timeout:Float!"
     if native_click:
         variable_suffix += " $selector:String!"
         if turnstile_click:
@@ -901,6 +909,22 @@ def turnstile_wait_ms(rule: Mapping[str, Any]) -> int:
     return max(5000, min(milli, 60000))
 
 
+def solve2_timeout_ms(rule: Mapping[str, Any]) -> int:
+    """第二段 solve（签到页内嵌 Turnstile）的毫秒预算（5~120 秒）。
+
+    第一段 solve 针对进站时的 Cloudflare 交互挑战，第二段针对签到页自己的 Turnstile；
+    两者难度不同，可分别用 ``solve_timeout`` / ``solve2_timeout`` 覆盖，缺省继承前者。
+    """
+    value = rule.get("solve2_timeout")
+    if value is None:
+        value = rule.get("solve_timeout")
+    try:
+        milli = int(float(value if value is not None else 60000))
+    except (TypeError, ValueError):
+        milli = 60000
+    return max(5000, min(milli, 120000))
+
+
 def bql_wait_budget_ms(rule: Mapping[str, Any]) -> int:
     """估算一次 BQL mutation 内部的等待总时长（毫秒）。
 
@@ -921,6 +945,7 @@ def bql_wait_budget_ms(rule: Mapping[str, Any]) -> int:
         total += solve_timeout_ms(rule)
     if secondary_solve_enabled(rule):
         total += solve2_wait_ms(rule)
+        total += solve2_timeout_ms(rule)
     try:
         total += max(0, int(rule.get("wait") or 3500))
     except (TypeError, ValueError):
@@ -936,8 +961,9 @@ def bql_wait_budget_ms(rule: Mapping[str, Any]) -> int:
 def solver_enabled(rule: Mapping[str, Any]) -> bool:
     """Browserless cloudflare / image 模式是否启用 solve。
 
-    观众站点的 Cloudflare 托管挑战会自动放行，solve_count=0 用于让页面留在
-    真实浏览器里自行完成挑战，避免 Browserless solve 在不存在或不可解的验证码上超时。
+    solve_count 缺省为启用；``solve_count=0`` 可显式关闭（用于纯等待页面自行放行的站点）。
+    观众 Audiences 的 Turnstile 在 closed shadow DOM 里，CSS / 深度选择器都命不中，
+    必须交给官方 solve（它内置支持 iframe / shadow DOM 内的验证码）。
     """
     if str(rule.get("mode") or "") not in {"image", "trigger_image", "cloudflare"}:
         return False
@@ -987,6 +1013,29 @@ def _bonus_message(prefix: str, text: str, rule: Mapping[str, Any]) -> str:
     """成功 / 已签消息只带奖励数字，不再粘贴整页文字。"""
     bonus = extract_bonus(text, rule)
     return f"{prefix}（{bonus}）" if bonus else prefix
+
+
+def step_error_hint(errors: Any) -> str:
+    """把 BrowserQL 顶层步骤的失败信息翻译成一句诊断。
+
+    官方文档明确：一个步骤失败（含 waitForSelector / solve 超时）不会中止整个 mutation，
+    失败步骤在 data 里返回 null，其余步骤照常执行。因此这些错误只是诊断信息——
+    solve 超时并不代表页面没有签到成功，不能把它当成整轮失败。
+    """
+    if not isinstance(errors, (list, tuple)):
+        return ""
+    parts: List[str] = []
+    for item in errors:
+        if not isinstance(item, Mapping):
+            continue
+        message = str(item.get("message") or "").strip()
+        if not message:
+            continue
+        path = str(item.get("path") or "").strip()
+        parts.append(f"{path}: {message}" if path else message)
+        if len(parts) >= 2:
+            break
+    return "Browserless 步骤：" + "；".join(parts) if parts else ""
 
 
 def solver_hint(first: Any, second: Any = None) -> str:
@@ -1219,6 +1268,7 @@ class BrowserlessSigner:
             variables["solveTimeout"] = solve_timeout_ms(rule)
         if secondary_solve_enabled(rule):
             variables["solve2Wait"] = solve2_wait_ms(rule)
+            variables["solve2Timeout"] = solve2_timeout_ms(rule)
         if rule["mode"] in {"image", "trigger_image"}:
             variables.update({"captchaSelector": rule["captcha_selector"],
                               "captchaInputSelector": rule["captcha_input_selector"]})
@@ -1249,18 +1299,19 @@ class BrowserlessSigner:
         after_html = str((data.get("after") or {}).get("html") or "")
         solve = data.get("solve") or {}
         solve2 = data.get("solve2") or {}
-        # auto 提交的现场诊断：token 有没有生成、回调有没有触发、表单有没有提交
+        # auto 提交的现场诊断：token 有没有生成、回调有没有触发、表单有没有提交；
+        # 再加上 BrowserQL 各步骤自己的报错（如 solve 超时），它只是诊断、不代表整轮失败。
         auto_hint = auto_submit_hint((data.get("autoDiag") or {}).get("value"))
         solve_hint = solver_hint(solve, solve2)
-        if solve_hint:
-            auto_hint = f"{solve_hint}；{auto_hint}" if auto_hint else solve_hint
+        step_hint = step_error_hint(data.get("_errors"))
+        auto_hint = "；".join(part for part in (solve_hint, step_hint, auto_hint) if part)
         # 已经等满预算却仍卡在挑战页：给出可操作的提示，而不是笼统的「打开签到页失败」
         if mode == "cloudflare" and cloudflare_pending(after_html):
             return SignResult("failed", append_hint(
                 f"Cloudflare 挑战在 {page_wait // 1000} 秒内未自动放行；"
                 "可在该站规则里调大 cloudflare_wait 后重试", auto_hint))
-        if not navigation_ok(mode, data.get("goto", {}).get("status"), after_html):
-            return SignResult("failed", "打开签到页失败")
+        if not navigation_ok(mode, (data.get("goto") or {}).get("status"), after_html):
+            return SignResult("failed", append_hint("打开签到页失败", auto_hint))
         if rule["mode"] in {"image", "trigger_image"} and not solve.get("found"):
             return SignResult("failed", "未找到图片验证码；请检查验证码图片选择器")
         # Cloudflare / Turnstile 存在「solve 没解成功、但页面自己跑完 JS 也放行了」的情况
@@ -1360,14 +1411,21 @@ class BrowserlessSigner:
                     # JSON 解析失败不是网络问题，其余（超时 / 连接中断）结果未知
                     transient=not isinstance(exc, ValueError))
         errors = value.get("errors") or []
-        if errors:
-            message = str(errors[0].get("message") or "未知错误")
-            error_path = ".".join(str(part) for part in (errors[0].get("path") or []))
+        data = value.get("data")
+        if not isinstance(data, Mapping):
+            data = {}
+        if errors and not data:
+            # 只有整个查询在执行前就被拒绝（字段/参数非法）才会没有 data，这时必须报错。
+            # 单个步骤失败时 BQL 仍会返回其它步骤的 data：直接判整轮失败会误伤
+            # 「solve 超时，但页面其实已经签到成功」这类场景，所以下面把错误交给上层做诊断。
+            first = errors[0] if isinstance(errors[0], Mapping) else {}
+            message = str(first.get("message") or "未知错误")
+            error_path = ".".join(str(part) for part in (first.get("path") or []))
             if error_path:
                 message += f"（步骤：{error_path}）"
-            if "waiting for page navigation" in message.lower():
-                return SignResult("failed", "Browserless 页面导航超时；请检查该站是否可由当前节点访问")
             lower = message.lower()
+            if "waiting for page navigation" in lower:
+                return SignResult("failed", "Browserless 页面导航超时；请检查该站是否可由当前节点访问")
             if ("waitforselector" in lower or "waiting for selector" in lower
                     or "timeout" in lower and "selector" in lower):
                 return SignResult("failed", "未等到 Cloudflare Turnstile 复选框；"
@@ -1376,4 +1434,10 @@ class BrowserlessSigner:
                 return SignResult("failed", "找到 Turnstile 复选框但无法原生点击；"
                                    "当前 Browserless 节点可能被 Cloudflare 拦截")
             return SignResult("failed", "Browserless 执行失败：" + message)
-        return value.get("data") or {}
+        result = dict(data)
+        result["_errors"] = [
+            {"path": ".".join(str(part) for part in (item.get("path") or [])),
+             "message": str(item.get("message") or "未知错误")}
+            for item in errors if isinstance(item, Mapping)
+        ]
+        return result

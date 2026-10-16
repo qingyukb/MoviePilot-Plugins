@@ -26,6 +26,17 @@ M-Team 的网页前端在登录成功后会立刻调用 `/member/updateLastBrows
 > 实测 `x-api-key` 请求头无需额外签名即可读取 `/api/member/profile`；MoviePilot 官方的馒头索引器也是这么用的。
 > 只填 Cookie 不行——Cookie 只能用于网页，读「最近动向」需要 API Key（或账号密码登录）。
 
+### 站点是前后端分离的
+
+馒头的前端（如 `kp.m-team.cc`）和后端 API（`api.<域名>`）**不是同一个域名**。
+所以插件不会直接请求站点地址，而是：
+
+1. 先把站点地址推导成后端地址（`kp.m-team.cc` / `m-team.cc` → `https://api.m-team.cc/api`，`m-team.io` → `https://api.m-team.io/api`）；
+2. 如果该地址没有返回 M-Team 的 JSON（比如误将前端当成 API，返回 nginx 403 HTML），会自动依次回退 `api.m-team.cc` → `api.m-team.io` → `api2.m-team.cc`；
+3. 若后端把该只读接口改成只接受 POST，还会自动改用 POST 重试一次。
+
+失败时日志会附上实际请求的 `METHOD URL`，方便定位到底命中了哪个地址。
+
 ### 可选：手动覆盖
 
 - 站点管理里没有馒头站点、或没填 API Key 时，也可以在插件里填「手动 API Key」；
@@ -69,6 +80,8 @@ M-Team 的网页前端在登录成功后会立刻调用 `/member/updateLastBrows
 ## 实现要点
 
 - 主路径直接用站点管理里的 API Key 读 `/api/member/profile`（`x-api-key` 请求头），无需签名；
+- 接口地址支持多候选自动回退，并在「请求方法不支持」时自动回退 POST；
+- 判断是否命中真正的 M-Team 接口，以「原始响应体是否为带 `code` 字段的 JSON」为准，HTML 等非 JSON 响应一律视为未命中；
 - 账号密码登录路径使用 M-Team 的自定义签名（逆向所得，已用真实请求验证）：
 
   ```text

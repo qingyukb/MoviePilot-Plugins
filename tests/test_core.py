@@ -101,15 +101,19 @@ class CoreRegressionTests(unittest.TestCase):
                                       self.audiences)
         self.assertEqual(result.status, "already")
 
-    def test_audiences_preset_clicks_turnstile_checkbox(self):
-        # 真实复现：只等待不会通过 Turnstile；必须原生点击跨域 iframe 内 checkbox，
-        # 点击后站点回调才会自动提交表单。页面本身没有可点的提交按钮。
+    def test_audiences_preset_uses_solver_and_auto_submit(self):
+        # 实测：观众站 Turnstile 渲染在 closed shadow DOM 里，DOM/CSS 与 BrowserQL 深度
+        # 选择器都命不中 checkbox，所以必须交给官方 solve（支持 iframe / shadow DOM），
+        # 再由 auto 提交脚本触发站点 cfCallback / 表单兜底 POST。
         self.assertEqual(self.audiences["mode"], "cloudflare")
-        self.assertEqual(self.audiences["submit_method"], "turnstile_click")
-        self.assertEqual(self.audiences["solve_count"], 0)
-        self.assertIn("challenges.cloudflare.com", self.audiences["submit_selector"])
-        self.assertIn("input[type='checkbox']", self.audiences["submit_selector"])
-        self.assertEqual(self.audiences["turnstile_wait"], 45000)
+        self.assertEqual(self.audiences["submit_method"], "auto")
+        self.assertEqual(self.audiences["solve_count"], 2)
+        self.assertEqual(self.audiences["solve_timeout"], 40000)
+        self.assertEqual(self.audiences["solve2_timeout"], 50000)
+        self.assertEqual(self.audiences["solve2_wait"], 5000)
+        self.assertEqual(self.audiences["cloudflare_wait"], 15)
+        self.assertEqual(self.audiences["auto_wait"], 30000)
+        self.assertNotIn("submit_selector", self.audiences)
         self.assertIn("签到成功", self.audiences["success_keywords"])
         self.assertIn("已签到", self.audiences["already_keywords"])
         self.assertTrue(self.audiences["pending_keywords"])
@@ -329,8 +333,9 @@ class BrowserlessAudiencesTests(unittest.TestCase):
         # 否则插件会自己先掐断连接，报出 The read operation timed out 这种自伤式失败。
         rule = self._rule()
         budget = self.core.bql_wait_budget_ms(rule)
-        # cloudflare_wait 5s + turnstile_wait 45s + wait 8s + verify_wait 8s
-        self.assertEqual(budget, 66000)
+        # cloudflare_wait 15s + solve 40s + solve2_wait 5s + solve2_timeout 50s
+        # + wait 8s + verify_wait 8s
+        self.assertEqual(budget, 126000)
         signer = self.core.BrowserlessSigner("https://example.test/bql", "token", 100)
         self.assertGreater(signer.request_timeout(rule), 100)
         self.assertGreaterEqual(signer.request_timeout(rule) * 1000, budget + 45000)
@@ -365,31 +370,30 @@ class BrowserlessAudiencesTests(unittest.TestCase):
         self.assertIn("Browserless 请求超时", result.message)
         self.assertIn("未能确认为已签到", result.message)
 
-    def test_query_waits_for_turnstile_then_native_clicks_it(self):
-        # 不使用 solve；等 Turnstile iframe 内 checkbox 可见后，用 BrowserQL 原生 click
-        # 触发真实鼠标事件。点击成功会调用站点 cfCallback 并自动提交表单。
+    def test_query_solves_turnstile_and_auto_submits(self):
+        # 观众预设：两段官方 solve（外层交互挑战 + 签到页内嵌 Turnstile）生成 token，
+        # 再由 auto 脚本触发站点回调 / 表单兜底 POST；不再使用命不中的 checkbox 选择器。
         rule = self._rule()
         query = self.core.build_query(rule)
-        self.assertNotIn("solve:solve", query)
-        self.assertIn("solve:evaluate", query)
-        self.assertNotIn("$solveTimeout", query)
-        self.assertNotIn("$solve2Wait", query)
-        self.assertNotIn("$autoSubmit", query)
-        self.assertIn("waitForTurnstile:waitForSelector", query)
-        self.assertIn("selector:$selector", query)
-        self.assertIn("timeout:$turnstileWait", query)
-        self.assertIn("visible:true", query)
-        self.assertIn("submit:click(selector:$selector)", query)
+        self.assertIn("solve:solve(timeout:$solveTimeout)", query)
+        self.assertIn("solve2:solve(timeout:$solve2Timeout)", query)
+        self.assertIn("$solveTimeout", query)
+        self.assertIn("$solve2Timeout", query)
+        self.assertIn("$solve2Wait", query)
+        self.assertIn("$autoSubmit", query)
+        self.assertIn("submit:evaluate(content:$autoSubmit)", query)
+        self.assertNotIn("waitForTurnstile", query)
+        self.assertNotIn("$turnstileWait", query)
         self.assertNotIn("$submit:", query)
         self.assertIn("verify:goto", query)
         self.assertIn("waitForVerify", query)
         self.assertIn("$verifyWait", query)
 
-    def test_waits_for_turnstile_then_reports_success(self):
+    def test_solves_turnstile_then_reports_success(self):
         signer = self._signer([
             # 预检：页面还是「未签到 + 等人机验证」
             {"goto": {"status": 200}, "before": {"html": AUDIENCES_PENDING_HTML}},
-            # 主流程：等 checkbox，点击后站点自动提交并跳回首页
+            # 主流程：solve 生成 token，auto 提交后站点跳回首页
             {"goto": {"status": 200}, "solve": {"found": True, "solved": True},
              "solve2": {"found": True, "solved": True},
              "submit": {}, "response": {},
@@ -401,15 +405,17 @@ class BrowserlessAudiencesTests(unittest.TestCase):
         result = signer.sign(self.site, self._rule())
         self.assertEqual(result.status, "success")
         self.assertIn("22", result.message)
-        self.assertEqual(signer.calls[1][1]["beforeWait"], 5000)
-        self.assertNotIn("solve2Wait", signer.calls[1][1])
-        self.assertEqual(signer.calls[1][1]["selector"],
-                         self.core.TURNSTILE_CHECKBOX_SELECTOR)
-        self.assertEqual(signer.calls[1][1]["turnstileWait"], 45000)
+        self.assertEqual(signer.calls[1][1]["beforeWait"], 15000)
+        self.assertEqual(signer.calls[1][1]["solveTimeout"], 40000)
+        self.assertEqual(signer.calls[1][1]["solve2Timeout"], 50000)
+        self.assertEqual(signer.calls[1][1]["solve2Wait"], 5000)
         self.assertEqual(signer.calls[1][1]["wait"], 8000)
         self.assertEqual(signer.calls[1][1]["verifyWait"], 8000)
         self.assertEqual(signer.calls[1][1]["verifyUrl"],
                          "https://audiences.me/attendance.php")
+        self.assertNotIn("selector", signer.calls[1][1])
+        self.assertNotIn("turnstileWait", signer.calls[1][1])
+        self.assertIn("cf-turnstile-response", signer.calls[1][1]["autoSubmit"])
         self.assertEqual(signer.calls[0][0], "CheckInPreflight")
         self.assertEqual(signer.calls[1][0], "CheckIn")
 
@@ -538,8 +544,13 @@ class BrowserlessAudiencesTests(unittest.TestCase):
         self.assertEqual(self.core.turnstile_wait_ms({"turnstile_wait": 1}), 5000)
         self.assertEqual(self.core.turnstile_wait_ms({}), 45000)
         self.assertTrue(self.core.secondary_solve_enabled(rule))
-        self.assertFalse(self.core.solver_enabled(self._rule()))
+        self.assertTrue(self.core.solver_enabled(self._rule()))
         self.assertTrue(self.core.solver_enabled({"mode": "cloudflare"}))
+        self.assertEqual(self.core.solve2_timeout_ms({"solve2_timeout": 45000}), 45000)
+        self.assertEqual(self.core.solve2_timeout_ms({"solve_timeout": 20000}), 20000)
+        self.assertEqual(self.core.solve2_timeout_ms({}), 60000)
+        self.assertEqual(self.core.solve2_timeout_ms({"solve2_timeout": 1}), 5000)
+        self.assertEqual(self.core.solve2_timeout_ms({"solve2_timeout": 999999}), 120000)
 
     def test_diagnostics_report_callback_and_post(self):
         hint = self.core.auto_submit_hint(json.dumps(
@@ -590,6 +601,97 @@ class BrowserlessAudiencesTests(unittest.TestCase):
         self.assertEqual(result.status, "failed")
         self.assertIn("重新登录", result.message)
         self.assertIn("Cookie", result.message)
+
+    def test_solve_step_error_still_reports_signed_success(self):
+        # 官方文档：单个步骤失败（如 solve 超时）不会中止整个 mutation。页面回查已显示
+        # 签到成功时，不能因为 errors 里有一条 solve 报错就整轮判失败。
+        signer = self._signer([
+            {"goto": {"status": 200}, "before": {"html": AUDIENCES_PENDING_HTML}},
+            {"goto": {"status": 200}, "solve": None, "solve2": None,
+             "_errors": [{"path": "solve",
+                          "message": "Captcha solving timed out after 40000 ms"}],
+             "autoDiag": {"value": "null"}, "submit": {}, "response": {},
+             "before": {"html": AUDIENCES_PENDING_HTML},
+             "after": {"html": AUDIENCES_SIGNED_HTML},
+             "verify": {"status": 200},
+             "verifyPage": {"html": AUDIENCES_SIGNED_HTML}},
+        ])
+        result = signer.sign(self.site, self._rule())
+        self.assertEqual(result.status, "success")
+
+    def test_solve_step_error_is_reported_in_failure_message(self):
+        # 真没签上时，BrowserQL 步骤错误要出现在失败原因里，便于定位是 solve 超时还是
+        # 页面结构变化，而不是只给一句「未匹配到签到成功标志」。
+        signer = self._signer([
+            {"goto": {"status": 200}, "before": {"html": AUDIENCES_PENDING_HTML}},
+            {"goto": {"status": 200}, "solve": None, "solve2": None,
+             "_errors": [{"path": "solve",
+                          "message": "Captcha solving timed out after 40000 ms"}],
+             "autoDiag": {"value": "null"}, "submit": {}, "response": {},
+             "before": {"html": AUDIENCES_PENDING_HTML},
+             "after": {"html": AUDIENCES_PENDING_HTML},
+             "verify": {"status": 200},
+             "verifyPage": {"html": AUDIENCES_PENDING_HTML}},
+        ])
+        result = signer.sign(self.site, self._rule())
+        self.assertEqual(result.status, "failed")
+        self.assertIn("Browserless 步骤", result.message)
+        self.assertIn("solve", result.message)
+        self.assertIn("Captcha solving timed out", result.message)
+
+
+class BrowserlessRequestTests(unittest.TestCase):
+    """_request 的响应解析：单步失败不能当整轮失败。"""
+
+    def setUp(self):
+        self.core = CORES[0]
+        self.signer = self.core.BrowserlessSigner("https://example.test/bql", "token", 100)
+
+    @staticmethod
+    def _response(payload):
+        class _FakeResponse:
+            def __init__(self, body):
+                self._body = body
+
+            def read(self):
+                return json.dumps(self._body).encode("utf-8")
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        return _FakeResponse(payload)
+
+    def test_step_errors_do_not_discard_data(self):
+        from unittest import mock
+
+        payload = {"data": {"goto": {"status": 200}, "solve": None,
+                            "after": {"html": AUDIENCES_SIGNED_HTML}},
+                   "errors": [{"message": "Captcha solving timed out after 40000 ms",
+                               "path": ["solve"]}]}
+        with mock.patch.object(self.core.urllib.request, "urlopen",
+                               return_value=self._response(payload)):
+            data = self.signer._request({}, "CheckIn", "query")
+        self.assertIsInstance(data, dict)
+        self.assertEqual(data["_errors"],
+                         [{"path": "solve",
+                           "message": "Captcha solving timed out after 40000 ms"}])
+        self.assertIn("html", data["after"])
+
+    def test_errors_without_any_data_still_fail(self):
+        from unittest import mock
+
+        payload = {"data": None,
+                   "errors": [{"message": "Field 'solve' is not defined",
+                               "path": ["solve"]}]}
+        with mock.patch.object(self.core.urllib.request, "urlopen",
+                               return_value=self._response(payload)):
+            result = self.signer._request({}, "CheckIn", "query")
+        self.assertIsInstance(result, self.core.SignResult)
+        self.assertEqual(result.status, "failed")
+        self.assertIn("Field", result.message)
 
 
 if __name__ == "__main__":

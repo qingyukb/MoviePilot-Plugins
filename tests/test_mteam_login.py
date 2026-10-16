@@ -278,6 +278,35 @@ class LoginFlowTests(unittest.TestCase):
                 paths = [item["path"] for item in recorded(opener)]
                 self.assertEqual(paths, ["/api/member/profile"])
 
+    def test_method_not_supported_falls_back_to_post(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                denied = 405, {}, {"timestamp": "2026-10-16T19:16:29", "status": 405,
+                                   "error": "Method Not Allowed", "path": "/api/member/profile",
+                                   "message": "Request method 'GET' is not supported"}
+                client, opener = build_client(core, [denied, profile_ok(1792147191401)])
+                report = client.fetch_last_browse(api_key="KEY")
+                self.assertTrue(report.ok, report.message)
+                methods = [item["method"] for item in recorded(opener)]
+                self.assertEqual(methods, ["GET", "POST"])
+                paths = [item["path"] for item in recorded(opener)]
+                self.assertNotIn(FORBIDDEN_PATH, paths)
+
+    def test_report_tracks_endpoint_and_api_ok(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                ok_client, _o = build_client(core, [profile_ok(1792147191401)])
+                ok = ok_client.fetch_last_browse(api_key="KEY")
+                self.assertTrue(ok.api_ok)
+                self.assertIn(core.DEFAULT_API_HOST + "/member/profile", ok.endpoint)
+                broken = 405, {}, {"timestamp": "2026-10-16T19:16:29", "status": 405,
+                                   "error": "Method Not Allowed", "path": "/api/member/profile",
+                                   "message": "Request method 'GET' is not supported"}
+                bad_client, _o2 = build_client(core, [broken, broken])
+                bad = bad_client.fetch_last_browse(api_key="KEY")
+                self.assertFalse(bad.api_ok)
+                self.assertIn("not supported", bad.message)
+
     def test_invalid_api_key_returns_failed_report(self):
         for core in CORES:
             with self.subTest(core=core.__name__):
@@ -446,6 +475,26 @@ class SiteManagementTests(unittest.TestCase):
                 self.assertEqual(report.site, "m-team.cc")
                 self.assertEqual(report.credential, "站点管理 API Key")
 
+    def test_api_host_candidates_prefers_primary_then_known(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                hosts = core.api_host_candidates("https://api.m-team.io/api")
+                self.assertEqual(hosts[0], "https://api.m-team.io/api")
+                self.assertIn(core.DEFAULT_API_HOST, hosts)
+                self.assertEqual(len(hosts), len(set(hosts)))
+                self.assertEqual(core.api_host_candidates(None)[0], core.DEFAULT_API_HOST)
+
+    def test_looks_like_api_response(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                self.assertTrue(core.looks_like_api_response({"code": 1}))
+                self.assertFalse(core.looks_like_api_response({"error": "x"}))
+                self.assertFalse(core.looks_like_api_response({}))
+                # 原始响应体：真 JSON 才算命中，HTML（如 403）不算
+                self.assertTrue(core.looks_like_api_response(b'{"code":1,"message":"bogus"}'))
+                self.assertFalse(core.looks_like_api_response(b"<html><title>403 Forbidden</title></html>"))
+                self.assertFalse(core.looks_like_api_response(b""))
+
     def test_plugin_reads_credentials_from_site_management(self):
         for directory in PLUGIN_DIRS:
             with self.subTest(directory=directory.name):
@@ -456,6 +505,9 @@ class SiteManagementTests(unittest.TestCase):
                 self.assertIn('config.get("site")', source)
                 # 站点缺失 / 缺 API Key 时给出指向站点管理的可操作提示
                 self.assertIn("站点管理", source)
+                # 前后端分离：按站点地址推导 + 多候选自动回退
+                self.assertIn("api_host_candidates", source)
+                self.assertIn("api_ok", source)
 
 
 if __name__ == "__main__":

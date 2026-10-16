@@ -61,6 +61,9 @@ TURNSTILE_HINT_KEYWORDS = ("人機驗證", "人机验证", "turnstile", "驗證�
 PROFILE_NOT_FOUND_KEYWORDS = ("無效的憑證", "无效的凭证", "Full authentication")
 # 站点管理里的 API Key 失效时的提示特征。
 INVALID_API_KEY_KEYWORDS = ("key無效", "key无效", "無效的key", "invalid api key", "invalid key")
+# 请求方法不被接口接受（前后端分离的站点把只读接口也改成 POST-only 之类）。
+METHOD_NOT_SUPPORTED_KEYWORDS = ("not supported", "not_supported", "method not allowed",
+                               "请求方法", "請求方法", "方法不支持")
 
 # --------------------------------------------------------------------- 签名
 
@@ -165,6 +168,9 @@ class LoginReport:
     # 本次使用的馒头站点（站点管理里的 domain）与凭证来源，便于详情页展示。
     site: str = ""
     credential: str = ""
+    # 实际命中的接口地址（METHOD URL）与是否拿到了 M-Team 的结构化 JSON。
+    endpoint: str = ""
+    api_ok: bool = False
 
 
 # --------------------------------------------------------------------- 工具
@@ -221,6 +227,43 @@ def derive_api_host(site_url: Optional[str], default: str = DEFAULT_API_HOST) ->
     labels = host.split(".")
     registered = ".".join(labels[-2:]) if len(labels) >= 2 else host
     return normalize_host("https://api." + registered)
+
+
+def api_host_candidates(primary: Optional[str]) -> List[str]:
+    """候选接口地址：优先用传入的（按站点地址推导），再回退到已知可用的官方地址。
+
+    前后端分离的站点里，前端（如 kp.m-team.cc）与后端 API
+    不同域；若推导失败或该地址不返回数据，自动回退到已知可用地址。
+    """
+    hosts: List[str] = []
+
+    def _add(value: Optional[str]) -> None:
+        try:
+            normalized = normalize_host(value)
+        except Exception:  # noqa: BLE001 - 任何异常都不应阻断候选列表
+            return
+        if normalized not in hosts:
+            hosts.append(normalized)
+
+    _add(primary)
+    _add(derive_api_host(primary))
+    for host in API_HOSTS:
+        _add(host)
+    return hosts
+
+
+def looks_like_api_response(body: Any) -> bool:
+    """判断响应是否为 M-Team 结构化 JSON（带 code 字段）。
+
+    可传入原始响应体（bytes）或已解析的对象。对于 HTML 等非 JSON
+    响应一律返回 False，避免把「非法 JSON」的合成错误误判为有效接口。
+    """
+    if isinstance(body, (bytes, bytearray)):
+        try:
+            body = json.loads(bytes(body).decode("utf-8", errors="replace"))
+        except Exception:  # noqa: BLE001 - 非 JSON 就不是 M-Team 接口
+            return False
+    return isinstance(body, Mapping) and "code" in body
 
 
 # 站点管理里可能用到的馒头站点识别关键字。
@@ -357,9 +400,19 @@ def hint_for(message: str) -> str:
         return "（站点要求 Cloudflare 人机验证，HTTP 直连无法自动完成；建议改填 API Key 后重试）"
     if any(word.lower() in text for word in INVALID_API_KEY_KEYWORDS):
         return "（站点管理里的 API Key 无效或已过期，请更新该站点的「存取令牌」）"
+    if any(word.lower() in text for word in METHOD_NOT_SUPPORTED_KEYWORDS):
+        return "（接口地址可能不对：前后端分离的站点后端在 api.<域名>/api，请检查「站点管理」里的站点地址或本插件的「API 基址」）"
     if any(word.lower() in text for word in PROFILE_NOT_FOUND_KEYWORDS):
         return "（登录凭证已失效，请检查账号密码或重新获取 API Key）"
     return ""
+
+
+def _method_not_supported(status: int, body: Mapping[str, Any]) -> bool:
+    """判断响应是不是“这个请求方法不被支持”。"""
+    if status in (405, 501):
+        return True
+    text = str((body or {}).get("message") or "").lower()
+    return any(word in text for word in ("not supported", "not_supported", "method not allowed"))
 
 
 def _as_int(value: Any) -> int:
@@ -401,6 +454,11 @@ class MTeamClient:
         self.user_agent = user_agent or DEFAULT_USER_AGENT
         self.secret = secret or SIGN_SECRET
         self._base_path = urllib.parse.urlsplit(self.host).path.rstrip("/") or "/api"
+        # 最近一次请求的诊断信息（供上层判断是否需要回退其它地址）。
+        self.last_request = ""
+        self.last_status = 0
+        self.last_body: Dict[str, Any] = {}
+        self._api_ok = False
         handlers: List[Any] = []
         if not self.proxy:
             # 与 MoviePilot 其它插件一致：未勾选代理时显式绕过系统代理。
@@ -452,6 +510,7 @@ class MTeamClient:
             headers["Content-Type"] = content_type
 
         request = urllib.request.Request(url, data=body, headers=headers, method=method)
+        self.last_request = method + " " + url
         try:
             with self._opener.open(request, timeout=self.timeout) as response:
                 status = response.status
@@ -466,10 +525,15 @@ class MTeamClient:
         except TimeoutError as error:
             raise MTeamError("网络请求超时，请检查网络或稍后重试") from error
 
+        decoded = _decode_json(raw_body)
+        self.last_status = status
+        self.last_body = decoded
+        # 用原始响应体判定：只有真正的 JSON（带 code）才算命中 M-Team 接口。
+        self._api_ok = looks_like_api_response(raw_body) and isinstance(decoded, Mapping)
         header_map = {}
         for key, value in (raw_headers or {}).items():
             header_map[str(key).lower()] = str(value)
-        return status, header_map, _decode_json(raw_body)
+        return status, header_map, decoded
 
     # ---------------------------------------------------------- 业务接口
 
@@ -521,6 +585,11 @@ class MTeamClient:
             raise MTeamError("缺少 authorization 凭证")
         status, _headers, body = self.request("GET", PROFILE_PATH, token=token, api_key=api_key,
                                               ts_ms=ts_ms)
+        if _method_not_supported(status, body):
+            # 个别镜像把该只读接口也改成 POST-only；自动回退一次。
+            # 这里只读 member/profile，绝不会触及 updateLastBrowse。
+            status, _headers, body = self.request("POST", PROFILE_PATH, fields=[], token=token,
+                                                  api_key=api_key, ts_ms=ts_ms)
         if status >= 400 and not body.get("message"):
             body = dict(body)
             body["code"] = _as_int(body.get("code"))
@@ -554,8 +623,12 @@ class MTeamClient:
                 report.last_browse = self.last_browse(api_key=api_key)
             except MTeamError as error:
                 # 保留 site / credential，交给上层记录失败原因。
+                report.endpoint = self.last_request
+                report.api_ok = self._api_ok
                 report.message = str(error)
                 return report
+            report.endpoint = self.last_request
+            report.api_ok = self._api_ok
             report.ok = True
             report.code = 0
             report.message = "已通过 API Key 读取最近动向"
@@ -570,6 +643,8 @@ class MTeamClient:
         primary_otp = otp_code or (totp(otp_secret) if otp_secret else "")
         result = self.login(username, password, otp_code=primary_otp,
                             email_code=email_code, tg_code=tg_code)
+        report.endpoint = self.last_request
+        report.api_ok = self._api_ok
         if not result.ok and result.code in (1001, 1002):
             report.verify_types = list(result.verify_types)
             if not report.verify_types:
@@ -597,6 +672,8 @@ class MTeamClient:
         report.user_id = result.user_id
         report.username = result.username or username
         report.last_browse = self.last_browse(token=result.authorization)
+        report.endpoint = self.last_request
+        report.api_ok = self._api_ok
         report.ok = True
         report.code = 0
         if report.last_browse.empty:

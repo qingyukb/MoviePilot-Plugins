@@ -3,12 +3,13 @@
     "name": "PT站点签到",
     "description": "双引擎 PT 签到：HTTP 直连签到接口，或经 Browserless 完成图片验证码 / Cloudflare / Turnstile 挑战。",
     "labels": "站点,签到",
-    "version": "1.0.11",
+    "version": "1.0.12",
     "icon": "https://raw.githubusercontent.com/qingyukb/MoviePilot-Plugins/main/icons/ptsignin.png",
     "author": "qingyu",
     "level": 2,
     "system_version": ">=2.0.0,<3.0.0",
     "history": {
+      "v1.0.12": "修复观众（Audiences）签到仍报「未等到 Cloudflare Turnstile 复选框」：本地 Edge 复现确认该站 Turnstile 渲染在 closed shadow DOM 中，DOM/CSS 与 BrowserQL 深度选择器都命不中 checkbox，1.0.10/1.0.11 的「等待并原生点击」方案原理上不可行。现改用官方 solve（内置支持 iframe / shadow DOM 内的验证码）生成 token，再由 auto 脚本触发站点 cfCallback / 表单兜底 POST；两段验证分别用 solve_timeout=40s、solve2_timeout=50s、solve2_wait=5s、cloudflare_wait=15s、auto_wait=30s 覆盖，未命中时给出 found/solved/time 与 BrowserQL 步骤诊断。同时修复 BrowserQL 响应处理：官方文档确认单个步骤失败（如 solve 超时）不会中止整个 mutation，失败步骤只在 data 里返回 null；插件不再把 errors 当成整轮失败，而是把步骤错误并入失败诊断，页面或回查已签到仍正常上报成功。",
       "v1.0.11": "修复观众签到报「Browserless 请求失败：The read operation timed out」：BrowserQL 是整段执行完才返回响应的整包请求，而观众预设的页面内等待（cloudflare_wait 5s + turnstile_wait 45s + wait 8s + verify_wait 8s）已接近默认 100 秒读超时，插件会自己先掐断连接。现读超时自动抬升到不低于「页面内等待预算 + 45 秒余量」（上限 300 秒）；预检请求遇到网络抖动重试一次；主流程响应丢失时自动只读回查一次，已签到不会误报成失败；超时错误写明步骤、已等待秒数与换节点建议。",
       "v1.0.10": "修复观众（Audiences）依然无法签到：在本地 Edge 手动复现确认，该页 Turnstile 复选框位于 challenges.cloudflare.com 跨域 iframe 内，必须原生点击该复选框才会生成 token 并触发站点 cfCallback 自动 POST 签到，单纯停留等待并不会通过。现观众预设改为 submit_method=turnstile_click、solve_count=0，用 BrowserQL 深度选择器 < *challenges.cloudflare.com* input[type='checkbox'] 先 waitForSelector(visible) 再原生 click；新增 turnstile_wait（默认 45000ms）等待复选框渲染，cloudflare_wait 降为 5 秒；BrowserQL 失败时区分“未等到复选框”和“复选框不可点击”，给出可诊断提示。",
       "v1.0.9": "修复观众（Audiences）签到仍报 “Captcha solving timed out after 20000 ms”：该站 Cloudflare 是等待后自动放行的托管挑战，Browserless solve 会在不可解挑战上等待并超时。现观众预设改为 submit_method=none、solve_count=0，cloudflare_wait=30、wait=8000，只让真实浏览器等待页面自行完成验证和签到；签到后仍在同一会话回查 attendance.php 确认真实状态；BrowserQL 错误日志增加出错步骤路径。",
@@ -27,12 +28,13 @@
     "name": "馒头登录",
     "description": "从「站点管理」读取馒头（M-Team）凭证（API Key / 账号密码），读取站点真实的「最近动向」时间：只读 /member/profile，绝不触发 updateLastBrowse。",
     "labels": "站点,登录",
-    "version": "1.0.1",
+    "version": "1.0.2",
     "icon": "https://raw.githubusercontent.com/qingyukb/MoviePilot-Plugins/main/icons/mteam.png",
     "author": "qingyu",
     "level": 2,
     "system_version": ">=2.0.0,<3.0.0",
     "history": {
+      "v1.0.2": "接口地址改为多候选自动回退：优先用按「站点管理」站点地址推导的后端（api.<域名>/api），不可用时依次回退 api.m-team.cc → api.m-team.io → api2.m-team.cc；当接口返回「请求方法不支持」时自动改用 POST 重试。发送失败时会在日志附上实际请求地址（METHOD URL），方便前后端分离站点排查；仍严格只读 member/profile，绝不调用 updateLastBrowse。",
       "v1.0.1": "凭证改为从 MoviePilot「站点管理」自动读取：自动识别馒头（M-Team）站点，直接使用其中的 API Key（实测 x-api-key 无需签名即可读取 /member/profile）、User-Agent、代理与超时，并按站点地址推导 API 基址；无需再手填账号密码，仍保留可选的账号密码登录与手动 API Key 覆盖。",
       "v1.0.0": "初始版本：账号密码登录 M-Team（支持 OTP 密钥自动补动态码、邮箱 / Telegram 验证码、API Key 兜底），登录后只读 /member/profile 的 memberStatus.lastBrowse，得到账号真实的「最近动向」时间；插件详情页展示绝对时间与距今时长，保留最近 30 天记录，支持 Cron、保存后立即执行一次与三档通知模式。"
     }
