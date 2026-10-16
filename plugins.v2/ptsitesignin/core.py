@@ -175,35 +175,28 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "path": "/attendance.php",
         "submit_selector": "form[action*='attendance.php'] input[type='submit']",
     },
-    # ---- 观众（Audiences）：签到页内嵌 Turnstile，验证通过后站点回调自动提交 ----
-    # 该站 /attendance.php 是 Vue 签到页：正文是「完成人机验证即可领取今日爆米花奖励」，
-    # 页面上没有可点的提交按钮，Turnstile 通过后由站点 cfCallback 自动 POST。
+    # ---- 观众（Audiences）：签到页完成人机验证后由页面 JS 自动签到 ----
+    # 用户实测：打开 /attendance.php 后停在页面等待，Cloudflare 放行后页面会自动完成签到，
+    # 不需要再点复选框，也不需要触发 data-callback 或手工 POST。
     # 实测结论：
-    #   - Turnstile 渲染在 closed shadow DOM 中，DOM/CSS 里既没有 input[type=checkbox]，
-    #     也没有可命中的 iframe，BrowserQL 深度选择器同样命不中，所以「等待并原生点击」
-    #     的方案原理上不可行，turnstile_click 已从本站预设移除；
-    #   - 官方 solve 明确支持 iframe / shadow DOM 内的验证码，用它生成 token，再由 auto
-    #     提交脚本触发站点 cfCallback（失败时按表单 action 兜底 POST）；
-    #   - 官方文档：一个步骤失败不会中止整个 mutation（失败步骤在 data 里返回 null），
-    #     所以 solve 超时后 auto 脚本仍会等 token 并提交，页面真签上了也不会被误报失败；
-    #   - cloudflare_wait 先给外层交互挑战自动放行的机会；solve 分两段（外层挑战 + 签到页
-    #     内嵌 Turnstile），solve_timeout / solve2_timeout 分别给两段预算。
+    #   - 首次 solve 用于处理进站时的 Cloudflare 交互挑战；页面拿到签到页后再等待其自动提交；
+    #   - 第二段 solve 找不到验证码时不应把首次成功的流程拖进 auto 提交兜底，旧预设因此会
+    #     在「验证通过后将自动完成签到」页面超时；
+    #   - 因此本站不再使用 submit_method=auto / 二次 solve，改为 solve_count=1 +
+    #     submit_method=none，等待页面自行完成，再重新打开 attendance.php 回查真实状态。
     "audiences.me": {
         "engine": "browserless",
         "mode": "cloudflare",
         "path": "/attendance.php",
-        "submit_method": "auto",
+        "submit_method": "none",
         "cloudflare_wait": 15,
-        "solve_count": 2,
+        "solve_count": 1,
         "solve_timeout": 40000,
-        "solve2_timeout": 50000,
-        "solve2_wait": 5000,
-        "auto_wait": 30000,
-        "wait": 8000,
+        "wait": 15000,
         # 签到成功后页面可能跳回首页；同一浏览器会话重新打开 attendance.php 再确认一次，
         # 避免只看到首页就误报失败，也避免把未完成的验证当成成功。
         "verify_success_path": "/attendance.php",
-        "verify_wait": 8000,
+        "verify_wait": 15000,
         # 「已领取 / 已获得」不能作为成功标志：签到后刷新页面仍会显示奖励，
         # 很容易把已签到状态误判成刚刚签到。
         "success_keywords": ["签到成功", "簽到成功", "成功签到", "签到完成", "领取成功"],

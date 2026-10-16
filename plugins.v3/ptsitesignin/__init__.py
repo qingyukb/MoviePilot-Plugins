@@ -8,9 +8,9 @@
 引擎默认按站点规则自动判定；未显式声明引擎的站点在 HTTP 直连撞上 Cloudflare
 或验证码时，会自动改用 Browserless 重试一次（可在配置中关闭）。
 
-站点登录凭证优先读插件配置的「站点登录账号 JSON」，也可以直接写在 MoviePilot「站点管理」
-里该站的「附加信息」(note)；两者都没有时复用站点管理里保存的 Cookie 签到。每次签到前
-先用账号密码真实登录站点、换回新的 Cookie 再交给签到引擎；签到结束后再打开站点页面读取
+站点登录凭证直接读 MoviePilot「站点管理」里该站的「附加信息」(note)；没有账号密码时
+复用站点管理里保存的 Cookie。每次签到前先用账号密码真实登录站点、换回新的 Cookie 再
+交给签到引擎；签到结束后再打开站点页面读取
 站点展示的「最近动向」（含站点自带的相对时间，如 2026-10-16 23:44:21 ( < 1分前 )），
 写入结果页与通知。
 
@@ -44,14 +44,11 @@ from .core import (
     DEFAULT_BROWSERLESS_URL,
     BrowserlessSigner,
     SignResult,
-    account_for,
     account_from_site,
     account_ready,
     fallback_rule,
     http_sign,
     login as site_login,
-    merge_accounts,
-    parse_accounts,
     parse_rules,
     read_activity,
     resolve_rule,
@@ -65,7 +62,7 @@ class PTSiteSignIn(_PluginBase):
     plugin_desc = ("双引擎 PT 签到，可选真实登录刷新 Cookie 并读取站点「最近动向」：HTTP 直连签到接口，"
                    "或经 Browserless 完成验证码 / Cloudflare / Turnstile 挑战。")
     plugin_icon = "signin.png"
-    plugin_version = "1.2.0"
+    plugin_version = "1.2.1"
     plugin_author = "qingyu"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "ptsignin_"
@@ -86,7 +83,6 @@ class PTSiteSignIn(_PluginBase):
     _browserless_token = ""
     _browserless_timeout = 100
     _site_rules = ""
-    _site_accounts = ""
     _read_activity = True
     _run_once = False
     _run_once_scheduler: Optional[BackgroundScheduler] = None
@@ -121,9 +117,7 @@ class PTSiteSignIn(_PluginBase):
         self._browserless_token = str(config.get("browserless_token") or "").strip()
         self._browserless_timeout = max(15, min(int(config.get("browserless_timeout") or 100), 300))
         self._site_rules = str(config.get("site_rules") or "")
-        self._site_accounts = str(config.get("site_accounts") or "")
         self._read_activity = bool(config.get("read_activity", True))
-        self._accounts: Dict[str, Dict[str, Any]] = {}
         self._run_once = bool(config.get("run_once", False))
         if self._run_once:
             self._run_once = False
@@ -172,7 +166,6 @@ class PTSiteSignIn(_PluginBase):
             "browserless_token": self._browserless_token,
             "browserless_timeout": self._browserless_timeout,
             "site_rules": self._site_rules,
-            "site_accounts": self._site_accounts,
             "read_activity": self._read_activity,
             "run_once": self._run_once,
         }
@@ -304,18 +297,7 @@ class PTSiteSignIn(_PluginBase):
                 {"component": "VCol", "props": {"cols": 12, "md": 6},
                  "content": [{"component": "VSwitch", "props": {"model": "read_activity",
                              "label": "签到后读取「最近动向」",
-                             "hint": "用站点 Cookie（配置了账号时改用真实登录换回的新 Cookie）打开用户页，抓取「最近动向」写入结果与通知", "persistent-hint": True}}]},
-            ]},
-            {"component": "VRow", "content": [
-                {"component": "VCol", "props": {"cols": 12},
-                 "content": [{"component": "VTextarea", "props": {"model": "site_accounts",
-                             "label": "站点登录账号 JSON（可留空）", "rows": 6,
-                             "hint": '键为域名或站点 ID，例如 {"audiences.me":{"username":"账号","password":"密码"}}。'
-                                     '凭证优先取这里（可覆盖站点管理）；留空时自动读 MoviePilot 站点管理里该站的'
-                                     '「附加信息」( {"username":"账号","password":"密码"} ) 与保存的 Cookie。'
-                                     '登录成功后换回的新 Cookie 会用于签到；'
-                                     '可选字段 login_path / login_action / username_field / password_field / fields / activity_path',
-                             "persistent-hint": True}}]},
+                             "hint": "用站点 Cookie（站点管理里配置了账号时会真实登录换回的新 Cookie）打开用户页，抓取「最近动向」写入结果与通知", "persistent-hint": True}}]},
             ]},
         ]}], self._config()
 
@@ -422,11 +404,10 @@ class PTSiteSignIn(_PluginBase):
         engine = "http"
         login_text = ""
         rule: Dict[str, Any] = {}
-        # 站点登录：凭证优先取插件配置的账号 JSON（可覆盖站点管理），其次取 MoviePilot
-        # 「站点管理」里该站的附加信息 / 账号字段；都没有账号密码时直接复用站点管理保存
-        # 的 Cookie 签到。登录失败不直接判整站失败——仍用旧 Cookie 试一次，并如实记录原因。
-        account = merge_accounts(account_from_site(info),
-                                 account_for(info, getattr(self, "_accounts", None) or {}))
+        # 站点登录：凭证只取 MoviePilot「站点管理」里该站的附加信息 / 账号字段；
+        # 没有账号密码时直接复用站点管理保存的 Cookie 签到。登录失败不直接判整站失败
+        # ——仍用旧 Cookie 试一次，并如实记录原因。
+        account = account_from_site(info)
         if account_ready(account):
             proxies = self._proxies() if self._proxy else None
             try:
@@ -443,7 +424,7 @@ class PTSiteSignIn(_PluginBase):
                     login_text = "失败：" + login_result.message
                     logger.warning("PT站点签到：%s 真实登录失败 - %s", site_name, login_result.message)
         elif account:
-            # 站点管理 / 配置里只写了半截凭证（比如只有用户名），没法做真实登录
+            # 站点管理里只写了半截凭证（比如只有用户名），没法做真实登录
             login_text = "未提供可用的账号密码"
             logger.info("PT站点签到：%s 的账号信息不完整，只复用站点管理里的 Cookie", site_name)
         elif str(info.get("cookie") or "").strip():
@@ -484,8 +465,7 @@ class PTSiteSignIn(_PluginBase):
         cookie = str(info.get("cookie") or "").strip()
         if not cookie:
             return ""
-        account = merge_accounts(account_from_site(info),
-                                 account_for(info, getattr(self, "_accounts", None) or {}))
+        account = account_from_site(info)
         rule = rule or {}
         # 站点常把「最近动向」放在签到页 / 校验页（例如观众 attendance.php），一并作为候选
         paths = [str(rule.get("path") or ""), str(rule.get("verify_success_path") or "")]
@@ -576,13 +556,6 @@ class PTSiteSignIn(_PluginBase):
             self._finish([{"site": "配置", "status": "failed", "engine": "-",
                            "message": str(error), "ran_at": self._now()}])
             return
-        try:
-            self._accounts = parse_accounts(self._site_accounts)
-        except ValueError as error:
-            self._finish([{"site": "配置", "status": "failed", "engine": "-",
-                           "message": str(error), "ran_at": self._now()}])
-            return
-
         infos = [self._site_dict(site) for site in selected]
         signer: Optional[BrowserlessSigner] = None
         if self._should_init_signer(infos, rules):

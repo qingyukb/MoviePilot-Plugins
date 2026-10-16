@@ -101,18 +101,20 @@ class CoreRegressionTests(unittest.TestCase):
                                       self.audiences)
         self.assertEqual(result.status, "already")
 
-    def test_audiences_preset_uses_solver_and_auto_submit(self):
-        # 实测：观众站 Turnstile 渲染在 closed shadow DOM 里，DOM/CSS 与 BrowserQL 深度
-        # 选择器都命不中 checkbox，所以必须交给官方 solve（支持 iframe / shadow DOM），
-        # 再由 auto 提交脚本触发站点 cfCallback / 表单兜底 POST。
+    def test_audiences_preset_waits_for_page_auto_submit(self):
+        # 实测：打开 /attendance.php 后停页等待，Cloudflare 放行后站点 JS 会自行完成签到。
+        # 只用一次 solve 处理进站交互挑战，不再二次 solve / data-callback / 表单兜底 POST。
         self.assertEqual(self.audiences["mode"], "cloudflare")
-        self.assertEqual(self.audiences["submit_method"], "auto")
-        self.assertEqual(self.audiences["solve_count"], 2)
+        self.assertEqual(self.audiences["submit_method"], "none")
+        self.assertEqual(self.audiences["solve_count"], 1)
         self.assertEqual(self.audiences["solve_timeout"], 40000)
-        self.assertEqual(self.audiences["solve2_timeout"], 50000)
-        self.assertEqual(self.audiences["solve2_wait"], 5000)
         self.assertEqual(self.audiences["cloudflare_wait"], 15)
-        self.assertEqual(self.audiences["auto_wait"], 30000)
+        self.assertEqual(self.audiences["wait"], 15000)
+        self.assertNotIn("solve2_timeout", self.audiences)
+        self.assertNotIn("solve2_wait", self.audiences)
+        self.assertNotIn("auto_wait", self.audiences)
+        self.assertEqual(self.audiences["verify_success_path"], "/attendance.php")
+        self.assertEqual(self.audiences["verify_wait"], 15000)
         self.assertNotIn("submit_selector", self.audiences)
         self.assertIn("签到成功", self.audiences["success_keywords"])
         self.assertIn("已签到", self.audiences["already_keywords"])
@@ -333,9 +335,8 @@ class BrowserlessAudiencesTests(unittest.TestCase):
         # 否则插件会自己先掐断连接，报出 The read operation timed out 这种自伤式失败。
         rule = self._rule()
         budget = self.core.bql_wait_budget_ms(rule)
-        # cloudflare_wait 15s + solve 40s + solve2_wait 5s + solve2_timeout 50s
-        # + wait 8s + verify_wait 8s
-        self.assertEqual(budget, 126000)
+        # cloudflare_wait 15s + solve 40s + wait 15s + verify_wait 15s
+        self.assertEqual(budget, 85000)
         signer = self.core.BrowserlessSigner("https://example.test/bql", "token", 100)
         self.assertGreater(signer.request_timeout(rule), 100)
         self.assertGreaterEqual(signer.request_timeout(rule) * 1000, budget + 45000)
@@ -370,18 +371,19 @@ class BrowserlessAudiencesTests(unittest.TestCase):
         self.assertIn("Browserless 请求超时", result.message)
         self.assertIn("未能确认为已签到", result.message)
 
-    def test_query_solves_turnstile_and_auto_submits(self):
-        # 观众预设：两段官方 solve（外层交互挑战 + 签到页内嵌 Turnstile）生成 token，
-        # 再由 auto 脚本触发站点回调 / 表单兜底 POST；不再使用命不中的 checkbox 选择器。
+    def test_query_waits_for_page_auto_submit(self):
+        # 观众预设：一次 solve 处理进站 Cloudflare 挑战，之后不点提交、不等 token，
+        # 只让页面自行完成签到，再重新打开 attendance.php 回查真实状态。
         rule = self._rule()
         query = self.core.build_query(rule)
         self.assertIn("solve:solve(timeout:$solveTimeout)", query)
-        self.assertIn("solve2:solve(timeout:$solve2Timeout)", query)
+        self.assertNotIn("solve2:solve", query)
         self.assertIn("$solveTimeout", query)
-        self.assertIn("$solve2Timeout", query)
-        self.assertIn("$solve2Wait", query)
-        self.assertIn("$autoSubmit", query)
-        self.assertIn("submit:evaluate(content:$autoSubmit)", query)
+        self.assertNotIn("$solve2Timeout", query)
+        self.assertNotIn("$solve2Wait", query)
+        self.assertNotIn("$autoSubmit", query)
+        self.assertNotIn("submit:evaluate(content:$autoSubmit)", query)
+        self.assertNotIn("submit:evaluate", query)
         self.assertNotIn("waitForTurnstile", query)
         self.assertNotIn("$turnstileWait", query)
         self.assertNotIn("$submit:", query)
@@ -389,14 +391,13 @@ class BrowserlessAudiencesTests(unittest.TestCase):
         self.assertIn("waitForVerify", query)
         self.assertIn("$verifyWait", query)
 
-    def test_solves_turnstile_then_reports_success(self):
+    def test_solves_outer_challenge_then_reports_success(self):
         signer = self._signer([
             # 预检：页面还是「未签到 + 等人机验证」
             {"goto": {"status": 200}, "before": {"html": AUDIENCES_PENDING_HTML}},
-            # 主流程：solve 生成 token，auto 提交后站点跳回首页
+            # 主流程：只 solve 一次进站挑战，之后等待页面自行完成签到并回查状态
             {"goto": {"status": 200}, "solve": {"found": True, "solved": True},
-             "solve2": {"found": True, "solved": True},
-             "submit": {}, "response": {},
+             "response": {},
              "before": {"html": AUDIENCES_PENDING_HTML},
              "after": {"html": AUDIENCES_HOME_HTML},
              "verify": {"status": 200},
@@ -407,15 +408,15 @@ class BrowserlessAudiencesTests(unittest.TestCase):
         self.assertIn("22", result.message)
         self.assertEqual(signer.calls[1][1]["beforeWait"], 15000)
         self.assertEqual(signer.calls[1][1]["solveTimeout"], 40000)
-        self.assertEqual(signer.calls[1][1]["solve2Timeout"], 50000)
-        self.assertEqual(signer.calls[1][1]["solve2Wait"], 5000)
-        self.assertEqual(signer.calls[1][1]["wait"], 8000)
-        self.assertEqual(signer.calls[1][1]["verifyWait"], 8000)
+        self.assertNotIn("solve2Timeout", signer.calls[1][1])
+        self.assertNotIn("solve2Wait", signer.calls[1][1])
+        self.assertEqual(signer.calls[1][1]["wait"], 15000)
+        self.assertEqual(signer.calls[1][1]["verifyWait"], 15000)
         self.assertEqual(signer.calls[1][1]["verifyUrl"],
                          "https://audiences.me/attendance.php")
         self.assertNotIn("selector", signer.calls[1][1])
         self.assertNotIn("turnstileWait", signer.calls[1][1])
-        self.assertIn("cf-turnstile-response", signer.calls[1][1]["autoSubmit"])
+        self.assertNotIn("autoSubmit", signer.calls[1][1])
         self.assertEqual(signer.calls[0][0], "CheckInPreflight")
         self.assertEqual(signer.calls[1][0], "CheckIn")
 
