@@ -3,20 +3,19 @@
 
 前端 kp.m-team.cc / 后端 api.m-team.cc 前后端分离，插件每一轮都走**真实登录**这条链路：
 
-1. 从 MoviePilot「站点管理」自动识别馒头站点，读取该站点里的 Token / API Key / Cookie
-   以及备注(note)里可选的账号密码；插件本身不接收任何手填凭证；
-2. 用站点自己的签名算法调用后端 api.<域名>/api；
-3. 真实登录：优先用站点管理里已有的 authorization（浏览器登录后拿到的 JWT）；
-   没有或已过期时，用备注里的账号密码 POST /api/login 换一个新的 authorization；
-4. 用真实登录态调用 POST /api/member/updateLastBrowse 做**保活心跳**
+1. 凭证全部由**插件配置页手填**，不再读取 MoviePilot「站点管理」；
+   推荐填「账号 + 密码」，插件会 POST /api/login 真实登录换回新的 authorization；
+   也可以直接填浏览器登录后的 authorization（JWT），或填能解析出登录令牌的 Cookie；
+2. 用 M-Team 自己的签名算法调用后端 api.<域名>/api；
+3. 用真实登录态调用 POST /api/member/updateLastBrowse 做**保活心跳**
    （前端登录成功后也是马上调这个接口），把账号的「最近动向」刷新成当前时间；
-5. 再读 GET /api/member/profile 的 data.memberStatus.lastBrowse 做校验。
+4. 再读 GET /api/member/profile 的 data.memberStatus.lastBrowse 校验真实结果。
 
 **关键：API Key（x-api-key）调用不算活跃**，站点对 updateLastBrowse 一律返回
 "Full authentication is required"，所以 API Key 只用于读取数据，绝不参与保活。
 
 保活正常时，「最近动向」应该永远是「刚刚 / 1 分钟前」；如果它还是几天前，说明真实登录态没生效，
-插件会把账号真实的最近动向显示出来，并在通知里写明「去站点管理填 authorization 或账号密码」。
+插件会把账号真实的最近动向显示出来，并在通知里写清楚该去插件配置里补哪一项。
 """
 
 from __future__ import annotations
@@ -36,14 +35,6 @@ except ImportError:  # MoviePilot V2
 
 from app.schemas import NotificationType
 
-try:  # MoviePilot V2：站点操作层的旧导入路径
-    from app.db.site_oper import SiteOper
-except ImportError:  # MoviePilot V3：公开操作层
-    try:
-        from app.db.oper.site import SiteOper
-    except ImportError:  # 极端情况下缺少站点模块，插件只能报错提示
-        SiteOper = None  # type: ignore[assignment]
-
 from .core import (
     API_HOSTS,
     DEFAULT_API_HOST,
@@ -52,18 +43,16 @@ from .core import (
     MTeamClient,
     MTeamError,
     api_host_candidates,
-    credentials_from_site,
-    derive_api_host,
+    credentials_from_config,
     mask_account,
-    pick_mteam_site,
 )
 
 
 class MTeamLogin(_PluginBase):
     plugin_name = "馒头登录"
-    plugin_desc = "从「站点管理」读取馒头（M-Team）凭证，真实登录保活并校验「最近动向」。"
+    plugin_desc = "插件配置页手填馒头（M-Team）账号密码或 authorization，真实登录保活并校验「最近动向」。"
     plugin_icon = "mteam.png"
-    plugin_version = "1.2.0"
+    plugin_version = "1.3.0"
     plugin_author = "qingyu"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "mteamlogin_"
@@ -73,11 +62,20 @@ class MTeamLogin(_PluginBase):
     _enabled = False
     _notify_mode = "always"
     _cron = "0 9 * * *"
-    _site = ""
     _api_host = ""
     _timeout = 0
     _proxy = False
     _run_once = False
+
+    _username = ""
+    _password = ""
+    _otp_secret = ""
+    _otp_code = ""
+    _email_code = ""
+    _tg_code = ""
+    _token = ""
+    _api_key = ""
+    _cookie = ""
 
     _history_days = 30
     _run_lock: Lock = Lock()
@@ -89,11 +87,22 @@ class MTeamLogin(_PluginBase):
         self._enabled = bool(config.get("enabled", False))
         self._notify_mode = self._parse_notify_mode(config)
         self._cron = str(config.get("cron") or "0 9 * * *")
-        self._site = str(config.get("site") or "").strip()
         self._api_host = str(config.get("api_host") or "").strip()
         self._timeout = max(0, min(int(config.get("timeout") or 0), 120))
         self._proxy = bool(config.get("proxy", False))
         self._run_once = bool(config.get("run_once", False))
+
+        # 全部凭证只来自插件配置，插件自己保存并用于每一轮真实登录 / 保活。
+        self._username = str(config.get("username") or "").strip()
+        self._password = str(config.get("password") or "")
+        self._otp_secret = str(config.get("otp_secret") or "").strip()
+        self._otp_code = str(config.get("otp_code") or "").strip()
+        self._email_code = str(config.get("email_code") or "").strip()
+        self._tg_code = str(config.get("tg_code") or "").strip()
+        self._token = str(config.get("token") or "").strip()
+        self._api_key = str(config.get("api_key") or "").strip()
+        self._cookie = str(config.get("cookie") or "").strip()
+
         if self._run_once:
             self._run_once = False
             self.update_config(self._config())
@@ -104,11 +113,19 @@ class MTeamLogin(_PluginBase):
             "enabled": self._enabled,
             "notify_mode": self._notify_mode,
             "cron": self._cron,
-            "site": self._site,
             "api_host": self._api_host,
             "timeout": self._timeout,
             "proxy": self._proxy,
             "run_once": self._run_once,
+            "username": self._username,
+            "password": self._password,
+            "otp_secret": self._otp_secret,
+            "otp_code": self._otp_code,
+            "email_code": self._email_code,
+            "tg_code": self._tg_code,
+            "token": self._token,
+            "api_key": self._api_key,
+            "cookie": self._cookie,
         }
 
     @staticmethod
@@ -163,7 +180,6 @@ class MTeamLogin(_PluginBase):
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         host_items = [{"title": host, "value": host} for host in API_HOSTS]
-        site_items = self._site_options()
         notify_items = [
             {"title": "每次执行后通知", "value": "always"},
             {"title": "仅失败时通知", "value": "failed"},
@@ -182,38 +198,79 @@ class MTeamLogin(_PluginBase):
                              "items": notify_items}}]},
             ]},
             {"component": "VRow", "content": [
-                {"component": "VCol", "props": {"cols": 12, "md": 8},
-                 "content": [{"component": "VSelect", "props": {
-                             "model": "site", "label": "站点（来自「站点管理」）", "items": site_items,
-                             "clearable": True,
-                             "hint": "留空自动识别馒头站点；Token / API Key / Cookie、备注(note)、User-Agent、代理与超时都从站点管理读取",
+                {"component": "VCol", "props": {"cols": 12, "md": 4},
+                 "content": [{"component": "VTextField", "props": {
+                             "model": "username", "label": "账号（推荐）",
+                             "placeholder": "M-Team 登录账号 / 邮箱",
+                             "hint": "填账号 + 密码后，插件会 POST /api/login 真实登录并保活",
                              "persistent-hint": True}}]},
                 {"component": "VCol", "props": {"cols": 12, "md": 4},
-                 "content": [{"component": "VCronField", "props": {"model": "cron", "label": "执行周期",
-                             "placeholder": "5 位 Cron；例如 0 */6 * * *"}}]},
+                 "content": [{"component": "VTextField", "props": {
+                             "model": "password", "label": "密码（推荐）", "type": "password",
+                             "placeholder": "M-Team 登录密码"}}]},
+                {"component": "VCol", "props": {"cols": 12, "md": 4},
+                 "content": [{"component": "VTextField", "props": {
+                             "model": "otp_secret", "label": "二步验证密钥（可选）",
+                             "placeholder": "Base32 密钥；填了会自动算动态码"}}]},
+            ]},
+            {"component": "VRow", "content": [
+                {"component": "VCol", "props": {"cols": 12, "md": 3},
+                 "content": [{"component": "VTextField", "props": {
+                             "model": "otp_code", "label": "动态码（可选）",
+                             "placeholder": "临时 6 位码"}}]},
+                {"component": "VCol", "props": {"cols": 12, "md": 3},
+                 "content": [{"component": "VTextField", "props": {
+                             "model": "email_code", "label": "邮箱验证码（可选）",
+                             "placeholder": "站点要求邮箱验证时填"}}]},
+                {"component": "VCol", "props": {"cols": 12, "md": 3},
+                 "content": [{"component": "VTextField", "props": {
+                             "model": "tg_code", "label": "Telegram 验证码（可选）",
+                             "placeholder": "站点要求 TG 验证时填"}}]},
+                {"component": "VCol", "props": {"cols": 12, "md": 3},
+                 "content": [{"component": "VTextField", "props": {
+                             "model": "timeout", "label": "HTTP 超时（秒，0=20）",
+                             "type": "number", "min": 0, "max": 120}}]},
             ]},
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12, "md": 8},
+                 "content": [{"component": "VTextField", "props": {
+                             "model": "token", "label": "authorization（可选，可直接保活）",
+                             "type": "password",
+                             "placeholder": "浏览器登录 kp.m-team.cc 后 localStorage.auth 的值",
+                             "hint": "这是真实登录态 JWT；填了可不用账号密码。过期后请重新填，或补账号密码让插件自动登录",
+                             "persistent-hint": True}}]},
+                {"component": "VCol", "props": {"cols": 12, "md": 4},
+                 "content": [{"component": "VTextField", "props": {
+                             "model": "api_key", "label": "API Key（可选，只读）",
+                             "type": "password",
+                             "hint": "只能读最近动向，不能保活；用 x-api-key 调保活接口不算活跃",
+                             "persistent-hint": True}}]},
+            ]},
+            {"component": "VRow", "content": [
+                {"component": "VCol", "props": {"cols": 12, "md": 8},
+                 "content": [{"component": "VTextarea", "props": {
+                             "model": "cookie", "label": "Cookie（可选）", "rows": 2,
+                             "placeholder": "能包含 authorization / token / jwt 时也可用于保活"}}]},
+                {"component": "VCol", "props": {"cols": 12, "md": 4},
                  "content": [{"component": "VCombobox", "props": {
                              "model": "api_host", "label": "API 基址（可选）", "items": host_items,
-                             "hint": "留空则按站点地址自动推导（馒头默认为 " + DEFAULT_API_HOST + "）",
+                             "hint": "留空使用 " + DEFAULT_API_HOST + "；前后端分离时填后端 API，不能填 kp 前端地址",
                              "persistent-hint": True}}]},
-                {"component": "VCol", "props": {"cols": 12, "md": 4},
-                 "content": [{"component": "VTextField", "props": {"model": "timeout",
-                             "label": "HTTP 超时（秒，0=用站点设置）", "type": "number",
-                             "min": 0, "max": 120}}]},
             ]},
             {"component": "VRow", "content": [
-                {"component": "VCol", "props": {"cols": 12},
+                {"component": "VCol", "props": {"cols": 12, "md": 6},
+                 "content": [{"component": "VCronField", "props": {"model": "cron", "label": "执行周期",
+                             "placeholder": "5 位 Cron；例如 0 */6 * * *"}}]},
+                {"component": "VCol", "props": {"cols": 12, "md": 6},
                  "content": [{"component": "VAlert", "props": {"type": "info", "variant": "tonal",
-                             "text": "本插件不接收任何手填凭证，全部取自「站点管理」里馒头站点的 "
-                                     "Token / API Key / Cookie / 备注(note)。保活只认真实登录态："
-                                     "站点 Token 要填浏览器登录后的 authorization（JWT），"
-                                     "或在备注(note)里填 {\"username\",\"password\",\"otp_secret\"} "
-                                     "让插件自动真实登录。API Key 只能读取，"
-                                     "用 x-api-key 调 POST /api/member/updateLastBrowse 不算活跃。"}}]},
+                             "text": "保活必须走真实登录态：推荐填「账号 + 密码」，"
+                                     "插件会用 POST /api/login 换取 authorization，再调 "
+                                     "POST /api/member/updateLastBrowse 刷新「最近动向」；"
+                                     "也可以直接填浏览器登录后的 authorization。"
+                                     "API Key（x-api-key）只能读取，不算活跃，不能保活。"}}]},
             ]},
         ]}], self._config()
+
     def get_page(self) -> List[dict]:
         latest = self.get_data("latest") or {}
         if not isinstance(latest, dict):
@@ -258,10 +315,10 @@ class MTeamLogin(_PluginBase):
                            + (" · code " + str(latest.get("keepalive_code"))
                               if latest.get("keepalive_code") not in (None, "") else "")
                            + (" · 真实登录换新令牌" if latest.get("login_used")
-                              else " · 复用站点 Token"),
+                              else " · 复用配置登录态"),
                            "success" if keepalive_ok else "error"),
                 self._stat("账号", str(latest.get("username") or "-"),
-                           "站点：" + str(latest.get("site") or "-")
+                           "接口：" + str(latest.get("site") or DEFAULT_API_HOST)
                            + " · UID：" + str(latest.get("user_id") or "-")
                            + " · 凭证：" + str(latest.get("credential") or "-"), "info"),
                 self._stat("本次检查", str(latest.get("ran_at") or "-"),
@@ -295,50 +352,6 @@ class MTeamLogin(_PluginBase):
                      "text": hint},
                 ]}
 
-    # ---------------- 站点管理 ----------------
-
-    @staticmethod
-    def _load_sites() -> List[Dict[str, Any]]:
-        """读取 MoviePilot「站点管理」里的站点，转换为普通字典（避免 ORM 对象跨线程）。"""
-        if SiteOper is None:
-            return []
-        try:
-            records = SiteOper().list() or []
-        except Exception:
-            logger.exception("馒头登录：读取站点管理失败")
-            return []
-        sites: List[Dict[str, Any]] = []
-        for record in records:
-            sites.append({
-                "id": getattr(record, "id", None),
-                "name": getattr(record, "name", None),
-                "domain": getattr(record, "domain", None),
-                "url": getattr(record, "url", None),
-                "apikey": getattr(record, "apikey", None),
-                "cookie": getattr(record, "cookie", None),
-                "note": getattr(record, "note", None),
-                "ua": getattr(record, "ua", None),
-                "proxy": getattr(record, "proxy", None),
-                "token": getattr(record, "token", None),
-                "timeout": getattr(record, "timeout", None),
-            })
-        return sites
-
-    def _site_options(self) -> List[Dict[str, str]]:
-        """配置页下拉项：站点管理里可选的站点。"""
-        options: List[Dict[str, str]] = []
-        for site in self._load_sites():
-            domain = str(site.get("domain") or "").strip()
-            if not domain:
-                continue
-            name = str(site.get("name") or "").strip() or domain
-            options.append({"title": name + "（" + domain + "）", "value": domain})
-        return options
-
-    def _resolve_site(self) -> Dict[str, Any]:
-        """挑出要用的馒头站点：优先配置里指定的，否则按域名 / 名称自动识别。"""
-        return pick_mteam_site(self._load_sites(), self._site) or {}
-
     # ---------------- 核心流程 ----------------
 
     def run_login(self) -> None:
@@ -347,50 +360,43 @@ class MTeamLogin(_PluginBase):
             logger.warning("馒头登录：上一轮仍在执行，本次跳过")
             return
         try:
-            report = self._fetch_report()
-        except MTeamError as error:
-            report = LoginReport(ok=False, message=str(error),
-                                 ran_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-        except Exception as error:  # noqa: BLE001 - 兜底，避免调度线程被打断
-            logger.exception("馒头登录：执行出现未预期错误")
-            report = LoginReport(ok=False, message="执行异常：" + str(error),
-                                 ran_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-        self._finish(report)
+            try:
+                report = self._fetch_report()
+            except MTeamError as error:
+                report = LoginReport(ok=False, message=str(error),
+                                     ran_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+            except Exception as error:  # noqa: BLE001 - 兜底，避免调度线程被打断
+                logger.exception("馒头登录：执行出现未预期错误")
+                report = LoginReport(ok=False, message="执行异常：" + str(error),
+                                     ran_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+            self._finish(report)
+        finally:
+            MTeamLogin._run_lock.release()
 
     def _fetch_report(self) -> LoginReport:
-        site = self._resolve_site()
-        if not site:
-            raise MTeamError(
-                "未在「站点管理」找到馒头（M-Team）站点：请先在 设置 → 站点管理 添加 M-Team，"
-                "并把浏览器登录后的 authorization（JWT）填进该站点的 Token，再启用本插件。")
-        site_domain = str(site.get("domain") or "").strip()
-        site_url = str(site.get("url") or site.get("domain") or "").strip()
-        credentials = credentials_from_site(site)
+        credentials = credentials_from_config(self._config())
         if not credentials.usable:
             raise MTeamError(
-                "站点管理里的馒头站点（" + (site_domain or "未命名") + "）没有可用的登录凭证："
-                "请在 设置 → 站点管理 里把站点「Token」填成浏览器登录后的 authorization（JWT），"
-                "或在站点备注里填 {\"username\",\"password\"}；只有 API Key 时只能读取、无法保活。")
-        timeout = self._timeout or int(site.get("timeout") or 0) or 20
-        timeout = max(5, min(int(timeout), 120))
-        proxy = self._proxy or bool(site.get("proxy"))
-        user_agent = str(site.get("ua") or "").strip() or DEFAULT_USER_AGENT
-        # 前后端分离：优先用按站点地址推导的后端地址，不可用时自动回退已知地址。
-        primary_host = self._api_host or derive_api_host(site_url)
+                "插件配置里还没有可用凭证：请填「账号 + 密码」让插件真实登录并保活，"
+                "或直接填浏览器登录 kp.m-team.cc 后的 authorization。"
+                "只有 API Key 时能读取数据，但站点不认为活跃，不能保活。")
+
+        timeout = max(5, min(int(self._timeout or 20), 120))
+        primary_host = self._api_host or DEFAULT_API_HOST
         hosts = api_host_candidates(primary_host)
-        logger.info("馒头登录：站点 %s，凭证来源 %s，候选接口 %s",
-                    site_domain or "（未指定站点）", credentials.source or "（空）",
-                    " → ".join(hosts))
+        logger.info("馒头登录：凭证来源 %s，候选接口 %s",
+                    credentials.source or "（空）", " → ".join(hosts))
         report: Optional[LoginReport] = None
         for host in hosts:
-            client = MTeamClient(host=host, timeout=timeout, proxy=proxy, user_agent=user_agent)
+            client = MTeamClient(host=host, timeout=timeout, proxy=self._proxy,
+                                 user_agent=DEFAULT_USER_AGENT)
             try:
                 report = client.fetch_last_browse(credentials=credentials,
-                                                  site_label=site_domain)
+                                                  site_label=host)
             except MTeamError as error:
                 report = LoginReport(ok=False, message=str(error),
                                      ran_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                     site=site_domain, credential=credentials.source,
+                                     site=host, credential=credentials.source,
                                      endpoint=client.last_request)
             if report.api_ok:
                 if host != hosts[0]:
@@ -410,7 +416,7 @@ class MTeamLogin(_PluginBase):
             logger.info("馒头登录：%s（账号 %s，保活 %s，真实登录 %s，%s）", report.message,
                         mask_account(record.get("username") or ""),
                         "成功" if report.keepalive_ok else "失败",
-                        "是" if record.get("login_used") else "复用站点 Token",
+                        "是" if record.get("login_used") else "复用配置登录态",
                         record.get("last_browse_relative") or "时间未知")
         else:
             logger.warning("馒头登录：失败 - %s", report.message)
@@ -468,7 +474,7 @@ class MTeamLogin(_PluginBase):
             text = ("账号：" + str(record.get("username") or "-")
                     + "\n保活心跳：成功（code " + str(record.get("keepalive_code"))
                     + "，方式：" + ("真实登录换新令牌" if record.get("login_used")
-                                    else "复用站点 Token") + "）"
+                                    else "复用配置登录态") + "）"
                     + "\n最近动向：" + str(record.get("last_browse_text") or "-")
                     + ("（" + str(record.get("last_browse_relative")) + "）"
                        if record.get("last_browse_relative") else "")

@@ -30,7 +30,7 @@ UNIX_VECTOR = ("GET", "/api/system/unix", 1792147191401, "FyDVc1yB4xNZwd554jpZXR
 KEEPALIVE_PATH = "/member/updateLastBrowse"
 # JWT 形状的令牌（三段、每段足够长），用来保证只展开出一种认证方案
 JWT_TOKEN = "headerxx.payloadyy.signature"
-# 插件绝对不该碰的其它写接口（/login 只在站点管理里配了账号密码时才会调用）。
+# 插件绝对不该碰的其它写接口（/login 只在插件配置页手填了账号密码时才会调用）。
 FORBIDDEN_PATHS = ("/member/revokeSession", "/member/logout",
                    "/member/updateLastBrowse2")
 
@@ -171,19 +171,24 @@ class SignatureTests(unittest.TestCase):
 
 
 class CredentialsTests(unittest.TestCase):
-    def test_credentials_from_site_reads_site_management_fields(self):
+    def test_credentials_from_config_reads_manual_fields_basic(self):
         for core in CORES:
             with self.subTest(core=core.__name__):
-                site = {"domain": "m-team.cc", "apikey": "AK", "token": "TK",
-                        "cookie": "cf_clearance=x; authorization=COOKIETOK"}
-                creds = core.credentials_from_site(site)
+                creds = core.credentials_from_config({
+                    "username": "tester", "password": "secret",
+                    "token": "TK", "api_key": "AK",
+                    "cookie": "cf_clearance=x; authorization=COOKIETOK"})
+                self.assertEqual(creds.username, "tester")
+                self.assertEqual(creds.password, "secret")
                 self.assertEqual(creds.token, "TK")
                 self.assertEqual(creds.api_key, "AK")
-                self.assertIn("Token", creds.source)
+                self.assertEqual(creds.cookie, "cf_clearance=x; authorization=COOKIETOK")
+                self.assertIn("authorization", creds.source)
                 self.assertIn("API Key", creds.source)
                 self.assertTrue(creds.usable)
-                self.assertEqual(core.credentials_from_site(None).usable, False)
-                self.assertEqual(core.credentials_from_site({}).usable, False)
+                self.assertTrue(creds.can_login)
+                self.assertEqual(core.credentials_from_config(None).usable, False)
+                self.assertEqual(core.credentials_from_config({}).usable, False)
 
     def test_extract_token_from_cookie_handles_common_shapes(self):
         for core in CORES:
@@ -328,7 +333,7 @@ class KeepAliveFlowTests(unittest.TestCase):
                     self.assertNotIn("/api" + path, paths)
                 self.assertEqual(paths.count("/api" + KEEPALIVE_PATH), 1)
 
-    def test_keepalive_failure_is_reported_with_site_management_hint(self):
+    def test_keepalive_failure_is_reported_with_plugin_config_hint(self):
         for core in CORES:
             with self.subTest(core=core.__name__):
                 client, _opener = build_client(core, [keepalive_denied(),
@@ -339,7 +344,7 @@ class KeepAliveFlowTests(unittest.TestCase):
                 self.assertFalse(report.ok)
                 self.assertFalse(report.keepalive_ok)
                 self.assertIn("保活", report.message)
-                self.assertIn("站点管理", report.message)
+                self.assertIn("插件配置", report.message)
                 # 账号真实的最近动向要如实展示出来（而不是假装成功）
                 self.assertEqual(report.last_browse.raw, 1600000000000)
 
@@ -363,8 +368,8 @@ class KeepAliveFlowTests(unittest.TestCase):
                 self.assertEqual(requests[0]["headers"]["authorization"], JWT_TOKEN)
                 self.assertIn("API Key", report.message)
 
-    def test_expired_site_token_falls_back_to_real_login(self):
-        """站点 Token 过期且备注里有账号密码时，直接真实登录换新令牌再保活。"""
+    def test_expired_configured_token_falls_back_to_real_login(self):
+        """配置里的 Token 过期且同时填了账号密码时，直接真实登录换新令牌再保活。"""
         for core in CORES:
             with self.subTest(core=core.__name__):
                 expired = ("eyJhbGciOiJIUzI1NiJ9."
@@ -432,7 +437,7 @@ class KeepAliveFlowTests(unittest.TestCase):
                 client, _opener = build_client(core, [])
                 report = client.fetch_last_browse(credentials=core.Credentials())
                 self.assertFalse(report.ok)
-                self.assertIn("站点管理", report.message)
+                self.assertIn("插件配置", report.message)
 
     def test_report_carries_endpoint_and_api_ok(self):
         for core in CORES:
@@ -475,36 +480,36 @@ class FakeHtmlResponse:
         return False
 
 class PluginSourceTests(unittest.TestCase):
-    """配置表单与站点管理读取：不能有任何手填凭证字段。"""
+    """配置表单必须手填凭证，且插件不再读取 MoviePilot「站点管理」。"""
 
-    FORBIDDEN_MODELS = ("username", "password", "otp_secret", "otp_code",
-                        "email_code", "tg_code", "api_key")
+    CREDENTIAL_MODELS = ("username", "password", "otp_secret", "otp_code",
+                         "email_code", "tg_code", "token", "api_key", "cookie")
 
-    def test_form_has_no_manual_credential_fields(self):
+    def test_form_has_all_manual_credential_fields(self):
         for directory in PLUGIN_DIRS:
             with self.subTest(directory=directory.parent.name):
                 source = (directory / "__init__.py").read_text(encoding="utf-8")
                 form = source.split("def get_form", 1)[1].split("def get_page", 1)[0]
-                for model in self.FORBIDDEN_MODELS:
-                    self.assertNotIn('"model": "' + model + '"', form,
-                                     f"表单里不应再有 {model} 手填项")
-                # 表单只保留这几个开关与站点/周期/接口/超时
+                for model in self.CREDENTIAL_MODELS:
+                    self.assertIn('"model": "' + model + '"', form,
+                                  f"表单必须提供 {model} 手填项")
                 for kept in ("enabled", "proxy", "run_once", "notify_mode",
-                             "site", "cron", "api_host", "timeout"):
+                             "cron", "api_host", "timeout"):
                     self.assertIn('"model": "' + kept + '"', form)
+                # 站点选择已经从配置页删除
+                self.assertNotIn('"model": "site"', form)
 
-    def test_plugin_reads_credentials_from_site_management(self):
+    def test_plugin_reads_credentials_from_plugin_config(self):
         for directory in PLUGIN_DIRS:
             with self.subTest(directory=directory.parent.name):
                 source = (directory / "__init__.py").read_text(encoding="utf-8")
-                # 必须从站点操作层读取站点列表，而不是依赖手填
-                self.assertIn("SiteOper", source)
-                self.assertIn(".list()", source)
-                self.assertIn('config.get("site")', source)
-                self.assertIn("credentials_from_site", source)
-                # 站点缺失 / 缺凭证时给出指向站点管理的可操作提示
-                self.assertIn("站点管理", source)
-                # 前后端分离：按站点地址推导 + 多候选自动回退
+                # 凭证只在插件配置页手填，不再从站点操作层读取
+                self.assertIn("credentials_from_config", source)
+                self.assertIn('config.get("username")', source)
+                self.assertNotIn("SiteOper", source)
+                self.assertNotIn("credentials_from_site", source)
+                self.assertNotIn("pick_mteam_site", source)
+                # 前后端分离：多候选自动回退
                 self.assertIn("api_host_candidates", source)
                 self.assertIn("api_ok", source)
 
@@ -582,22 +587,39 @@ class HelperTests(unittest.TestCase):
                 self.assertEqual(len(hosts), len(set(hosts)))
                 self.assertEqual(core.api_host_candidates(None)[0], core.DEFAULT_API_HOST)
 
-    def test_pick_mteam_site_prefers_configured_then_autodetect(self):
-        sites = [
-            {"id": 1, "name": "某站", "domain": "example.com", "url": "https://example.com"},
-            {"id": 2, "name": "馒头", "domain": "m-team.cc", "url": "https://kp.m-team.cc",
-             "apikey": "KEY"},
-            {"id": 3, "name": "Other", "domain": "other.net", "url": "https://other.net"},
-        ]
+    def test_credentials_from_config_reads_manual_fields(self):
         for core in CORES:
             with self.subTest(core=core.__name__):
-                self.assertEqual(core.pick_mteam_site(sites)["id"], 2)
-                self.assertEqual(core.pick_mteam_site(sites, "other.net")["id"], 3)
-                self.assertEqual(core.pick_mteam_site(sites, "3")["id"], 3)
-                self.assertIsNone(core.pick_mteam_site([sites[0]]))
-                self.assertTrue(core.is_mteam_site({"name": "馒头"}))
-                self.assertFalse(core.is_mteam_site({"domain": "example.com"}))
-                self.assertIsNone(core.pick_mteam_site(None))
+                creds = core.credentials_from_config({
+                    "username": "tester", "password": "secret",
+                    "otp_secret": "JBSWY3DPEHPK3PXP", "otp_code": "123456",
+                    "email_code": "mail-code", "tg_code": "tg-code",
+                    "token": "jwt-token", "api_key": "api-key", "cookie": "a=b",
+                })
+                self.assertEqual(creds.username, "tester")
+                self.assertEqual(creds.password, "secret")
+                self.assertEqual(creds.otp_secret, "JBSWY3DPEHPK3PXP")
+                self.assertEqual(creds.otp_code, "123456")
+                self.assertEqual(creds.email_code, "mail-code")
+                self.assertEqual(creds.tg_code, "tg-code")
+                self.assertEqual(creds.token, "jwt-token")
+                self.assertEqual(creds.api_key, "api-key")
+                self.assertEqual(creds.cookie, "a=b")
+                self.assertTrue(creds.usable)
+                # 兼容配置页可能使用的别名
+                alias = core.credentials_from_config({
+                    "authorization": "alias-token", "apikey": "alias-key",
+                    "otpsecret": "ALIAS", "otpcode": "654321",
+                    "emailcode": "alias-mail", "tgcode": "alias-tg"})
+                self.assertEqual(alias.token, "alias-token")
+                self.assertEqual(alias.api_key, "alias-key")
+                self.assertEqual(alias.otp_secret, "ALIAS")
+                self.assertEqual(alias.otp_code, "654321")
+                self.assertEqual(alias.email_code, "alias-mail")
+                self.assertEqual(alias.tg_code, "alias-tg")
+                # 空配置不能伪装成可用凭证
+                self.assertFalse(core.credentials_from_config({}).usable)
+                self.assertFalse(core.credentials_from_config(None).usable)
 
     def test_looks_like_api_response(self):
         for core in CORES:
@@ -614,7 +636,7 @@ class HelperTests(unittest.TestCase):
     def test_hint_for_translates_site_errors(self):
         for core in CORES:
             with self.subTest(core=core.__name__):
-                self.assertIn("站点管理", core.hint_for("key\u7121\u6548"))
+                self.assertIn("插件配置", core.hint_for("key\u7121\u6548"))
                 self.assertIn("凭证", core.hint_for("\u7121\u6548\u7684\u6191\u8b49"))
                 self.assertIn("api.", core.hint_for("Request method 'GET' is not supported"))
                 self.assertEqual(core.hint_for("something else"), "")
