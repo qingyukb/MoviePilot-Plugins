@@ -167,34 +167,25 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "submit_selector": "form[action*='attendance.php'] input[type='submit']",
     },
     # ---- 观众（Audiences）：签到由页面 JS 自动完成，必须走 Browserless ----
-    # 该站 /attendance.php 是一个 Vue 签到页：正文是「每日签到 / 完成人机验证即可领取今日
-    # 爆米花奖励」「人机验证 / 验证通过后将自动完成签到」，验证组件是 Cloudflare Turnstile。
-    # 签到由页面 JS 在 Turnstile 回调里**自动提交**，页面上没有可点的提交按钮；HTTP 直连
-    # （GET / POST）只会拿到未签到的页面骨架，永远匹配不到结果，所以这里直接指定浏览器引擎：
-    #   加载签到页 -> solve 生成 Turnstile token -> 显式补一刀页面提交 -> 等签到请求发完
-    #   - submit_method=auto：页面没有可点的提交按钮，而 Browserless 的 solve 只生成 token、
-    #     不会触发站点的 data-callback；所以由插件按「回调 -> 表单 -> 同源 POST」补一次提交
-    #   - cloudflare_wait 调大一点（10 -> 15 秒）更稳，wait 给足页面 AJAX 时间
-    #   - auto_wait：solve 之后等待 Turnstile token 出现在隐藏输入框里的毫秒数
-    #   - solve_timeout：solve 找验证码的毫秒预算（默认 60 秒，这里 30 秒够了，省得整轮超时）
-    #   - pending_keywords：仍停留在「验证中」的正文特征。命中说明人机验证没通过 / 签到没提交，
-    #     此时给出明确提示，而不是含糊的「未匹配到签到成功标志」
+    # 该站 /attendance.php 的 Cloudflare 托管挑战会等待后自动放行，签到同样由页面自己的
+    # JS 提交；页面没有提交按钮，也不需要点验证码。Browserless solve 会在这种不可解的
+    # 交互挑战上等待并报 “Captcha solving timed out”，所以预设改成只等待：
+    #   - submit_method=none：不点击、不注入自动提交，纯等页面自行签到
+    #   - cloudflare_wait=30 / wait=8000：给放行和签到 AJAX 足够时间
+    #   - solve_count=0：明确关闭 Browserless solve，避免 20 秒解题超时
+    #   - pending_keywords：仍停留在「验证中」时给出明确诊断
     #   - 判定顺序：先看成功 / 已签到关键词，再判 pending，避免已签完的页面被 pending 文案误杀
     "audiences.me": {
         "engine": "browserless",
         "mode": "cloudflare",
         "path": "/attendance.php",
-        "submit_method": "auto",
-        "cloudflare_wait": 15,
-        # Audiences 是两段验证：/attendance.php 先过 Cloudflare 交互挑战，进入签到页后
-        # 还有内嵌 Turnstile。只 solve 一次时，第二次验证不会生成 token，日志会表现为
-        # “未拿到 Turnstile token / 页面没有 data-callback”。所以显式做第二次 solve。
-        "solve_count": 2,
-        "solve2_wait": 3000,
-        # solve 只等验证码出现：组件本身 15 秒内就渲染好了，不必给 60 秒的默认预算
-        "solve_timeout": 20000,
-        "auto_wait": 15000,
-        "wait": 5000,
+        # 观众页的 Cloudflare 是“等待后自动放行”的托管挑战，不是需要 Browserless
+        # solve 的普通 Turnstile。solve 会等待验证码并可能直接 20 秒超时，反而阻止
+        # 页面自行完成挑战；这里禁用 solve，只让真实浏览器停留足够时间。
+        "submit_method": "none",
+        "cloudflare_wait": 30,
+        "solve_count": 0,
+        "wait": 8000,
         # 签到成功后页面可能跳回首页；同一浏览器会话重新打开 attendance.php 再确认一次，
         # 避免只看到首页就误报失败，也避免把未完成的验证当成成功。
         "verify_success_path": "/attendance.php",
@@ -711,25 +702,30 @@ def _turnstile_auto_script(rule: Mapping[str, Any]) -> str:
 def build_query(rule: Mapping[str, Any], user_agent: Optional[str] = None) -> str:
     """构造一次签到的 BrowserQL mutation。
 
-    Cloudflare / Turnstile 使用 ``solve:solve``（不限制类型）以支持自动检测，
-    包括页面内嵌 iframe / shadow DOM 中的 Turnstile 复选框挑战。
+    Cloudflare / Turnstile 默认使用 ``solve:solve``（不限制类型）以支持自动检测，
+    包括页面内嵌 iframe / shadow DOM 中的 Turnstile 复选框挑战；``solve_count=0``
+    时不调用 solve，适用于等待后自动放行、页面自行签到的观众（Audiences）类页面。
     """
     image = rule["mode"] in {"image", "trigger_image"}
     triggered_image = rule["mode"] == "trigger_image"
     altcha = rule["mode"] == "altcha"
     verifies_success = bool(rule.get("verify_success_path"))
-    needs_solver = rule["mode"] in {"image", "trigger_image", "cloudflare"}
+    needs_solver = solver_enabled(rule)
     second_solve = secondary_solve_enabled(rule)
     submit_method = str(rule.get("submit_method") or "click")
     native_click = submit_method == "click"
-    # submit_method=auto：页面没有提交按钮、由验证回调自己提交（观众 Audiences）；solve 只
+    # submit_method=auto：页面没有提交按钮、由验证回调自己提交（自定义规则）；solve 只
     # 生成 token 不触发回调，所以由插件补一刀显式提交。
     auto_submit = submit_method in AUTO_SUBMIT_METHODS
     # submit_method=none：什么都不点，纯等页面自己签完
     skip_submit = submit_method in {"none", "skip"}
-    solve = ("solve:solveImageCaptcha(captchaSelector:$captchaSelector,inputSelector:$captchaInputSelector,timeout:$solveTimeout){found solved time}"
-             if image else "solve:solve(timeout:$solveTimeout){found solved time}" if rule["mode"] == "cloudflare"
-             else "solve:evaluate(content:\"'skipped'\"){value}")
+    solve = (
+        "solve:solveImageCaptcha(captchaSelector:$captchaSelector,inputSelector:$captchaInputSelector,timeout:$solveTimeout){found solved time}"
+        if image and needs_solver
+        else "solve:solve(timeout:$solveTimeout){found solved time}"
+        if rule["mode"] == "cloudflare" and needs_solver
+        else "solve:evaluate(content:\"'skipped'\"){value}"
+    )
     if second_solve:
         # 第一次 solve 可能解决 /attendance.php 外层的 Cloudflare 交互挑战；等待页面切换后，
         # 再对签到页内嵌的 Turnstile 执行一次 solve。没有这一步时，第一次 solve 返回时
@@ -878,9 +874,25 @@ def solve2_wait_ms(rule: Mapping[str, Any]) -> int:
     return max(1000, min(milli, 10000))
 
 
+def solver_enabled(rule: Mapping[str, Any]) -> bool:
+    """Browserless cloudflare / image 模式是否启用 solve。
+
+    观众站点的 Cloudflare 托管挑战会自动放行，solve_count=0 用于让页面留在
+    真实浏览器里自行完成挑战，避免 Browserless solve 在不存在或不可解的验证码上超时。
+    """
+    if str(rule.get("mode") or "") not in {"image", "trigger_image", "cloudflare"}:
+        return False
+    if rule.get("solve_count") is None:
+        return True
+    try:
+        return int(float(rule.get("solve_count"))) > 0
+    except (TypeError, ValueError):
+        return True
+
+
 def secondary_solve_enabled(rule: Mapping[str, Any]) -> bool:
     """Cloudflare 模式是否需要对进入真实页面后的第二段 Turnstile 再 solve 一次。"""
-    if str(rule.get("mode") or "") != "cloudflare":
+    if str(rule.get("mode") or "") != "cloudflare" or not solver_enabled(rule):
         return False
     try:
         return int(float(rule.get("solve_count") or 1)) >= 2
@@ -1093,7 +1105,7 @@ class BrowserlessSigner:
         if rule["mode"] == "trigger_image":
             variables["trigger"] = _trigger_script(str(rule["trigger_selector"]))
             variables["triggerWait"] = int(rule.get("trigger_wait") or 500)
-        if rule["mode"] != "open_page":
+        if solver_enabled(rule):
             variables["solveTimeout"] = solve_timeout_ms(rule)
         if secondary_solve_enabled(rule):
             variables["solve2Wait"] = solve2_wait_ms(rule)
@@ -1209,6 +1221,9 @@ class BrowserlessSigner:
         errors = value.get("errors") or []
         if errors:
             message = str(errors[0].get("message") or "未知错误")
+            error_path = ".".join(str(part) for part in (errors[0].get("path") or []))
+            if error_path:
+                message += f"（步骤：{error_path}）"
             if "waiting for page navigation" in message.lower():
                 return SignResult("failed", "Browserless 页面导航超时；请检查该站是否可由当前节点访问")
             return SignResult("failed", "Browserless 执行失败：" + message)

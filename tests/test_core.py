@@ -102,7 +102,8 @@ class CoreRegressionTests(unittest.TestCase):
         # 观众签到页由页面 JS 在 Turnstile 回调里自动提交，页面上没有可点的提交按钮：
         # 既不能走 HTTP 直连，也不能沿用默认的 input[type=submit] 点击
         self.assertEqual(self.audiences["mode"], "cloudflare")
-        self.assertEqual(self.audiences["submit_method"], "auto")
+        self.assertEqual(self.audiences["submit_method"], "none")
+        self.assertEqual(self.audiences["solve_count"], 0)
         self.assertNotIn("submit_selector", self.audiences)
         self.assertIn("签到成功", self.audiences["success_keywords"])
         self.assertIn("已签到", self.audiences["already_keywords"])
@@ -318,20 +319,16 @@ class BrowserlessAudiencesTests(unittest.TestCase):
     def _signer(self, responses):
         return make_stub_signer(self.core, responses)
 
-    def test_query_triggers_turnstile_auto_submit(self):
-        # solve 只生成 token、不触发站点回调，所以必须再补一刀显式提交
+    def test_query_waits_for_cloudflare_without_solver(self):
+        # 观众页的 Cloudflare 会自动放行；不要让 solve 在不可解的验证码上阻塞主流程
         rule = self._rule()
         query = self.core.build_query(rule)
-        self.assertIn("solve:solve", query)
-        self.assertIn("waitBetweenSolves:waitForTimeout(time:$solve2Wait)", query)
-        self.assertIn("solve2:solve(timeout:$solveTimeout)", query)
-        self.assertIn("$solve2Wait:Float!", query)
-        self.assertLess(query.index("solve2:solve"), query.index("submit:evaluate"))
-        self.assertIn("submit:evaluate(content:$autoSubmit){value}", query)
-        self.assertIn("$autoSubmit:String!", query)
-        self.assertIn("autoDiag:evaluate", query)
+        self.assertNotIn("solve:solve", query)
+        self.assertIn("solve:evaluate", query)
+        self.assertNotIn("$solveTimeout", query)
+        self.assertNotIn("$solve2Wait", query)
+        self.assertNotIn("$autoSubmit", query)
         self.assertNotIn("submit:click", query)
-        self.assertNotIn("$selector", query)
         self.assertNotIn("$submit:", query)
         self.assertIn("verify:goto", query)
         self.assertIn("waitForVerify", query)
@@ -353,9 +350,9 @@ class BrowserlessAudiencesTests(unittest.TestCase):
         result = signer.sign(self.site, self._rule())
         self.assertEqual(result.status, "success")
         self.assertIn("22", result.message)
-        self.assertEqual(signer.calls[1][1]["beforeWait"], 15000)
-        self.assertEqual(signer.calls[1][1]["solve2Wait"], 3000)
-        self.assertEqual(signer.calls[1][1]["wait"], 5000)
+        self.assertEqual(signer.calls[1][1]["beforeWait"], 30000)
+        self.assertNotIn("solve2Wait", signer.calls[1][1])
+        self.assertEqual(signer.calls[1][1]["wait"], 8000)
         self.assertEqual(signer.calls[1][1]["verifyWait"], 8000)
         self.assertEqual(signer.calls[1][1]["verifyUrl"],
                          "https://audiences.me/attendance.php")
@@ -439,7 +436,9 @@ class BrowserlessAudiencesTests(unittest.TestCase):
         self.assertEqual(result.status, "success")
 
     def test_auto_submit_script_and_failure_diagnostics(self):
-        # 拿不到 token 时失败原因要带上现场诊断，否则又要来回猜
+        # 自定义为 auto 时仍保留 solve -> callback / 表单 POST 的兼容路径
+        rule = dict(self._rule(), submit_method="auto", solve_count=2,
+                    solve_timeout=20000, solve2_wait=3000)
         signer = self._signer([
             {"goto": {"status": 200}, "before": {"html": AUDIENCES_PENDING_HTML}},
             {"goto": {"status": 200}, "solve": {"found": True, "solved": True},
@@ -453,7 +452,7 @@ class BrowserlessAudiencesTests(unittest.TestCase):
              "verify": {"status": 200},
              "verifyPage": {"html": AUDIENCES_PENDING_HTML}},
         ])
-        result = signer.sign(self.site, self._rule())
+        result = signer.sign(self.site, rule)
         self.assertEqual(result.status, "failed")
         self.assertIn("submit:evaluate(content:$autoSubmit)", signer.queries[1])
         self.assertIn("solve2:solve", signer.queries[1])
@@ -474,15 +473,17 @@ class BrowserlessAudiencesTests(unittest.TestCase):
         self.assertIn("二次 solve", result.message)
 
     def test_auto_submit_script_waits_token_with_rule_budget(self):
-        script = self.core._turnstile_auto_script(self._rule())
+        script = self.core._turnstile_auto_script(dict(self._rule(), auto_wait=15000))
         self.assertIn("Date.now() + 15000", script)
         self.assertEqual(self.core.auto_wait_ms({"auto_wait": 1}), 3000)
         self.assertEqual(self.core.auto_wait_ms({}), 20000)
-        self.assertEqual(self.core.solve_timeout_ms(self._rule()), 20000)
+        rule = dict(self._rule(), solve_count=2, solve_timeout=20000, solve2_wait=3000)
+        self.assertEqual(self.core.solve_timeout_ms(rule), 20000)
         self.assertEqual(self.core.solve2_wait_ms({"solve2_wait": 1}), 1000)
         self.assertEqual(self.core.solve2_wait_ms({}), 3000)
-        self.assertTrue(self.core.secondary_solve_enabled(self._rule()))
-        self.assertFalse(self.core.secondary_solve_enabled({"mode": "cloudflare"}))
+        self.assertTrue(self.core.secondary_solve_enabled(rule))
+        self.assertFalse(self.core.solver_enabled(self._rule()))
+        self.assertTrue(self.core.solver_enabled({"mode": "cloudflare"}))
 
     def test_diagnostics_report_callback_and_post(self):
         hint = self.core.auto_submit_hint(json.dumps(
