@@ -83,10 +83,10 @@ def make_stub_signer(core, responses):
     return _StubSigner()
 
 
-def inject_payload(after_html, verify_html=None, diag=None, goto=None):
+def inject_payload(after_html, verify_html=None, diag=None, goto=200):
     """第二段（CheckInSubmit）的预置响应：注入脚本现场诊断 + 提交后的页面。
 
-    goto 只在第二段自己导航（没有会话可复用）时才有值。
+    第二段一定会重新 goto 打开签到页（复用会话拿到的也是新页面），所以这里默认带上导航状态。
     """
     state = {"token": True, "src": "solve", "len": 1180, "cb": None, "cands": [],
              "called": None, "form": False, "act": "callback-absent", "post": None,
@@ -430,16 +430,15 @@ class BrowserlessAudiencesTests(unittest.TestCase):
 
     def test_inject_query_shape(self):
         rule = self._rule()
-        reused = self.core.build_inject_query(rule, navigate=False)
-        self.assertIn("mutation CheckInSubmit(", reused)
-        self.assertIn("submit:evaluate(content:$autoSubmit,timeout:$autoTimeout)", reused)
-        self.assertIn("verify:goto(url:$verifyUrl,waitUntil:domContentLoaded)", reused)
-        self.assertNotIn("goto(url:$url", reused)
-        self.assertNotIn("$url:", reused)
-        navigated = self.core.build_inject_query(rule, navigate=True)
-        self.assertIn("goto(url:$url,waitUntil:domContentLoaded)", navigated)
-        self.assertIn("waitBefore:waitForTimeout(time:$beforeWait)", navigated)
-        self.assertIn("$url:String!", navigated)
+        query = self.core.build_inject_query(rule)
+        self.assertIn("mutation CheckInSubmit(", query)
+        self.assertIn("submit:evaluate(content:$autoSubmit,timeout:$autoTimeout)", query)
+        self.assertIn("verify:goto(url:$verifyUrl,waitUntil:domContentLoaded)", query)
+        # 复用会话拿到的也是新页面：第二段必须自己导航打开签到页
+        self.assertIn("goto(url:$url,waitUntil:domContentLoaded){status}", query)
+        self.assertIn("waitBefore:waitForTimeout(time:$beforeWait)", query)
+        self.assertIn("$url:String!", query)
+        self.assertIn("$beforeWait:Float!", query)
 
     def test_solve_token_is_injected_in_same_session(self):
         signer = self._signer([
@@ -476,6 +475,9 @@ class BrowserlessAudiencesTests(unittest.TestCase):
                          "https://production-sfo.browserless.io/e/abc/chromium/bql/xyz?token=token")
         self.assertIn('"TURNSTILE-TOKEN"', signer.calls[2][1]["autoSubmit"])
         self.assertEqual(signer.calls[2][1]["autoTimeout"], 42000)
+        # 复用会话只保住浏览器与 cookie：第二段仍然自己导航打开签到页
+        self.assertIn("goto(url:$url", signer.queries[2])
+        self.assertEqual(signer.calls[2][1]["beforeWait"], 15000)
         self.assertEqual(signer.calls[2][1]["verifyWait"], 15000)
         self.assertEqual(signer.calls[2][1]["verifyUrl"],
                          "https://audiences.me/attendance.php")
@@ -826,6 +828,37 @@ class BrowserlessRequestTests(unittest.TestCase):
                          [{"path": "solve",
                            "message": "Captcha solving timed out after 40000 ms"}])
         self.assertIn("html", data["after"])
+
+    def test_request_honours_session_endpoint(self):
+        # 会话复用：第二段请求必须真的打到 reconnect 返回的 browserQLEndpoint。
+        # 桩 signer 用 **kwargs 吞参数，抓不到这个漏改，所以这里直接打真实的 _request。
+        from unittest import mock
+
+        seen = {}
+
+        def fake_urlopen(request, timeout=None):
+            seen["url"] = request.full_url
+            return self._response({"data": {"after": {"html": AUDIENCES_SIGNED_HTML}}})
+
+        with mock.patch.object(self.core.urllib.request, "urlopen", side_effect=fake_urlopen):
+            data = self.signer._request(
+                {}, "CheckInSubmit", "query",
+                endpoint="https://session.example/e/1/chromium/bql/2?token=t")
+        self.assertEqual(seen["url"], "https://session.example/e/1/chromium/bql/2?token=t")
+        self.assertIsInstance(data, dict)
+
+    def test_request_defaults_to_configured_endpoint(self):
+        from unittest import mock
+
+        seen = {}
+
+        def fake_urlopen(request, timeout=None):
+            seen["url"] = request.full_url
+            return self._response({"data": {"before": {"html": AUDIENCES_PENDING_HTML}}})
+
+        with mock.patch.object(self.core.urllib.request, "urlopen", side_effect=fake_urlopen):
+            self.signer._request({}, "CheckIn", "query")
+        self.assertEqual(seen["url"], self.signer.endpoint)
 
     def test_errors_without_any_data_still_fail(self):
         from unittest import mock
