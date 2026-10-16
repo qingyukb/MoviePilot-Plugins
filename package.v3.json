@@ -3,13 +3,13 @@
     "name": "PT站点签到",
     "description": "双引擎 PT 签到，可选真实登录刷新 Cookie 并读取站点「最近动向」：HTTP 直连签到接口，或经 Browserless 完成图片验证码 / Cloudflare / Turnstile 挑战。",
     "labels": "站点,签到",
-    "version": "1.4.2",
+    "version": "1.4.3",
     "icon": "https://raw.githubusercontent.com/qingyukb/MoviePilot-Plugins/main/icons/ptsignin.png",
     "author": "qingyu",
     "level": 2,
     "system_version": ">=3.0.0",
     "history": {
-      "v1.4.2": "新增 AGSVPT（agsvpt.com）内置预设并修复其签到失败：该站签到页是一个「立即签到」表单提交按钮，GET /attendance.php 只会渲染按钮、不点不会签到（实测未登录时 302 到 login.php?returnto=attendance.php），所以预设改用 HTTP POST；万一站点开了验证码或撞上 Cloudflare，自动回退到浏览器引擎时会按「立即签到」按钮的文案与选择器点击（自动回退规则现在会沿用 HTTP 规则里的 submit_selector / submit_text）。判定文案仍用默认正则（签到成功 / 已经签到），不额外收窄。"
+      "v1.4.3": "详情页改成方框表格：签到状态与登录状态各一张「站点 / 状态 / 结果」表，站点单元格里带今天几点跑的、累计多少条记录；今天还没跑到的站点显示「未记录」（灰色 ⊘ 图标），不再从表里消失；登录表的「结果」列显示「最近动向」原文、登录失败时显示失败原因；签到表的「结果」列显示实际到手的东西（魔力值 / 爆米花 / 奖励，如「获得 20 粒爆米花」）。配套新增记录里的 bonus 字段与 message_bonus() 提取（去掉奖励文本尾部的逗号，例如 AGSVPT 的「65,」→「获得 65」），并去掉上一版的展开式明细列表，页面更清爽。"
     }
   }
 }

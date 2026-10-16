@@ -139,8 +139,23 @@ def texts(page):
     return " ".join(str(node.get("text") or "") for node in walk(page))
 
 
-def panel_titles(page):
-    return [node.get("props", {}).get("title") for node in nodes(page, "VExpansionPanel")]
+def table_rows(page):
+    """把方框表格的行抽成 [(站点单元格文本, 状态, 结果)]。"""
+    rows = []
+    for node in nodes(page, "tr"):
+        cells = [cell for cell in (node.get("content") or []) if cell.get("component") == "td"]
+        if len(cells) != 3:
+            continue
+        site_cell, status_cell, result_cell = cells
+        site = " ".join(str(item.get("text") or "") for item in (site_cell.get("content") or []))
+        status = " ".join(str(item.get("text") or "") for item in (status_cell.get("content") or []))
+        rows.append((site.strip(), status.strip(), str(result_cell.get("text") or "").strip()))
+    return rows
+
+
+def row_pairs(page):
+    """(站点名, 状态, 结果) —— 站点单元格里的说明文字去掉，只留站点名。"""
+    return [(site.split(" ")[0], status, result) for site, status, result in table_rows(page)]
 
 
 def chip_labels(page):
@@ -176,7 +191,7 @@ class PagePluginTests(unittest.TestCase):
         finally:
             plugin.get_data = original                        # type: ignore[method-assign]
 
-    def test_get_page_splits_signin_and_login(self):
+    def test_get_page_renders_boxed_tables(self):
         latest = [
             {"site": "观众", "status": "success", "message": "签到成功（获得 20 粒爆米花）",
              "engine": "browserless", "ran_at": "2026-10-17 08:30:00", "login": "",
@@ -184,40 +199,44 @@ class PagePluginTests(unittest.TestCase):
             {"site": "学校", "status": "login", "message": "成功（已换用新 Cookie）",
              "engine": "http", "ran_at": "2026-10-17 08:30:00", "login": "",
              "activity": "2026-10-17 07:12:03 ( < 1分前 )"},
-            {"site": "红豆饭", "status": "failed", "message": "Cookie 无效或已过期",
-             "engine": "http", "ran_at": "2026-10-17 08:30:00"},
         ]
         page, _ = self._page(latest, history=latest)
-        titles = panel_titles(page)
-        self.assertIn("观众 · 1 条记录", titles)      # 只在签到状态里
-        self.assertIn("学校 · 1 条记录", titles)      # 只在登录状态里
-        self.assertIn("红豆饭 · 1 条记录", titles)
-        headers = [node.get("props", {}).get("class") for node in page
-                   if isinstance(node, dict) and node.get("component") == "div"]
-        self.assertIn("ptsignin-section", headers)
-        self.assertTrue(nodes(page, "VExpansionPanels"))
-        self.assertEqual(len(nodes(page, "VTable")), 3)   # 观众 / 学校 / 红豆饭 各一张明细表
-        self.assertIn("最近动向：2026-10-17 07:12:03", texts(page))
+        # 两块各一张表，表头固定为「站点 / 状态 / 结果」
+        self.assertEqual([node.get("text") for node in nodes(page, "th")],
+                         ["站点", "状态", "结果"] * 2)
+        wrappers = [node for node in nodes(page, "div")
+                    if "ptsignin-table-wrap" in str(node.get("props", {}).get("class"))]
+        self.assertEqual(len(wrappers), 2)               # 每块都用一个方框包起来
+        pairs = row_pairs(page)
+        self.assertIn(("观众", "签到成功", "获得 20 粒爆米花"), pairs)
+        self.assertIn(("学校", "登录成功", "2026-10-17 07:12:03 ( < 1分前 )"), pairs)
+        self.assertIn(("学校", "未记录", "—"), pairs)      # 纯登录站点不进签到状态
+        self.assertIn(("红豆饭", "未记录", "—"), pairs)    # 今天没记录 → 未记录
 
-    def test_dual_site_shows_in_both_sections(self):
-        latest = [{"site": "观众", "status": "success", "message": "签到成功",
-                   "engine": "browserless", "ran_at": "2026-10-17 08:30:00",
-                   "login": "成功（已换用新 Cookie）", "activity": "2026-10-17 08:29:00",
+    def test_signin_result_prefers_bonus_field(self):
+        latest = [{"site": "AGSVPT", "status": "success", "message": "签到成功（65,）",
+                   "bonus": "获得 65", "ran_at": "2026-10-17 03:20:02", "engine": "http"}]
+        page, _ = self._page(latest, history=latest)
+        self.assertIn(("AGSVPT", "签到成功", "获得 65"), row_pairs(page))
+
+    def test_dual_site_shows_in_both_tables(self):
+        latest = [{"site": "观众", "status": "already", "ran_at": "2026-10-17 03:11:49",
+                   "message": "今日已经签到（获得 20 粒爆米花）", "bonus": "获得 20 粒爆米花",
+                   "login": "复用站点管理 Cookie", "activity": "2026-10-17 03:11:47",
                    "dual": True, "login_status": "login"}]
-        page, plugin = self._page(latest, history=latest)
-        self.assertEqual(panel_titles(page).count("观众 · 1 条记录"), 2)   # 签到 + 登录 各一份
-        labels = chip_labels(page)
-        self.assertIn("签到成功", labels)
-        self.assertIn("登录成功", labels)
+        page, _ = self._page(latest, history=latest)
+        pairs = row_pairs(page)
+        self.assertIn(("观众", "今日已签到", "获得 20 粒爆米花"), pairs)   # 签到那块的「结果」
+        self.assertIn(("观众", "登录成功", "2026-10-17 03:11:47"), pairs)  # 登录那块的「结果」= 最近动向
 
     def test_dual_login_failure_marks_login_section(self):
-        latest = [{"site": "观众", "status": "success", "message": "签到成功",
+        latest = [{"site": "观众", "status": "success", "message": "签到成功", "bonus": "获得 6",
                    "ran_at": "2026-10-17 08:30:00", "login": "失败：账号或密码错误",
                    "dual": True, "login_status": "login_failed"}]
-        page, _ = self._page(latest)
-        labels = chip_labels(page)
-        self.assertIn("登录失败", labels)
-        self.assertIn("签到成功", labels)
+        page, _ = self._page(latest, history=latest)
+        pairs = row_pairs(page)
+        self.assertIn(("观众", "登录失败", "失败：账号或密码错误"), pairs)
+        self.assertIn(("观众", "签到成功", "获得 6"), pairs)
 
     def test_summary_counts_and_missing_alert(self):
         latest = [{"site": "观众", "status": "success", "message": "签到成功"},
@@ -231,18 +250,6 @@ class PagePluginTests(unittest.TestCase):
         self.assertTrue(alerts)
         self.assertIn("红豆饭", alerts[0])
 
-    def test_latest_result_is_not_duplicated(self):
-        # 之前同一个结果会在「最近一轮」区块和明细表里各出现一次，看着很乱
-        latest = [{"site": "观众", "status": "already", "ran_at": "2026-10-17 03:11:49",
-                   "message": "今日已经签到（获得 20 粒爆米花）", "login": "复用站点管理 Cookie",
-                   "activity": "2026-10-17 03:11:47", "dual": True, "login_status": "login"}]
-        page, _ = self._page(latest, history=latest)
-        self.assertEqual(texts(page).count("今日已经签到（获得 20 粒爆米花）"), 1)
-        self.assertEqual(len(nodes(page, "VTable")), 2)          # 签到 / 登录 各一张明细表
-        headers = [node.get("text") for node in nodes(page, "th")]
-        self.assertEqual(headers, ["时间", "状态", "结果", "时间", "状态", "登录", "最近动向"])
-        self.assertEqual(len(nodes(page, "VChip")), 7)           # 5 个统计胶囊 + 两块各 1 个状态标签
-
     def test_empty_state(self):
         page, _ = self._page([])
         self.assertEqual(len(page), 1)
@@ -252,7 +259,8 @@ class PagePluginTests(unittest.TestCase):
         history = [{"site": "观众", "status": "success", "ran_at": f"2026-10-{day:02d} 08:00:00"}
                    for day in range(1, 13)]
         page, _ = self._page([history[-1]], history=history)
-        self.assertIn("观众 · 12 条记录", panel_titles(page))
+        captions = [site for site, _status, _result in table_rows(page)]
+        self.assertTrue(any("共 12 条记录" in caption for caption in captions))
 
     def test_parse_site_ids_handles_all_sentinel(self):
         parse = self.plugin_module.PTSiteSignIn._parse_site_ids

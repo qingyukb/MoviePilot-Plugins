@@ -432,8 +432,24 @@ def extract_bonus(content: str, rule: Mapping[str, Any]) -> str:
                 continue
             values = [group for group in found.groups() if group]
             text = values[-1] if values else found.group(0)
-            return re.sub(r"\s+", " ", text).strip()
+            # 顺手去掉尾部的逗号 / 顿号（站点文案常写成「魔力值 65,」这类）
+            return re.sub(r"\s+", " ", text).strip().strip(",，、;；")
     return ""
+
+
+def message_bonus(message: Any) -> str:
+    """从结果文案里取出奖励部分：「签到成功（获得 20 粒爆米花）」→「获得 20 粒爆米花」。
+
+    详情页「结果」列用它显示实际到手的东西（魔力值 / 爆米花 / 奖励），比整句文案清爽。
+    """
+    text = re.sub(r"\s+", " ", str(message or "")).strip()
+    match = re.search(r"[（(]([^（()）]{1,80})[)）]\s*$", text)
+    if not match:
+        return ""
+    bonus = match.group(1).strip().strip(",，、;；:：")
+    if re.fullmatch(r"[\d,]+(?:\.\d+)?", bonus):
+        return "获得 " + bonus
+    return bonus
 
 
 def snippet_around(text: str, keyword: str, width: int = 60) -> str:

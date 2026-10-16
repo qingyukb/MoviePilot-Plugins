@@ -51,6 +51,7 @@ from .core import (
     is_login_record,
     is_signin_record,
     login as site_login,
+    message_bonus,
     parse_rules,
     read_activity,
     record_meta,
@@ -68,11 +69,13 @@ ALL_SITES = "all"
 HISTORY_SHOW = 10
 # 详情页样式（MoviePilot 插件页支持内联 style 组件）。
 PAGE_STYLE = (
-    ".ptsignin-summary{display:flex;flex-wrap:wrap;align-items:center;gap:6px}"
-    ".ptsignin-section{display:flex;align-items:center;margin:16px 0 4px}"
-    ".ptsignin-activity{margin:2px 0 6px;font-size:.82rem;"
-    "color:rgba(var(--v-theme-on-surface),.72);word-break:break-word}"
-    ".ptsignin-cell{font-size:.8rem;word-break:break-word}"
+    ".ptsignin-summary{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-bottom:6px}"
+    ".ptsignin-section{display:flex;align-items:center;margin:14px 0 6px}"
+    ".ptsignin-table-wrap{border:1px solid rgba(var(--v-theme-on-surface),.12);border-radius:8px;"
+    "overflow:hidden}"
+    ".ptsignin-site{font-weight:600;line-height:1.2}"
+    ".ptsignin-caption{font-size:.75rem;color:rgba(var(--v-theme-on-surface),.6);margin-top:2px}"
+    ".ptsignin-result{font-size:.84rem;word-break:break-word}"
 )
 
 
@@ -81,7 +84,7 @@ class PTSiteSignIn(_PluginBase):
     plugin_desc = ("双引擎 PT 签到，可选真实登录刷新 Cookie 并读取站点「最近动向」：HTTP 直连签到接口，"
                    "或经 Browserless 完成验证码 / Cloudflare / Turnstile 挑战。")
     plugin_icon = "signin.png"
-    plugin_version = "1.4.2"
+    plugin_version = "1.4.3"
     plugin_author = "qingyu"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "ptsignin_"
@@ -364,12 +367,13 @@ class PTSiteSignIn(_PluginBase):
 
 
     def get_page(self) -> List[dict]:
-        """插件详情页：一行统计 + 「签到状态」「登录状态」两块，一个站点一张卡片。"""
+        """插件详情页：一行统计 + 「签到状态」「登录状态」两张方框表格（站点 / 今日 / 结果）。"""
         latest = self._records_of("latest")
         history = self._history_records()
         if not latest and not history:
             return [{"component": "VAlert", "props": {"type": "info", "variant": "tonal",
                      "text": "暂无签到记录；保存配置后点「保存后立即执行一次」，或等 Cron 触发。"}}]
+        today = self._today_records(latest)
         summary = summarize_records(latest, self._selected_site_names())
         page: List[dict] = [
             {"component": "style", "text": PAGE_STYLE},
@@ -381,14 +385,12 @@ class PTSiteSignIn(_PluginBase):
                 self._counter("未记录", summary["missing"], "warning"),
             ]},
         ]
-        # 双选站点的记录带 dual 标记：两块都要出现（签到状态看签到结果，登录状态看登录结果）
-        page += self._status_section("签到状态", "mdi-calendar-check",
-                                     [row for row in latest if is_signin_record(row)], history,
-                                     "本轮没有签到记录；在设置里勾选「签到站点」后重跑一次即可。")
-        page += self._status_section("登录状态", "mdi-login-variant",
-                                     [row for row in latest if is_login_record(row)], history,
-                                     "本轮没有登录记录；在设置里勾选「登录站点」即可读取「最近动向」。",
-                                     login_view=True)
+        page += self._status_table("签到状态", "mdi-calendar-check",
+                                   self._section_site_names(False, history, latest),
+                                   history, today, login_view=False)
+        page += self._status_table("登录状态", "mdi-login-variant",
+                                   self._section_site_names(True, history, latest),
+                                   history, today, login_view=True)
         recorded = {str(row.get("site") or "") for row in latest}
         missing = [name for name in self._selected_site_names() if name not in recorded]
         if missing:
@@ -407,96 +409,108 @@ class PTSiteSignIn(_PluginBase):
                           "color": color if value else "grey"},
                 "text": f"{label} {value}"}
 
-    def _status_section(self, title: str, icon: str, rows: List[Dict[str, Any]],
-                        history: List[Dict[str, Any]], empty_hint: str,
-                        login_view: bool = False) -> List[dict]:
-        """一块状态区：小标题 + 每个站点一张面板，面板标题里带「N 条记录」。"""
+    def _status_table(self, title: str, icon: str, names: List[str],
+                      history: List[Dict[str, Any]], today: List[Dict[str, Any]],
+                      login_view: bool) -> List[dict]:
+        """一张方框表格：站点（含记录条数）｜今日｜结果。"""
         belongs = is_login_record if login_view else is_signin_record
-        section_history = [row for row in history if belongs(row)]
-        counts = site_record_counts(section_history)
-        order: List[str] = []
-        for row in rows + section_history:
-            name = str(row.get("site") or "未知站点")
-            if name not in order:
-                order.append(name)
+        counts: Dict[str, int] = {}
+        for row in history:
+            if belongs(row):
+                name = str(row.get("site") or "未知站点")
+                counts[name] = counts.get(name, 0) + 1
+        current: Dict[str, Dict[str, Any]] = {}
+        for row in today:
+            if belongs(row):
+                current.setdefault(str(row.get("site") or "未知站点"), row)
         header = {"component": "div", "props": {"class": "ptsignin-section"}, "content": [
             {"component": "VIcon", "props": {"icon": icon, "size": "18", "class": "mr-1"}},
             {"component": "span", "props": {"class": "text-subtitle-1 font-weight-bold"},
-             "text": f"{title}（{len(order)}）"},
+             "text": f"{title}（{len(names)}）"},
         ]}
-        if not order:
+        if not names:
             return [header, {"component": "VAlert",
                              "props": {"type": "info", "variant": "tonal", "density": "compact"},
-                             "text": empty_hint}]
-        panels = []
-        for name in order:
-            items = [row for row in section_history
-                     if str(row.get("site") or "未知站点") == name]
-            panels.append({"component": "VExpansionPanel",
-                           "props": {"title": f"{name} · {counts.get(name, 0)} 条记录"},
-                           "content": self._site_panel(name, rows, items, login_view)})
-        return [header, {"component": "VExpansionPanels",
-                         "props": {"variant": "accordion", "flat": True}, "content": panels}]
-
-    def _site_panel(self, name: str, rows: List[Dict[str, Any]], items: List[Dict[str, Any]],
-                    login_view: bool) -> List[dict]:
-        """单站面板：只放一张明细表（最新一轮在最上面），不再重复一遍结果文案。"""
-        current = next((row for row in rows if str(row.get("site") or "未知站点") == name), None)
-        records = self._merge_records(current, items)
-        content: List[dict] = []
-        if login_view:
-            latest_activity = ""
-            for row in records:
-                latest_activity = str(row.get("activity") or "").strip()
-                if latest_activity:
-                    break
-            content.append({"component": "div", "props": {"class": "ptsignin-activity"},
-                            "text": "最近动向：" + (latest_activity or self._activity_hint())})
-        if not records:
-            content.append({"component": "div", "props": {"class": "ptsignin-activity"},
-                            "text": "还没有历史记录"})
-            return content
+                             "text": "还没有站点；在设置里勾选「签到站点 / 登录站点」后重跑一次。"}]
         body = []
-        for row in records[:HISTORY_SHOW]:
-            meta = record_meta(self._login_view(row) if login_view else row)
-            cells = [
-                {"component": "td", "props": {"class": "ptsignin-cell"},
-                 "text": str(row.get("ran_at") or "-")},
-                {"component": "td", "content": [{"component": "VChip", "props": {
-                    "size": "x-small", "variant": "tonal", "color": meta["color"]},
-                    "text": meta["label"]}]},
-            ]
-            if login_view:
-                cells.append({"component": "td", "props": {"class": "ptsignin-cell"},
-                              "text": str(row.get("login") or row.get("message") or "-")})
-                cells.append({"component": "td", "props": {"class": "ptsignin-cell"},
-                              "text": str(row.get("activity") or "-")})
+        for name in names:
+            row = current.get(name)
+            if row is None:
+                chip = {"label": "未记录", "color": "grey", "icon": "mdi-minus-circle-outline"}
+                result = "—"
+                caption = f"共 {counts.get(name, 0)} 条记录"
             else:
-                cells.append({"component": "td", "props": {"class": "ptsignin-cell"},
-                              "text": str(row.get("message") or "-")})
-            body.append({"component": "tr", "content": cells})
-        heads = ["时间", "状态", "登录", "最近动向"] if login_view else ["时间", "状态", "结果"]
-        content.append({"component": "VTable", "props": {"density": "compact"}, "content": [
-            {"component": "thead", "content": [{"component": "tr", "content": [
-                {"component": "th", "text": head} for head in heads]}]},
-            {"component": "tbody", "content": body}]})
-        return content
+                meta = record_meta(self._login_view(row) if login_view else row)
+                chip = {"label": meta["label"], "color": meta["color"], "icon": meta["icon"]}
+                result = self._result_text(row, login_view)
+                moment = str(row.get("ran_at") or "")[11:16]
+                caption = f"今日 {moment} · 共 {counts.get(name, 0)} 条记录" if moment else \
+                    f"共 {counts.get(name, 0)} 条记录"
+            body.append({"component": "tr", "content": [
+                {"component": "td", "content": [
+                    {"component": "div", "props": {"class": "ptsignin-site"}, "text": name},
+                    {"component": "div", "props": {"class": "ptsignin-caption"}, "text": caption}]},
+                {"component": "td", "content": [
+                    {"component": "VChip", "props": {"size": "small", "variant": "tonal",
+                                                     "color": chip["color"],
+                                                     "prepend-icon": chip["icon"]},
+                     "text": chip["label"]}]},
+                {"component": "td", "props": {"class": "ptsignin-result"}, "text": result},
+            ]})
+        return [header, {"component": "div", "props": {"class": "ptsignin-table-wrap"},
+                         "content": [{"component": "VTable",
+                                      "props": {"density": "comfortable", "hover": True},
+                                      "content": [
+                                          {"component": "thead", "content": [
+                                              {"component": "tr", "content": [
+                                                  {"component": "th", "text": "站点"},
+                                                  {"component": "th", "text": "状态"},
+                                                  {"component": "th", "text": "结果"}]}]},
+                                          {"component": "tbody", "content": body}]}]}]
 
-    @staticmethod
-    def _merge_records(current: Optional[Dict[str, Any]],
-                       items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """最近一轮记录 + 历史记录合并去重（同一轮不再重复出现两次），最新在前。"""
-        merged: List[Dict[str, Any]] = []
-        seen: set = set()
-        for row in ([current] if current else []) + list(items):
-            key = (str(row.get("ran_at") or ""), str(row.get("status") or ""),
-                   str(row.get("message") or ""))
-            if key in seen:
+    def _section_site_names(self, login_view: bool, history: List[Dict[str, Any]],
+                            latest: List[Dict[str, Any]]) -> List[str]:
+        """该区块要显示的站点：配置里勾选的站点优先，再补上历史 / 本轮里出现过的站点。"""
+        try:
+            sites = {site.id: site for site in SiteOper().list_order_by_pri()}
+        except Exception:
+            sites = {}
+        if login_view:
+            ids = list(sites) if self._all_login_sites else self._login_site_ids
+        else:
+            ids = list(sites) if self._all_sites else self._site_ids
+        names = [str(sites[sid].name) for sid in ids if sid in sites]
+        belongs = is_login_record if login_view else is_signin_record
+        for row in latest + history:
+            if not belongs(row):
                 continue
-            seen.add(key)
-            merged.append(row)
-        merged.sort(key=lambda row: str(row.get("ran_at") or ""), reverse=True)
-        return merged
+            name = str(row.get("site") or "未知站点")
+            if name not in names:
+                names.append(name)
+        return names
+
+    def _today_records(self, latest: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """今天的记录：优先取当天的 history，取不到时用 latest 里 ran_at 是今天的记录。"""
+        rows = self._records_of("history_" + datetime.now().strftime("%Y%m%d"))
+        if rows:
+            return rows
+        stamp = datetime.now().strftime("%Y-%m-%d")
+        return [row for row in latest if str(row.get("ran_at") or "").startswith(stamp)]
+
+    def _result_text(self, row: Dict[str, Any], login_view: bool) -> str:
+        """结果列：登录看「最近动向」，签到看实际到手的东西（魔力值 / 爆米花 / 奖励）。"""
+        if login_view:
+            activity = str(row.get("activity") or "").strip()
+            if activity:
+                return activity
+            # 登录失败 / 没读到最近动向时，把原因写出来比只留一句提示更有用
+            if str(self._login_view(row).get("status") or "") == "login_failed":
+                return str(row.get("login") or row.get("message") or "").strip() or "登录失败"
+            return self._activity_hint()
+        bonus = str(row.get("bonus") or "").strip()
+        if bonus:
+            return bonus
+        return message_bonus(row.get("message")) or str(row.get("message") or "-").strip()
 
     @staticmethod
     def _login_view(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -509,7 +523,7 @@ class PTSiteSignIn(_PluginBase):
         return [row for row in data if isinstance(row, dict)] if isinstance(data, list) else []
 
     def _history_records(self) -> List[Dict[str, Any]]:
-        """按天读回历史记录（新的在前），用于统计每站「N 条记录」与明细表。"""
+        """按天读回历史记录（新的在前），用于统计每站「共 N 条记录」。"""
         index = self.get_data("history_index") or []
         keys = [str(key) for key in index if isinstance(key, str)] if isinstance(index, list) else []
         return [row for key in sorted(keys, reverse=True) for row in self._records_of(key)]
@@ -635,6 +649,7 @@ class PTSiteSignIn(_PluginBase):
                 "state_key": site_state_key(info), "engine": engine,
                 "status": outcome.status, "message": outcome.message,
                 "login": login_text, "activity": activity_text, "ran_at": self._now(),
+                "bonus": message_bonus(outcome.message),
                 "dual": dual,
                 # dual 站点在「登录状态」里要显示登录结论，而不是签到结论
                 "login_status": ("login_failed" if login_broken else "login") if dual else ""}
