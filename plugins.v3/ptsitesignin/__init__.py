@@ -67,6 +67,8 @@ from .core import (
 ALL_SITES = "all"
 # 每个站点面板里最多展示多少条历史记录（历史本身按天保留最近 30 天）。
 HISTORY_SHOW = 10
+# 通知里每个失败原因最多显示多少字，避免长诊断把通知撑成一堵墙。
+NOTIFY_REASON_LIMIT = 180
 # 详情页样式（MoviePilot 插件页支持内联 style 组件）。
 PAGE_STYLE = (
     ".ptsignin-summary{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-bottom:6px}"
@@ -84,7 +86,7 @@ class PTSiteSignIn(_PluginBase):
     plugin_desc = ("双引擎 PT 签到，可选真实登录刷新 Cookie 并读取站点「最近动向」：HTTP 直连签到接口，"
                    "或经 Browserless 完成验证码 / Cloudflare / Turnstile 挑战。")
     plugin_icon = "signin.png"
-    plugin_version = "1.4.3"
+    plugin_version = "1.4.4"
     plugin_author = "qingyu"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "ptsignin_"
@@ -305,7 +307,7 @@ class PTSiteSignIn(_PluginBase):
                  "content": [{"component": "VSwitch", "props": {"model": "read_activity",
                              "label": "读取「最近动向」",
                              "hint": "用站点 Cookie（配置了账号时会真实登录换回新 Cookie）打开用户页 / 签到页，"
-                                     "抓取「最近动向」写入详情页与通知", "persistent-hint": True}}]},
+                                     "抓取「最近动向」写入详情页的登录状态表", "persistent-hint": True}}]},
             ]},
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12},
@@ -909,7 +911,7 @@ class PTSiteSignIn(_PluginBase):
         failed = len(results) - signed - already - login_ok
         logger.info("PT站点签到：完成，新签到 %s，今日已签到 %s，仅登录 %s，失败 %s",
                     signed, already, login_ok, failed)
-        self._notify(results, signed, already, login_ok, failed)
+        self._notify(results, failed)
 
     def _save_results(self, results: List[Dict[str, str]]) -> List[Dict[str, str]]:
         """保存最新结果与当天历史（重试期间先落盘，最终结果会覆盖同一天）。"""
@@ -952,35 +954,40 @@ class PTSiteSignIn(_PluginBase):
                 logger.warning("PT站点签到：删除历史数据 %s 失败，将改为清空", key)
         self.save_data(key, None)
 
-    def _notify(self, results: List[Dict[str, str]], signed: int, already: int,
-                login_ok: int, failed: int) -> None:
-        """按通知模式推送签到结果：always 每次通知 / failed 仅失败通知 / off 不通知。"""
+    def _notify(self, results: List[Dict[str, str]], failed: int) -> None:
+        """按通知模式推送结果：always 每次通知 / failed 仅失败通知 / off 不通知。
+
+        消息保持简短：一行「成功几个 / 失败几个」，只有失败时才附上失败原因（每个站点一行）。
+        """
         mode = self._notify_mode
         if mode == "off" or not results:
             return
         if mode == "failed" and not failed:
             return
-        head = f"站点 {len(results)} 个｜新签到 {signed}｜今日已签到 {already}"
-        if login_ok:
-            head += f"｜仅登录 {login_ok}"
-        if failed:
-            head += f"｜失败 {failed}"
-        detail = "\n".join(self._notify_line(item) for item in results)
+        success = max(0, len(results) - failed)
+        lines = [f"站点 {len(results)} 个｜成功 {success}｜失败 {failed}"]
+        reasons = [self._failure_reason(item) for item in results if self._is_failed(item)]
+        if reasons:
+            lines.append("")
+            lines.append("失败原因：")
+            lines.extend("· " + reason for reason in reasons)
         self.post_message(mtype=NotificationType.SiteMessage,
                           title="PT站点签到",
-                          text=f"{head}\n\n{detail}")
+                          text="\n".join(lines))
 
-    def _notify_line(self, item: Dict[str, Any]) -> str:
-        label = self._status_meta(item.get('status'))['label']
-        msg = str(item.get('message') or '').strip()
-        line = f"{item.get('site')}：{label}"
-        if msg:
-            line += f"（{msg}）"
-        if item.get("login"):
-            line += f"\n　登录：{item['login']}"
-        if item.get("activity"):
-            line += f"\n　最近动向：{item['activity']}"
-        return line
+    @staticmethod
+    def _is_failed(item: Dict[str, Any]) -> bool:
+        """这条记录算不算失败（成功 / 今日已签到 / 登录成功 之外的都算）。"""
+        return str(item.get("status") or "") not in {"success", "already", "login"}
+
+    @staticmethod
+    def _failure_reason(item: Dict[str, Any]) -> str:
+        """失败原因：站点名 + 结果文案，过长时截断，别让通知变成一堵墙。"""
+        site = str(item.get("site") or "未知站点")
+        detail = str(item.get("message") or "").strip() or str(item.get("login") or "").strip()
+        if len(detail) > NOTIFY_REASON_LIMIT:
+            detail = detail[:NOTIFY_REASON_LIMIT].rstrip() + "…"
+        return f"{site}：{detail}" if detail else site
 
     def stop_service(self) -> None:
         """插件停用 / 重载时停止重试，并清理自有的「立即执行」调度器。"""

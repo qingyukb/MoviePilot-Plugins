@@ -7,6 +7,7 @@ Browserless 相关实现参考 tmzg0000/moviepilot-plugins 的 captchasignin 插
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 import time
@@ -548,13 +549,22 @@ LOGIN_FAILURE_PATTERN = (r"(用户名或密码错误|用户名或密碼錯誤|�
 # 登录页要求人机校验时的特征
 LOGIN_CAPTCHA_PATTERN = r"(captcha|imagestring|验证码|驗證碼|turnstile)"
 # 用户页里「最近动向」相关关键词（含繁体）
-ACTIVITY_KEYWORDS = ("最近动向", "最近動向", "最近活动", "最近活動", "上次访问", "上次訪問",
-                     "上次签到", "上次簽到", "最后访问", "最後訪問", "上次登录", "上次登入")
+ACTIVITY_KEYWORDS = ("最近动向", "最近動向", "最近活动", "最近活動", "最近访问", "最近訪問",
+                     "上次访问", "上次訪問", "上次签到", "上次簽到", "上次活动", "上次活動",
+                     "最后访问", "最後訪問", "最后活动", "最後活動", "最后上线", "最後上線",
+                     "最后活跃", "最後活躍", "上次登录", "上次登入")
 # 站点常见的时间格式（NexusPHP 多为 YYYY-MM-DD HH:MM:SS）
 DATETIME_PATTERN = r"(\d{4}[-/.]\d{1,2}[-/.]\d{1,2}(?:[ T]\d{1,2}:\d{2}(?::\d{2})?)?)"
+# 没有关键词命中时用的严格时间格式：必须带时分。裸日期（2026-09-18）在种子列表、
+# 公告、排行榜里到处都是，拿它当「最近动向」只会给出一个看起来很旧的假值。
+ACTIVITY_TIME_PATTERN = r"(\d{4}[-/.]\d{1,2}[-/.]\d{1,2}[ T]\d{1,2}:\d{2}(?::\d{2})?)"
+# 关键词后面允许多长的间隔才算「紧跟着时间」：站点写法都是「上次访问：2026-…」这种，
+# 窗口开太大就会把旁边字段（注册日期之类）的时间算成这个关键词的值。
+ACTIVITY_WINDOW = 60
 # 站点常常在时间后面再补一段相对时间，例如「最近动向：2026-10-16 23:44:21 ( < 1分前 )」
 RELATIVE_TIME_PATTERN = r"\s*([（(]\s*[^（()）]{0,16}?前\s*[)）])"
 _DATETIME_RE = re.compile(DATETIME_PATTERN)
+_ACTIVITY_TIME_RE = re.compile(ACTIVITY_TIME_PATTERN)
 _RELATIVE_TIME_RE = re.compile(RELATIVE_TIME_PATTERN)
 
 _FORM_BLOCK_RE = re.compile(r"<form\b([^>]*)>(.*?)</form>", re.IGNORECASE | re.DOTALL)
@@ -794,23 +804,58 @@ def activity_value(text: str, match: Any) -> str:
 
 
 def extract_activity(html: str) -> Dict[str, str]:
-    """从用户页里抓「最近动向」片段与其中的时间，返回 keyword / snippet / last_seen。"""
+    """从用户页里抓「最近动向」片段与其中的时间，返回 keyword / snippet / last_seen。
+
+    两个防呆点（都踩过坑）：
+
+    1. 关键词后面必须紧跟时间才算命中。以前关键词附近没时间时会退回「全页第一个日期」，
+       而种子列表 / 公告里的裸日期到处都是，于是「最近动向」被填成 `2026-09-18` 这种假值；
+    2. 没有关键词命中时，只接受**带时分**的时间。裸日期一律不认——宁可返回空（页面会提示
+       未读取到、可以配 activity_path），也不要给一个看起来像那么回事的错误时间。
+    """
     text = plain_text(html or "")
-    for keyword in ACTIVITY_KEYWORDS:
+    best: Any = None
+    for order, keyword in enumerate(ACTIVITY_KEYWORDS):
         index = text.find(keyword)
         if index < 0:
             continue
-        snippet = text[max(0, index - 12):index + 140].strip()
-        match = _DATETIME_RE.search(text, index, index + 240)
+        match = _DATETIME_RE.search(text, index, index + ACTIVITY_WINDOW)
         if match is None:
-            match = _DATETIME_RE.search(text)
+            # 这个关键词后面没有紧跟着时间（多半是别处的同名文字），换下一个关键词
+            continue
+        candidate = (match.start() - (index + len(keyword)), order, index, keyword, match)
+        if best is None or candidate[:2] < best[:2]:
+            best = candidate
+    if best is not None:
+        _, _, index, keyword, match = best
+        snippet = text[max(0, index - 12):index + 140].strip()
         return {"keyword": keyword, "snippet": snippet,
-                "last_seen": activity_value(text, match) if match else ""}
-    match = _DATETIME_RE.search(text)
+                "last_seen": activity_value(text, match)}
+    match = _ACTIVITY_TIME_RE.search(text)
     if match:
         snippet = text[max(0, match.start() - 40):match.end() + 60].strip()
         return {"keyword": "", "snippet": snippet, "last_seen": activity_value(text, match)}
     return {}
+
+
+def cookie_uid(cookie: str) -> str:
+    """从 NexusPHP 的 Cookie 里解出用户 ID：``c_secure_uid`` 是 base64 过的 uid。
+
+    自定义主题的站点首页常常不挂 ``userdetails.php?id=`` 链接，这时插件拿不到 uid、也就打不开
+    用户页，「最近动向」自然读不到——用 Cookie 里这份 uid 兜底即可。
+    """
+    match = re.search(r"(?:^|;\s*)c_secure_uid=([^;]+)", str(cookie or ""), re.IGNORECASE)
+    if not match:
+        return ""
+    value = urllib.parse.unquote(match.group(1).strip())
+    if not value:
+        return ""
+    try:
+        decoded = base64.b64decode(value + "=" * (-len(value) % 4)).decode("utf-8", "ignore")
+    except Exception:
+        return ""
+    decoded = decoded.strip()
+    return decoded if decoded.isdigit() else ""
 
 
 def read_activity(site: Mapping[str, Any], cookie: str, timeout: int = 30,
@@ -843,6 +888,7 @@ def read_activity(site: Mapping[str, Any], cookie: str, timeout: int = 30,
         return ActivityResult("failed", "登录态无效：站点把请求跳回了登录页")
     if cloudflare_pending(index_html):
         return ActivityResult("failed", "站点首页返回 Cloudflare 验证页，未能读取最近动向")
+    # 用户页优先：先试调用方给的 activity_path / 签到页，再试能定位到的 userdetails.php
     candidates: List[str] = []
     if path:
         candidates.append(str(path))
@@ -851,8 +897,10 @@ def read_activity(site: Mapping[str, Any], cookie: str, timeout: int = 30,
         if value:
             candidates.append(value)
     match = _UID_RE.search(index_html)
-    if match:
-        candidates.append(f"{DEFAULT_USERDETAILS_PATH}?id={match.group(1)}")
+    uid = match.group(1) if match else cookie_uid(cookie)
+    if uid:
+        # 自定义主题的首页不给 userdetails 链接时，用 Cookie 里的 uid 兜底，否则只能翻首页
+        candidates.append(f"{DEFAULT_USERDETAILS_PATH}?id={uid}")
     candidates.append(DEFAULT_INDEX_PATH)
     seen: set = set()
     for candidate in candidates:

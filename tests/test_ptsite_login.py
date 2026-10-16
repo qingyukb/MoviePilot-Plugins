@@ -240,6 +240,32 @@ class LoginCoreTests(unittest.TestCase):
                 self.assertEqual(result.status, "failed")
                 self.assertIn("Cloudflare", result.message)
 
+    def test_read_activity_falls_back_to_cookie_uid(self):
+        # 自定义主题的站点首页不挂 userdetails 链接时，用 Cookie 里的 c_secure_uid 兜底
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                session = FakeSession({
+                    "index.php": lambda s, u: FakeResponse(u, "<html><body>首页 没有用户页链接</body></html>"),
+                    "userdetails.php?id=12345": lambda s, u: FakeResponse(u, DETAIL_HTML),
+                })
+                with mock.patch.dict(sys.modules, {"requests": fake_requests(session)}):
+                    result = core.read_activity({"url": "https://queen.example/"},
+                                                "c_secure_uid=MTIzNDU%3D; c_secure_pass=x", timeout=5)
+                self.assertEqual(result.status, "success")
+                self.assertEqual(result.last_seen, "2026-10-16 08:12:03")
+                self.assertIn("userdetails.php?id=12345", result.source)
+
+    def test_read_activity_ignores_bare_dates(self):
+        # 首页只有种子列表里的裸日期时不能当成「最近动向」，如实报未找到
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                session = FakeSession({"index.php": lambda s, u: FakeResponse(
+                    u, "<html><body>种子 2026-09-18 某电影 2026-09-17 另一部</body></html>")})
+                with mock.patch.dict(sys.modules, {"requests": fake_requests(session)}):
+                    result = core.read_activity({"url": "https://queen.example/"}, "a=1", timeout=5)
+                self.assertEqual(result.status, "failed")
+                self.assertIn("最近动向", result.message)
+
     def test_read_activity_requires_cookie(self):
         for core in CORES:
             with self.subTest(core=core.__name__):

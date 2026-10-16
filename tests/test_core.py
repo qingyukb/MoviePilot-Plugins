@@ -342,6 +342,28 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertIn("立即签到", fallback["submit_text"])
         self.assertIn("button", fallback["submit_selector"])
 
+    def test_extract_activity_ignores_bare_dates(self):
+        # 种子列表 / 公告里的裸日期到处都是，不能当成「最近动向」（以前会误报 2026-09-18）
+        self.assertEqual(self.core.extract_activity(
+            "<html><body>种子 2026-09-18 某电影 2026-09-17 另一部</body></html>"), {})
+        self.assertEqual(self.core.extract_activity("<html><body>2026-09-18</body></html>"), {})
+
+    def test_extract_activity_picks_nearest_keyword_time(self):
+        # 关键词后面没时间就换下一个关键词，并取距离最近的那个
+        found = self.core.extract_activity(
+            "<html><body>上次访问 未公开 上次签到：2026-10-16 23:44:21</body></html>")
+        self.assertEqual(found["keyword"], "上次签到")
+        self.assertEqual(found["last_seen"], "2026-10-16 23:44:21")
+        # 新增的关键词（最后活跃 / 最近访问）也能命中
+        self.assertEqual(self.core.extract_activity(
+            "<html><body>最后活跃于 2026-10-17 08:00:12</body></html>")["last_seen"],
+            "2026-10-17 08:00:12")
+
+    def test_cookie_uid_decodes_nexusphp_cookie(self):
+        self.assertEqual(self.core.cookie_uid("c_secure_uid=Mjk1NTI%3D; c_secure_pass=x"), "29552")
+        self.assertEqual(self.core.cookie_uid("c_secure_uid=abc"), "")
+        self.assertEqual(self.core.cookie_uid(""), "")
+
     def test_fallback_rule_carries_cloudflare_wait(self):
         fallback = self.core.fallback_rule(
             {"engine": "http", "path": "/attendance.php", "cloudflare_wait": 25}, "cloudflare")
