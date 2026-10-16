@@ -47,7 +47,13 @@ ptsitesignin/
 
 ## 站点登录 + 最近动向
 
-默认仍复用 MoviePilot「站点管理」里的 Cookie。部分 NexusPHP 站点的 Cookie 容易过期，表现为签到一直跳登录页；这时可在插件配置中按域名或站点 ID 填写账号 JSON，插件会在每次签到前先真实登录一次、换回新 Cookie 再交给 HTTP / Browserless 引擎。
+凭证按下面的优先级合并，先取到的为准（插件配置优先级最高）：
+
+1. **插件配置的「站点登录账号 JSON」**（下表）；
+2. **MoviePilot「站点管理」里该站的「附加信息」(note)** —— V3 是 JSON 对象、V2 是 JSON 字符串，写 `{"username": "账号", "password": "密码"}` 即可，同样支持 `login_path` / `login_action` / `username_field` / `password_field` / `fields` / `activity_path`；
+3. **MoviePilot「站点管理」里保存的 Cookie** —— 没有账号密码时直接用这份 Cookie 签到，结果表「登录」列会标注「复用站点管理 Cookie」。
+
+MoviePilot 站点管理本身只保存 Cookie / ApiKey / Token / UA / 代理（V2、V3 的站点表都没有账号密码字段），所以账号密码要么写在插件配置里，要么写在站点管理的「附加信息」里。部分 NexusPHP 站点的 Cookie 容易过期，表现为签到一直跳登录页；填了账号后插件会在每次签到前先真实登录一次、换回新 Cookie 再交给 HTTP / Browserless 引擎。
 
 ```json
 {
@@ -70,8 +76,9 @@ ptsitesignin/
 - 默认登录路径为 `/login.php`，默认提交地址为 `/takelogin.php`；非标准 NexusPHP 站点可用 `login_path` / `login_action` 覆盖。
 - 默认字段名为 `username` / `password`，可用 `username_field` / `password_field` 覆盖；额外隐藏字段 / 两步验证字段可放进 `fields`。
 - 登录成功后会改用新 Cookie 签到。登录失败不会直接放弃整站：仍会用 MoviePilot 里已有的旧 Cookie 尝试签到，并在结果表「登录」列如实写明失败原因。
-- 打开「签到后读取「最近动向」」后，插件会用当前登录态打开站点首页，优先按 `activity_path`（可选）或首页发现的 `userdetails.php?id=...` 读取「最近动向 / 上次访问 / 上次签到」等时间，显示在结果表与通知中。
-- 账号密码只保存在 MoviePilot 插件配置中，不写入签到结果或日志；不填账号时行为与旧版一致。
+- 打开「签到后读取「最近动向」」后，插件会按 `activity_path`（可选）→ 签到页 / 校验页（如观众的 `/attendance.php`）→ 首页发现的 `userdetails.php?id=...` → 首页 的顺序读取「最近动向 / 上次访问 / 上次签到」，显示在结果表与通知中。
+- 「最近动向」会把站点自带的相对时间一起取出，例如站点写 `最近动向：2026-10-16 23:44:21 ( < 1分前 )` 时，插件就原样显示 `2026-10-16 23:44:21 ( < 1分前 )`；站点没写相对时间时只显示时间。
+- 账号密码只保存在 MoviePilot 插件配置 / 站点管理里，不写入签到结果或日志；两者都没有账号密码时行为与旧版一致。
 
 ## 并发与失败重试
 
@@ -166,8 +173,8 @@ ptsitesignin/
 | 执行周期 | 5 位 Cron | `25 8 * * *` |
 | 保存后立即执行一次 | 保存后由**后台调度器**延后 3 秒跑一轮，不阻塞设置页；跳过失败重试 | 关 |
 | 签到站点 | 多选，仅列出已保存 Cookie 的站点 | 空 |
-| 站点登录账号 JSON | 按域名 / 站点 ID 配置 username / password；签到前真实登录换新 Cookie，可选 login_path、login_action、username_field、password_field、fields、activity_path | 空 |
-| 签到后读取「最近动向」 | 用登录态打开用户页，把最近动向时间 / 片段写入结果表和通知 | 开 |
+| 站点登录账号 JSON | 按域名 / 站点 ID 配置 username / password，优先于站点管理里的同名配置；留空时自动读 MoviePilot 站点管理里该站的「附加信息」(note) 与 Cookie。可选 login_path、login_action、username_field、password_field、fields、activity_path | 空 |
+| 签到后读取「最近动向」 | 用登录态打开站点页面，把最近动向时间 + 相对时间（如 `2026-10-16 23:44:21 ( < 1分前 )`）写入结果表和通知 | 开 |
 | 通知模式 | 每次执行后 / 仅失败时 / 不通知 | 每次执行后 |
 | 并发数 | 同时签到站点数 | 2 |
 | HTTP 超时 | 秒 | 30 |

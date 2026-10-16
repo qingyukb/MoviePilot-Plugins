@@ -8,8 +8,11 @@
 引擎默认按站点规则自动判定；未显式声明引擎的站点在 HTTP 直连撞上 Cloudflare
 或验证码时，会自动改用 Browserless 重试一次（可在配置中关闭）。
 
-配置「站点登录账号 JSON」后，每次签到前会先用账号密码真实登录站点、换回新的 Cookie
-再交给签到引擎；签到结束后再打开用户页读取站点展示的「最近动向」，写入结果页与通知。
+站点登录凭证优先读插件配置的「站点登录账号 JSON」，也可以直接写在 MoviePilot「站点管理」
+里该站的「附加信息」(note)；两者都没有时复用站点管理里保存的 Cookie 签到。每次签到前
+先用账号密码真实登录站点、换回新的 Cookie 再交给签到引擎；签到结束后再打开站点页面读取
+站点展示的「最近动向」（含站点自带的相对时间，如 2026-10-16 23:44:21 ( < 1分前 )），
+写入结果页与通知。
 
 参考 tmzg0000/moviepilot-plugins 的插件规范编写。
 """
@@ -42,9 +45,12 @@ from .core import (
     BrowserlessSigner,
     SignResult,
     account_for,
+    account_from_site,
+    account_ready,
     fallback_rule,
     http_sign,
     login as site_login,
+    merge_accounts,
     parse_accounts,
     parse_rules,
     read_activity,
@@ -59,7 +65,7 @@ class PTSiteSignIn(_PluginBase):
     plugin_desc = ("双引擎 PT 签到，可选真实登录刷新 Cookie 并读取站点「最近动向」：HTTP 直连签到接口，"
                    "或经 Browserless 完成验证码 / Cloudflare / Turnstile 挑战。")
     plugin_icon = "signin.png"
-    plugin_version = "1.1.0"
+    plugin_version = "1.2.0"
     plugin_author = "qingyu"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "ptsignin_"
@@ -305,7 +311,9 @@ class PTSiteSignIn(_PluginBase):
                  "content": [{"component": "VTextarea", "props": {"model": "site_accounts",
                              "label": "站点登录账号 JSON（可留空）", "rows": 6,
                              "hint": '键为域名或站点 ID，例如 {"audiences.me":{"username":"账号","password":"密码"}}。'
-                                     '填写后每次签到前先用账号密码真实登录（NexusPHP takelogin.php）换回新 Cookie 再签到；'
+                                     '凭证优先取这里（可覆盖站点管理）；留空时自动读 MoviePilot 站点管理里该站的'
+                                     '「附加信息」( {"username":"账号","password":"密码"} ) 与保存的 Cookie。'
+                                     '登录成功后换回的新 Cookie 会用于签到；'
                                      '可选字段 login_path / login_action / username_field / password_field / fields / activity_path',
                              "persistent-hint": True}}]},
             ]},
@@ -379,8 +387,15 @@ class PTSiteSignIn(_PluginBase):
 
     @staticmethod
     def _site_dict(site: Any) -> Dict[str, Any]:
+        """把 MoviePilot「站点管理」的记录转成普通字典。
+
+        除签到要用的 Cookie / UA / 代理 / 站点规则外，一并带上附加信息(note)、ApiKey、
+        Token 与超时，登录凭证可以写在站点管理的附加信息里（见 core.account_from_site）。
+        """
         return {key: getattr(site, key, None)
-                for key in ("id", "name", "url", "cookie", "ua", "proxy", "rule")}
+                for key in ("id", "name", "domain", "url", "cookie", "ua", "proxy", "rule",
+                            "apikey", "token", "note", "timeout",
+                            "username", "user", "account", "password", "passwd", "pwd")}
 
     def _should_init_signer(self, infos: List[Dict[str, Any]],
                            rules: Dict[str, Dict[str, Any]]) -> bool:
@@ -406,10 +421,13 @@ class PTSiteSignIn(_PluginBase):
         logger.info("PT站点签到：开始 %s", site_name)
         engine = "http"
         login_text = ""
-        # 站点登录：配置了账号时先用账号密码真实登录，换回新的 Cookie 再签到。登录失败不
-        # 直接判整站失败——仍用站点管理里的旧 Cookie 试一次，并如实记录登录失败原因。
-        account = account_for(info, getattr(self, "_accounts", None) or {})
-        if account:
+        rule: Dict[str, Any] = {}
+        # 站点登录：凭证优先取插件配置的账号 JSON（可覆盖站点管理），其次取 MoviePilot
+        # 「站点管理」里该站的附加信息 / 账号字段；都没有账号密码时直接复用站点管理保存
+        # 的 Cookie 签到。登录失败不直接判整站失败——仍用旧 Cookie 试一次，并如实记录原因。
+        account = merge_accounts(account_from_site(info),
+                                 account_for(info, getattr(self, "_accounts", None) or {}))
+        if account_ready(account):
             proxies = self._proxies() if self._proxy else None
             try:
                 login_result = site_login(info, account, timeout=self._timeout, proxies=proxies)
@@ -424,6 +442,14 @@ class PTSiteSignIn(_PluginBase):
                 else:
                     login_text = "失败：" + login_result.message
                     logger.warning("PT站点签到：%s 真实登录失败 - %s", site_name, login_result.message)
+        elif account:
+            # 站点管理 / 配置里只写了半截凭证（比如只有用户名），没法做真实登录
+            login_text = "未提供可用的账号密码"
+            logger.info("PT站点签到：%s 的账号信息不完整，只复用站点管理里的 Cookie", site_name)
+        elif str(info.get("cookie") or "").strip():
+            # 站点管理里只有 Cookie（MoviePilot 站点管理不保存账号密码），直接拿它签到
+            login_text = "复用站点管理 Cookie"
+            logger.info("PT站点签到：%s 未配置账号密码，复用站点管理里的 Cookie", site_name)
         try:
             rule = resolve_rule(info, rules)
             engine = str(rule["engine"])
@@ -446,22 +472,28 @@ class PTSiteSignIn(_PluginBase):
             logger.info("PT站点签到：%s %s", site_name, outcome.message)
         else:
             logger.warning("PT站点签到：%s 失败 - %s", site_name, outcome.message)
-        activity_text = self._read_site_activity(info) if self._read_activity else ""
+        activity_text = self._read_site_activity(info, rule) if self._read_activity else ""
         return {"site": site_name, "site_id": str(info.get("id") or ""),
                 "state_key": site_state_key(info), "engine": engine,
                 "status": outcome.status, "message": outcome.message,
                 "login": login_text, "activity": activity_text, "ran_at": self._now()}
 
-    def _read_site_activity(self, info: Dict[str, Any]) -> str:
-        """用登录态 Cookie 打开用户页，返回站点展示的「最近动向」文案。"""
+    def _read_site_activity(self, info: Dict[str, Any],
+                            rule: Optional[Dict[str, Any]] = None) -> str:
+        """用登录态 Cookie 打开站点页面，返回站点展示的「最近动向」原文。"""
         cookie = str(info.get("cookie") or "").strip()
         if not cookie:
             return ""
-        account = account_for(info, getattr(self, "_accounts", None) or {}) or {}
+        account = merge_accounts(account_from_site(info),
+                                 account_for(info, getattr(self, "_accounts", None) or {}))
+        rule = rule or {}
+        # 站点常把「最近动向」放在签到页 / 校验页（例如观众 attendance.php），一并作为候选
+        paths = [str(rule.get("path") or ""), str(rule.get("verify_success_path") or "")]
         try:
             activity = read_activity(info, cookie, timeout=self._timeout,
                                      proxies=self._proxies() if self._proxy else None,
-                                     path=str(account.get("activity_path") or "") or None)
+                                     path=str(account.get("activity_path") or "") or None,
+                                     paths=paths)
         except Exception:
             logger.exception("PT站点签到：读取最近动向失败")
             return ""

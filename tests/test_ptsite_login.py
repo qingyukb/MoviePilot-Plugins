@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 import types
 import unittest
@@ -215,6 +216,62 @@ class LoginCoreTests(unittest.TestCase):
                 self.assertEqual(result.status, "failed")
                 self.assertIn("Cookie", result.message)
 
+    def test_extract_activity_keeps_site_relative_time(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                html = ("<html><body><div>最近动向：2026-10-16 23:44:21 ( < 1分前 )</div>"
+                        "<div>上次签到：2026-10-15 09:00:00</div></body></html>")
+                found = core.extract_activity(html)
+                self.assertEqual(found["last_seen"], "2026-10-16 23:44:21 ( < 1分前 )")
+                full_width = core.extract_activity("<html><body>最近動向：2026-10-16 23:44:21（3 小时前）</body></html>")
+                self.assertEqual(full_width["last_seen"], "2026-10-16 23:44:21 （3 小时前）")
+                self.assertEqual(core.relative_suffix("2026-10-16 23:44:21", 19), "")
+
+    def test_account_from_site_reads_note_and_record_fields(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                v2_note = json.dumps({"username": "u", "password": "p",
+                                      "activity_path": "/userdetails.php?id=9"})
+                account = core.account_from_site({"url": "https://audiences.me/",
+                                                  "cookie": "c=1", "note": v2_note})
+                self.assertTrue(core.account_ready(account))
+                self.assertEqual(account["username"], "u")
+                self.assertEqual(account["password"], "p")
+                self.assertEqual(account["activity_path"], "/userdetails.php?id=9")
+                v3_account = core.account_from_site({"note": {"username": "u2", "password": "p2"}})
+                self.assertEqual(v3_account["password"], "p2")
+                self.assertTrue(core.account_ready(core.account_from_site(
+                    {"username": "u", "password": "p"})))
+                # 只有 Cookie / 只有用户名都不算可登录凭证
+                self.assertFalse(core.account_ready(core.account_from_site(
+                    {"url": "https://audiences.me/", "cookie": "c=1"})))
+                self.assertFalse(core.account_ready(core.account_from_site({"username": "u"})))
+                self.assertFalse(core.account_ready(core.account_from_site({"note": "纯文本备注"})))
+
+    def test_merge_accounts_prefers_configured_one(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                merged = core.merge_accounts(
+                    {"username": "site", "password": "site-pw", "activity_path": "/a"},
+                    {"username": "cfg", "password": "cfg-pw"}, None)
+                self.assertEqual(merged["username"], "cfg")
+                self.assertEqual(merged["password"], "cfg-pw")
+                self.assertEqual(merged["activity_path"], "/a")
+                self.assertEqual(core.merge_accounts(None, {}), {})
+
+    def test_read_activity_uses_extra_paths(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                attendance = ("<html><body>最近动向：2026-10-16 23:44:21 ( < 1分前 )"
+                              "</body></html>")
+                session = FakeSession({"index.php": lambda s, u: FakeResponse(u, INDEX_HTML),
+                                       "/attendance.php": lambda s, u: FakeResponse(u, attendance)})
+                with mock.patch.dict(sys.modules, {"requests": fake_requests(session)}):
+                    result = core.read_activity({"url": "https://audiences.me/"}, "c_secure_uid=1",
+                                                timeout=5, paths=["/attendance.php"])
+                self.assertEqual(result.status, "success")
+                self.assertEqual(result.last_seen, "2026-10-16 23:44:21 ( < 1分前 )")
+                self.assertIn("/attendance.php", session.calls[1][1])
     def test_cookie_header_joins_pairs(self):
         for core in CORES:
             with self.subTest(core=core.__name__):

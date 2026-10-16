@@ -14,7 +14,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 DEFAULT_HTTP_PATH = "/attendance.php"
 DEFAULT_SUCCESS_PATTERN = r"(state['\"]?\s*[:=]\s*['\"]?success|签到成功|簽到成功|签到 成功)"
@@ -399,7 +399,8 @@ def plain_text(content: str) -> str:
     """去掉注释、script/style 与 HTML 标签并压缩空白，便于按文案匹配。"""
     text = re.sub(r"<!--.*?-->", " ", content, flags=re.DOTALL)
     text = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", text, flags=re.IGNORECASE | re.DOTALL)
-    text = re.sub(r"<[^>]+>", " ", text)
+    # 标签名必须以字母开头，避免把站点相对时间里的 <（如 " < 1分前"）当成标签吞掉
+    text = re.sub(r"</?[a-zA-Z][^>]*>", " ", text)
     return re.sub(r"\s+", " ", text).strip()
 
 
@@ -521,6 +522,10 @@ ACTIVITY_KEYWORDS = ("最近动向", "最近動向", "最近活动", "最近活�
                      "上次签到", "上次簽到", "最后访问", "最後訪問", "上次登录", "上次登入")
 # 站点常见的时间格式（NexusPHP 多为 YYYY-MM-DD HH:MM:SS）
 DATETIME_PATTERN = r"(\d{4}[-/.]\d{1,2}[-/.]\d{1,2}(?:[ T]\d{1,2}:\d{2}(?::\d{2})?)?)"
+# 站点常常在时间后面再补一段相对时间，例如「最近动向：2026-10-16 23:44:21 ( < 1分前 )」
+RELATIVE_TIME_PATTERN = r"\s*([（(]\s*[^（()）]{0,16}?前\s*[)）])"
+_DATETIME_RE = re.compile(DATETIME_PATTERN)
+_RELATIVE_TIME_RE = re.compile(RELATIVE_TIME_PATTERN)
 
 _FORM_BLOCK_RE = re.compile(r"<form\b([^>]*)>(.*?)</form>", re.IGNORECASE | re.DOTALL)
 _INPUT_RE = re.compile(r"<input\b[^>]*>", re.IGNORECASE)
@@ -578,6 +583,66 @@ def account_for(site: Mapping[str, Any], accounts: Mapping[str, Mapping[str, Any
         if key and key in accounts:
             return dict(accounts[key])
     return None
+
+
+# MoviePilot「站点管理」(SiteOper) 保存的是 Cookie / ApiKey / Token / UA / 代理等，没有账号
+# 密码输入框；账号密码可以写在站点管理的「附加信息」(note) 里（V3 是 JSON 对象，V2 是字符
+# 串），插件会自动解析；同时兼容站点记录里以后可能出现的 username / password 字段。
+SITE_ACCOUNT_FIELDS = ("username", "user", "account", "password", "passwd", "pwd",
+                       "login_path", "login_action", "username_field", "password_field",
+                       "fields", "activity_path")
+
+
+def note_object(note: Any) -> Dict[str, Any]:
+    """把站点管理的「附加信息」解析成字典（V3 本来就是对象，V2 是 JSON 字符串）。"""
+    if isinstance(note, Mapping):
+        return dict(note)
+    if isinstance(note, str):
+        raw = note.strip()
+        if raw.startswith("{"):
+            try:
+                value = json.loads(raw)
+            except ValueError:
+                return {}
+            if isinstance(value, Mapping):
+                return dict(value)
+    return {}
+
+
+def account_from_site(site: Mapping[str, Any]) -> Dict[str, Any]:
+    """从 MoviePilot「站点管理」的站点记录里取登录凭证与登录选项（取不到时返回空字典）。"""
+    account: Dict[str, Any] = {}
+    for source in (note_object(site.get("note")), site):
+        if not isinstance(source, Mapping):
+            continue
+        for key in SITE_ACCOUNT_FIELDS:
+            value = source.get(key)
+            if value not in (None, "") and key not in account:
+                account[key] = value
+    username = str(account.get("username") or account.get("user")
+                   or account.get("account") or "").strip()
+    password = str(account.get("password") or account.get("passwd") or account.get("pwd") or "")
+    if username:
+        account["username"] = username
+    if password:
+        account["password"] = password
+    return account
+
+
+def account_ready(account: Optional[Mapping[str, Any]]) -> bool:
+    """凭证是否够做一次账号密码登录。"""
+    if not account:
+        return False
+    return bool(str(account.get("username") or "").strip() and str(account.get("password") or ""))
+
+
+def merge_accounts(*accounts: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    """按优先级合并登录凭证，后面的覆盖前面的。"""
+    merged: Dict[str, Any] = {}
+    for account in accounts:
+        if account:
+            merged.update(dict(account))
+    return merged
 
 
 def _tag_attrs(tag: str) -> Dict[str, str]:
@@ -684,6 +749,19 @@ def _normalize_time(value: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[/.]", "-", str(value or "").strip()))
 
 
+def relative_suffix(text: str, start: int) -> str:
+    """取出紧跟在时间后面的相对时间括号，例如「( < 1分前 )」。"""
+    match = _RELATIVE_TIME_RE.match(text[start:start + 32])
+    return re.sub(r"\s+", " ", match.group(1)).strip() if match else ""
+
+
+def activity_value(text: str, match: Any) -> str:
+    """时间 + 站点自带的相对时间，例如「2026-10-16 23:44:21 ( < 1分前 )」。"""
+    value = _normalize_time(match.group(1))
+    suffix = relative_suffix(text, match.end())
+    return f"{value} {suffix}" if suffix else value
+
+
 def extract_activity(html: str) -> Dict[str, str]:
     """从用户页里抓「最近动向」片段与其中的时间，返回 keyword / snippet / last_seen。"""
     text = plain_text(html or "")
@@ -692,22 +770,26 @@ def extract_activity(html: str) -> Dict[str, str]:
         if index < 0:
             continue
         snippet = text[max(0, index - 12):index + 140].strip()
-        match = re.search(DATETIME_PATTERN, snippet)
+        match = _DATETIME_RE.search(text, index, index + 240)
         if match is None:
-            match = re.search(DATETIME_PATTERN, text[index:index + 240])
+            match = _DATETIME_RE.search(text)
         return {"keyword": keyword, "snippet": snippet,
-                "last_seen": _normalize_time(match.group(1)) if match else ""}
-    match = re.search(DATETIME_PATTERN, text)
+                "last_seen": activity_value(text, match) if match else ""}
+    match = _DATETIME_RE.search(text)
     if match:
-        snippet = text[max(0, match.start() - 40):match.end() + 40].strip()
-        return {"keyword": "", "snippet": snippet, "last_seen": _normalize_time(match.group(1))}
+        snippet = text[max(0, match.start() - 40):match.end() + 60].strip()
+        return {"keyword": "", "snippet": snippet, "last_seen": activity_value(text, match)}
     return {}
 
 
 def read_activity(site: Mapping[str, Any], cookie: str, timeout: int = 30,
                   proxies: Optional[Dict[str, str]] = None,
-                  path: Optional[str] = None) -> ActivityResult:
-    """用登录态 Cookie 打开用户页，读取站点展示的「最近动向」。"""
+                  path: Optional[str] = None,
+                  paths: Optional[Sequence[str]] = None) -> ActivityResult:
+    """用登录态 Cookie 打开用户页，读取站点展示的「最近动向」。
+
+    path 优先，paths 是调用方按站点规则补充的候选页面（比如签到页 / 校验页）。
+    """
     base_url = str(site.get("url") or "").rstrip("/")
     cookie = str(cookie or "").strip()
     if not base_url or not cookie:
@@ -731,6 +813,10 @@ def read_activity(site: Mapping[str, Any], cookie: str, timeout: int = 30,
     candidates: List[str] = []
     if path:
         candidates.append(str(path))
+    for extra in paths or ():
+        value = str(extra or "").strip()
+        if value:
+            candidates.append(value)
     match = _UID_RE.search(index_html)
     if match:
         candidates.append(f"{DEFAULT_USERDETAILS_PATH}?id={match.group(1)}")

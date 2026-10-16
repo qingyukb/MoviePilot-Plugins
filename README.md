@@ -22,9 +22,9 @@
 
 主要功能：
 
-- 默认复用 MoviePilot 已保存的站点 Cookie 与 UA；也可在插件里按域名 / 站点 ID 选填站点账号，签到前真实登录换回新 Cookie
+- 默认复用 MoviePilot「站点管理」已保存的站点 Cookie 与 UA；站点账号可以写在插件配置里（按域名 / 站点 ID），也可以写在站点管理的「附加信息」(note) 中（`{"username": "...", "password": "..."}`），签到前真实登录换回新 Cookie
 - 内置 Audiences、OpenCD、包子、慕雪阁、OshenPT、LuckPT、YemaPT、HDSky、dstudio.me、mua.xloli.cc、share.ilolicon.com 的签到预设，按域名自动匹配
-- 签到后用登录态打开站点用户页，读取「最近动向」（上次访问 / 上次签到等）并写入结果表与通知；未配置账号时保持原有 Cookie 签到行为
+- 签到后用登录态打开站点页面（配置的 `activity_path` → 签到页 / 校验页 → 用户页 → 首页），读取「最近动向」（上次访问 / 上次签到等）并连站点自带的相对时间一起写入结果表与通知，形如 `2026-10-16 23:44:21 ( < 1分前 )`；没有账号密码时直接用站点管理里的 Cookie 签到，并在结果表标注「复用站点管理 Cookie」
 - 观众（Audiences）签到页内嵌 Cloudflare Turnstile：实测该组件渲染在 **closed shadow DOM** 中，DOM/CSS 与 BrowserQL 深度选择器都命不中复选框，因此改为官方 `solve`（内置支持 iframe / shadow DOM 内的验证码）生成 token，再由 `submit_method=auto` 的脚本触发站点 `cfCallback`、必要时按表单 action 兜底 POST `/attendance.php`；两段验证用 `solve_timeout=40000`、`solve2_timeout=50000`、`solve2_wait=5000`、`cloudflare_wait=15`、`auto_wait=30000` 分别给预算
 - BrowserQL 单步失败（如 `solve` 超时）不会中止整个 mutation，插件不再把它当成整轮失败：失败步骤的错误会并入诊断，页面或回查已显示签到成功时仍如实上报成功
 - 观众签到后会跳回首页，插件在同一浏览器会话回查 `/attendance.php` 并等待 8 秒，只有看到真实的已签到 / 签到成功状态才上报成功；仍停留在人机验证页或 302 到 `login.php` 时分别给出明确失败原因
