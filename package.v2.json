@@ -26,14 +26,15 @@
   },
   "MTeamLogin": {
     "name": "馒头登录",
-    "description": "从 MoviePilot「站点管理」读取馒头（M-Team）站点的 Token / API Key，真实认证并调用保活心跳 updateLastBrowse，再校验最近动向时间。",
+    "description": "从 MoviePilot「站点管理」读取馒头（M-Team）站点的 Token（authorization）/ 备注账号密码，真实登录换取 authorization 并调用保活心跳 updateLastBrowse，再校验最近动向时间；API Key 只能读取、不能保活。",
     "labels": "站点,登录",
-    "version": "1.1.0",
+    "version": "1.2.0",
     "icon": "https://raw.githubusercontent.com/qingyukb/MoviePilot-Plugins/main/icons/mteam.png",
     "author": "qingyu",
     "level": 2,
     "system_version": ">=2.0.0,<3.0.0",
-    "history": {
+        "history": {
+      "v1.2.0": "改为「真实登录 + 保活」，并明确 API Key 调用不算活跃：实测用站点「API Key」(x-api-key) 调 POST /api/member/updateLastBrowse 一律返回 401 Full authentication is required，站点只认真实登录的 authorization(JWT) 心跳。保活现在只走三条真实登录链路——站点管理里的 Token(authorization)、Cookie 里解析出的 authorization、站点「备注(note)」里的账号密码 JSON（插件会 POST /api/login 真实登录换取新的 authorization）；Token 没填或已过期时自动回退到备注账号密码重新登录；保活失败时仍会读取并展示账号真实的旧「最近动向」，并给出站点管理修复建议。",
       "v1.1.0": "改为真实登录 + 保活：删除全部手填凭证（用户名、密码、OTP 密钥/动态码、邮箱/Telegram 验证码、手动 API Key），凭证只从「站点管理」读取；每一轮先调用 POST /member/updateLastBrowse 保活心跳，再读 /member/profile 校验 memberStatus.lastBrowse，保活正常时最近动向应为「刚刚 / 1 分钟前」；详情页与通知新增保活状态，保活失败会直接给出站点管理修复建议。",
       "v1.0.2": "接口地址改为多候选自动回退：优先用按「站点管理」站点地址推导的后端（api.<域名>/api），不可用时依次回退 api.m-team.cc → api.m-team.io → api2.m-team.cc；当接口返回「请求方法不支持」时自动改用 POST 重试。发送失败时会在日志附上实际请求地址（METHOD URL），方便前后端分离站点排查；仍严格只读 member/profile，绝不调用 updateLastBrowse。",
       "v1.0.1": "凭证改为从 MoviePilot「站点管理」自动读取：自动识别馒头（M-Team）站点，直接使用其中的 API Key（实测 x-api-key 无需签名即可读取 /member/profile）、User-Agent、代理与超时，并按站点地址推导 API 基址；无需再手填账号密码，仍保留可选的账号密码登录与手动 API Key 覆盖。",

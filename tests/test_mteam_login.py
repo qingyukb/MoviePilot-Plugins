@@ -30,8 +30,8 @@ UNIX_VECTOR = ("GET", "/api/system/unix", 1792147191401, "FyDVc1yB4xNZwd554jpZXR
 KEEPALIVE_PATH = "/member/updateLastBrowse"
 # JWT 形状的令牌（三段、每段足够长），用来保证只展开出一种认证方案
 JWT_TOKEN = "headerxx.payloadyy.signature"
-# 插件绝对不该碰的其它写接口。
-FORBIDDEN_PATHS = ("/member/revokeSession", "/member/logout", "/login",
+# 插件绝对不该碰的其它写接口（/login 只在站点管理里配了账号密码时才会调用）。
+FORBIDDEN_PATHS = ("/member/revokeSession", "/member/logout",
                    "/member/updateLastBrowse2")
 
 
@@ -123,6 +123,17 @@ def multipart_values(body: str) -> dict:
         name = head.split('name="', 1)[1].split('"', 1)[0]
         values[name] = tail.rstrip("-\r\n")
     return values
+
+
+def login_ok(token=JWT_TOKEN):
+    """真实登录成功的响应：authorization 只在**响应头**返回（前端存进 localStorage.auth）。"""
+    return 200, {"authorization": token}, {
+        "code": 0, "message": "success",
+        "data": {"member": {"id": 12345, "username": "tester"}}}
+
+
+def login_needs_otp():
+    return 200, {}, {"code": 1001, "message": "需要二次验证", "data": ["otp"]}
 
 
 def keepalive_ok():
@@ -220,14 +231,44 @@ class RequestShapeTests(unittest.TestCase):
                                            1792147233564))
                 self.assertEqual(request["headers"]["authorization"], "TOKEN")
 
-    def test_keepalive_uses_x_api_key_for_api_key_plan(self):
+    def test_keepalive_refuses_api_key_plan(self):
+        """API Key 调用不算活跃：保活接口直接拒绝只读凭证，连请求都不发。"""
         for core in CORES:
             with self.subTest(core=core.__name__):
-                client, opener = build_client(core, [keepalive_ok()])
-                client.keepalive(plan=core.AuthPlan(name="k", api_key="AK"))
-                headers = recorded(opener)[0]["headers"]
-                self.assertEqual(headers["x-api-key"], "AK")
-                self.assertNotIn("authorization", headers)
+                client, opener = build_client(core, [])
+                with self.assertRaises(core.MTeamError):
+                    client.keepalive(plan=core.AuthPlan(name="k", api_key="AK"))
+                self.assertEqual(opener.requests, [])
+
+    def test_login_is_signed_multipart_post_with_account(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                client, opener = build_client(core, [login_ok("NEWTOKEN"),
+                                                     keepalive_ok(),
+                                                     profile_ok(1792147191401)])
+                creds = core.Credentials(username="tester", password="secret",
+                                         otp_secret="JBSWY3DPEHPK3PXP")
+                report = client.fetch_last_browse(credentials=creds)
+                self.assertTrue(report.ok, report.message)
+                self.assertTrue(report.login_used)
+                self.assertTrue(report.login_ok)
+                requests = recorded(opener)
+                self.assertEqual([item["path"] for item in requests],
+                                 ["/api/login", "/api/member/updateLastBrowse",
+                                  "/api/member/profile"])
+                login = requests[0]
+                self.assertEqual(login["method"], "POST")
+                self.assertIn("multipart/form-data; boundary=",
+                              login["headers"]["content-type"])
+                fields = multipart_values(login["body"])
+                self.assertEqual(fields["username"], "tester")
+                self.assertEqual(fields["password"], "secret")
+                self.assertEqual(fields["_sgin"],
+                                 core.sign("POST", "/api/login", int(fields["_timestamp"])))
+                # 登录换到的 authorization 必须原样用在保活心跳上
+                self.assertEqual(requests[1]["headers"]["authorization"], "NEWTOKEN")
+                self.assertNotIn("x-api-key", requests[1]["headers"])
+                self.assertIn("真实登录", report.message)
 
     def test_profile_request_signs_query_and_sends_authorization(self):
         for core in CORES:
@@ -290,7 +331,8 @@ class KeepAliveFlowTests(unittest.TestCase):
     def test_keepalive_failure_is_reported_with_site_management_hint(self):
         for core in CORES:
             with self.subTest(core=core.__name__):
-                client, _opener = build_client(core, [keepalive_denied()])
+                client, _opener = build_client(core, [keepalive_denied(),
+                                                      profile_ok(1600000000000)])
                 # 用 JWT 形状的令牌，保证只展开出一种认证方案
                 report = client.fetch_last_browse(
                     credentials=core.Credentials(token=JWT_TOKEN), site_label="m-team.cc")
@@ -298,21 +340,59 @@ class KeepAliveFlowTests(unittest.TestCase):
                 self.assertFalse(report.keepalive_ok)
                 self.assertIn("保活", report.message)
                 self.assertIn("站点管理", report.message)
+                # 账号真实的最近动向要如实展示出来（而不是假装成功）
+                self.assertEqual(report.last_browse.raw, 1600000000000)
 
-    def test_api_key_plan_is_tried_when_token_is_rejected(self):
+    def test_api_key_only_reads_and_never_keeps_alive(self):
+        """Token 被拒 + 有 API Key：保活必须失败，但要用 API Key 读出真实的最近动向。"""
         for core in CORES:
             with self.subTest(core=core.__name__):
-                # Token 被拒 -> 自动改用站点管理里的 API Key 保活成功
                 client, opener = build_client(core, [keepalive_denied(),
-                                                     keepalive_ok(),
-                                                     profile_ok(1792147191401)])
+                                                     profile_ok(1600000000000)])
                 creds = core.Credentials(token=JWT_TOKEN, api_key="AK")
                 report = client.fetch_last_browse(credentials=creds)
-                self.assertTrue(report.ok, report.message)
-                self.assertTrue(report.keepalive_ok)
+                self.assertFalse(report.ok)
+                self.assertFalse(report.keepalive_ok)
+                # 站点里真实的（很旧的）最近动向必须被读出来，而不是留空
+                self.assertEqual(report.last_browse.raw, 1600000000000)
                 requests = recorded(opener)
+                # 保活只发了一次（用 Token），API Key 只用于只读 profile
+                self.assertEqual([item["path"] for item in requests],
+                                 ["/api" + KEEPALIVE_PATH, "/api/member/profile"])
                 self.assertEqual(requests[1]["headers"]["x-api-key"], "AK")
-                self.assertIn("API Key", report.credential)
+                self.assertEqual(requests[0]["headers"]["authorization"], JWT_TOKEN)
+                self.assertIn("API Key", report.message)
+
+    def test_expired_site_token_falls_back_to_real_login(self):
+        """站点 Token 过期且备注里有账号密码时，直接真实登录换新令牌再保活。"""
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                expired = ("eyJhbGciOiJIUzI1NiJ9."
+                           "eyJleHAiOjE2MDAwMDAwMDB9."
+                           "c2lnbmF0dXJl")
+                self.assertTrue(core.jwt_expired(expired))
+                client, opener = build_client(core, [login_ok("NEWTOKEN"), keepalive_ok(),
+                                                     profile_ok(1792147191401)])
+                creds = core.Credentials(token=expired, username="tester",
+                                         password="secret")
+                report = client.fetch_last_browse(credentials=creds)
+                self.assertTrue(report.ok, report.message)
+                self.assertTrue(report.login_used)
+                # 过期的 Token 不再白跑一次保活请求
+                self.assertEqual([item["path"] for item in recorded(opener)],
+                                 ["/api/login", "/api/member/updateLastBrowse",
+                                  "/api/member/profile"])
+
+    def test_login_needing_otp_is_reported(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                client, _opener = build_client(core, [login_needs_otp()])
+                creds = core.Credentials(username="tester", password="secret")
+                report = client.fetch_last_browse(credentials=creds)
+                self.assertFalse(report.ok)
+                self.assertTrue(report.login_used)
+                self.assertFalse(report.login_ok)
+                self.assertIn("二步验证", report.message)
 
     def test_stale_last_browse_after_keepalive_is_flagged(self):
         for core in CORES:
@@ -368,7 +448,7 @@ class KeepAliveFlowTests(unittest.TestCase):
             with self.subTest(core=core.__name__):
                 client = core.MTeamClient(host=core.DEFAULT_API_HOST, timeout=10)
                 # 直接给一个 HTML 403 响应，模拟打到了 nginx 前端
-                client._opener = RawOpener([FakeHtmlResponse()])
+                client._opener = RawOpener([FakeHtmlResponse(), FakeHtmlResponse()])
                 report = client.fetch_last_browse(
                     credentials=core.Credentials(token=JWT_TOKEN))
                 self.assertFalse(report.api_ok)

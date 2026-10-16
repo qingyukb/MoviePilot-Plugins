@@ -1,16 +1,22 @@
 # -*- coding: utf-8 -*-
 """馒头（M-Team）登录 + 保活插件（MoviePilot V2/V3）。
 
-前端 kp.m-team.cc / 后端 api.m-team.cc 前后端分离。插件在每一轮都会：
+前端 kp.m-team.cc / 后端 api.m-team.cc 前后端分离，插件每一轮都走**真实登录**这条链路：
 
-1. 从 MoviePilot「站点管理」自动识别馒头站点，只读取该站点里的 Token / API Key / Cookie；
+1. 从 MoviePilot「站点管理」自动识别馒头站点，读取该站点里的 Token / API Key / Cookie
+   以及备注(note)里可选的账号密码；插件本身不接收任何手填凭证；
 2. 用站点自己的签名算法调用后端 api.<域名>/api；
-3. 调用 POST /api/member/updateLastBrowse 做**保活心跳**（前端登录成功后也是马上调这个接口），
-   把账号的「最近动向」刷新成当前时间；
-4. 再读 GET /api/member/profile 的 data.memberStatus.lastBrowse 做校验。
+3. 真实登录：优先用站点管理里已有的 authorization（浏览器登录后拿到的 JWT）；
+   没有或已过期时，用备注里的账号密码 POST /api/login 换一个新的 authorization；
+4. 用真实登录态调用 POST /api/member/updateLastBrowse 做**保活心跳**
+   （前端登录成功后也是马上调这个接口），把账号的「最近动向」刷新成当前时间；
+5. 再读 GET /api/member/profile 的 data.memberStatus.lastBrowse 做校验。
 
-保活正常时，「最近动向」应该永远是「刚刚 / 1 分钟前」；如果它还是几天前，说明凭证没有通过认证，
-插件会在详情页和通知里直接写明原因与修复办法（去「站点管理」补 Token 或 API Key）。
+**关键：API Key（x-api-key）调用不算活跃**，站点对 updateLastBrowse 一律返回
+"Full authentication is required"，所以 API Key 只用于读取数据，绝不参与保活。
+
+保活正常时，「最近动向」应该永远是「刚刚 / 1 分钟前」；如果它还是几天前，说明真实登录态没生效，
+插件会把账号真实的最近动向显示出来，并在通知里写明「去站点管理填 authorization 或账号密码」。
 """
 
 from __future__ import annotations
@@ -57,7 +63,7 @@ class MTeamLogin(_PluginBase):
     plugin_name = "馒头登录"
     plugin_desc = "从「站点管理」读取馒头（M-Team）凭证，真实登录保活并校验「最近动向」。"
     plugin_icon = "mteam.png"
-    plugin_version = "1.1.0"
+    plugin_version = "1.2.0"
     plugin_author = "qingyu"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "mteamlogin_"
@@ -180,7 +186,7 @@ class MTeamLogin(_PluginBase):
                  "content": [{"component": "VSelect", "props": {
                              "model": "site", "label": "站点（来自「站点管理」）", "items": site_items,
                              "clearable": True,
-                             "hint": "留空自动识别馒头站点；Token / API Key / Cookie、User-Agent、代理与超时都从站点管理读取",
+                             "hint": "留空自动识别馒头站点；Token / API Key / Cookie、备注(note)、User-Agent、代理与超时都从站点管理读取",
                              "persistent-hint": True}}]},
                 {"component": "VCol", "props": {"cols": 12, "md": 4},
                  "content": [{"component": "VCronField", "props": {"model": "cron", "label": "执行周期",
@@ -201,9 +207,11 @@ class MTeamLogin(_PluginBase):
                 {"component": "VCol", "props": {"cols": 12},
                  "content": [{"component": "VAlert", "props": {"type": "info", "variant": "tonal",
                              "text": "本插件不接收任何手填凭证，全部取自「站点管理」里馒头站点的 "
-                                     "Token / API Key / Cookie。每一轮会调用 "
-                                     "POST /api/member/updateLastBrowse 做保活心跳并校验 "
-                                     "memberStatus.lastBrowse：保活正常时最近动向应为「刚刚 / 1 分钟前」。"}}]},
+                                     "Token / API Key / Cookie / 备注(note)。保活只认真实登录态："
+                                     "站点 Token 要填浏览器登录后的 authorization（JWT），"
+                                     "或在备注(note)里填 {\"username\",\"password\",\"otp_secret\"} "
+                                     "让插件自动真实登录。API Key 只能读取，"
+                                     "用 x-api-key 调 POST /api/member/updateLastBrowse 不算活跃。"}}]},
             ]},
         ]}], self._config()
     def get_page(self) -> List[dict]:
@@ -248,7 +256,9 @@ class MTeamLogin(_PluginBase):
                 self._stat("保活心跳", "已保活" if keepalive_ok else "未保活",
                            "POST /member/updateLastBrowse"
                            + (" · code " + str(latest.get("keepalive_code"))
-                              if latest.get("keepalive_code") not in (None, "") else ""),
+                              if latest.get("keepalive_code") not in (None, "") else "")
+                           + (" · 真实登录换新令牌" if latest.get("login_used")
+                              else " · 复用站点 Token"),
                            "success" if keepalive_ok else "error"),
                 self._stat("账号", str(latest.get("username") or "-"),
                            "站点：" + str(latest.get("site") or "-")
@@ -306,6 +316,7 @@ class MTeamLogin(_PluginBase):
                 "url": getattr(record, "url", None),
                 "apikey": getattr(record, "apikey", None),
                 "cookie": getattr(record, "cookie", None),
+                "note": getattr(record, "note", None),
                 "ua": getattr(record, "ua", None),
                 "proxy": getattr(record, "proxy", None),
                 "token": getattr(record, "token", None),
@@ -351,15 +362,15 @@ class MTeamLogin(_PluginBase):
         if not site:
             raise MTeamError(
                 "未在「站点管理」找到馒头（M-Team）站点：请先在 设置 → 站点管理 添加 M-Team，"
-                "并把站点 Token（浏览器登录后的 authorization）或 API Key 填进该站点，再启用本插件。")
+                "并把浏览器登录后的 authorization（JWT）填进该站点的 Token，再启用本插件。")
         site_domain = str(site.get("domain") or "").strip()
         site_url = str(site.get("url") or site.get("domain") or "").strip()
         credentials = credentials_from_site(site)
         if not credentials.usable:
             raise MTeamError(
                 "站点管理里的馒头站点（" + (site_domain or "未命名") + "）没有可用的登录凭证："
-                "请在 设置 → 站点管理 里把站点「Token」填成浏览器登录后的 authorization"
-                "（或填写站点 API Key），本插件不接收手填凭证。")
+                "请在 设置 → 站点管理 里把站点「Token」填成浏览器登录后的 authorization（JWT），"
+                "或在站点备注里填 {\"username\",\"password\"}；只有 API Key 时只能读取、无法保活。")
         timeout = self._timeout or int(site.get("timeout") or 0) or 20
         timeout = max(5, min(int(timeout), 120))
         proxy = self._proxy or bool(site.get("proxy"))
@@ -396,9 +407,10 @@ class MTeamLogin(_PluginBase):
         record = self._record(report)
         self._save(record)
         if report.ok:
-            logger.info("馒头登录：%s（账号 %s，保活 %s，%s）", report.message,
+            logger.info("馒头登录：%s（账号 %s，保活 %s，真实登录 %s，%s）", report.message,
                         mask_account(record.get("username") or ""),
                         "成功" if report.keepalive_ok else "失败",
+                        "是" if record.get("login_used") else "复用站点 Token",
                         record.get("last_browse_relative") or "时间未知")
         else:
             logger.warning("馒头登录：失败 - %s", report.message)
@@ -420,6 +432,8 @@ class MTeamLogin(_PluginBase):
             "keepalive_ok": bool(report.keepalive_ok),
             "keepalive_code": report.keepalive_code,
             "keepalive_message": report.keepalive_message,
+            "login_used": bool(report.login_used),
+            "login_ok": bool(report.login_ok),
             "last_browse_raw": browse.raw,
             "last_browse_text": browse.text,
             "last_browse_relative": browse.relative,
@@ -452,7 +466,9 @@ class MTeamLogin(_PluginBase):
         if ok:
             title = "馒头保活成功"
             text = ("账号：" + str(record.get("username") or "-")
-                    + "\n保活心跳：成功（code " + str(record.get("keepalive_code")) + "）"
+                    + "\n保活心跳：成功（code " + str(record.get("keepalive_code"))
+                    + "，方式：" + ("真实登录换新令牌" if record.get("login_used")
+                                    else "复用站点 Token") + "）"
                     + "\n最近动向：" + str(record.get("last_browse_text") or "-")
                     + ("（" + str(record.get("last_browse_relative")) + "）"
                        if record.get("last_browse_relative") else "")

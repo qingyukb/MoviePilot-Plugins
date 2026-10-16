@@ -10,13 +10,20 @@
   字段名沿用站点自身的拼写 _timestamp / _sgin。
 * GET 把 _timestamp / _sgin 放在 URL query，POST 放在 multipart 表单里。
 * 其它请求头：ts（秒）、version、webVersion、visitorId；登录态走 authorization。
-* 保活：前端在登录成功后**立刻**调用 POST /api/member/updateLastBrowse，
-  站点会把「最近动向」（/api/member/profile 里的 data.memberStatus.lastBrowse）刷成当前时间。
-  本插件每轮都会调用它，所以保活正常时最近动向应该只有「刚刚 / 1 分钟前」。
-* 凭证只从 MoviePilot「站点管理」读取（站点表只有 apikey / token / cookie 三个可用字段）：
-  - token      -> authorization 请求头
+* 关键结论（实网验证）：**只有真实登录拿到的 authorization（JWT）才算活跃**。
+  - POST /api/login 成功时站点只在**响应头**返回 authorization，前端把它写进 localStorage.auth；
+  - POST /api/member/updateLastBrowse 用 authorization 调用才是「真实登录后的心跳」，
+    站点会把「最近动向」（/api/member/profile 的 data.memberStatus.lastBrowse）刷成当前时间；
+  - 用 API Key（x-api-key）调用同一接口一律返回 401
+    "Full authentication is required to access this resource"，
+    **API Key 只能读数据，不能保活**。
+* 凭证只从 MoviePilot「站点管理」读取，本模块不接收任何手填凭证：
+  - token      -> authorization 请求头（必须是真实登录后的 authorization，形如 JWT）
   - cookie     -> 从中解析 authorization / token，或整体作为 Cookie 头
-  - apikey     -> x-api-key 请求头（M-Team 官方索引器同款），同时兜底尝试 authorization
+  - apikey     -> x-api-key 请求头，只用于读取数据，绝不用于保活
+  - 备注(note) -> 可选 JSON：{"username", "password", "otp_secret", "otp_code",
+                  "email_code", "tg_code", "turnstile"}；提供账号密码时
+                  插件会调用 POST /api/login 真实登录并换回新的 authorization。
 """
 
 from __future__ import annotations
@@ -59,6 +66,30 @@ UPDATE_LAST_BROWSE_PATH = "/member/updateLastBrowse"
 # 站点管理里的 API Key / 令牌失效时的提示特征。
 INVALID_API_KEY_KEYWORDS = ("key無效", "key无效", "無效的key", "invalid api key", "invalid key",
                             "令牌無效", "令牌无效", "token invalid", "unauthorized")
+# 只有真实登录态（authorization / Cookie）能保活；API Key 只能读。
+KEEPALIVE_FIX_HINT = (
+    "馒头（M-Team）的保活心跳只认真实登录态 authorization（JWT）：API Key 的 x-api-key 调用"
+    "不算活跃。请在「站点管理」里把该站点的 Token 改成浏览器登录 kp.m-team.cc 后 "
+    "localStorage.auth 里那串 authorization；或在站点备注(note)里填 "
+    '{"username":"账号","password":"密码","otp_secret":"可选"} 让插件自动真实登录换新令牌。')
+# 真实登录（POST /login）允许从站点记录 / 备注(note) 里读取的字段别名（大小写不敏感）。
+LOGIN_FIELD_ALIASES = {
+    "username": ("username", "user", "user_name", "account", "userid", "user_id"),
+    "password": ("password", "passwd", "pwd", "pass"),
+    "otp_secret": ("otp_secret", "otpsecret", "otp_key", "otpkey", "two_step_code",
+                   "two_step", "totp", "totp_secret", "otp_secret_base32", "2fa_secret"),
+    "otp_code": ("otp_code", "otpcode", "otp", "code"),
+    "email_code": ("email_code", "emailcode", "email_verify_code"),
+    "tg_code": ("tg_code", "tgcode", "telegram_code", "telegramcode"),
+    "turnstile": ("turnstile", "cf_turnstile", "turnstile_token"),
+}
+# 登录接口返回 authorization 的响应头名（大小写不敏感）。
+AUTH_HEADER_NAMES = ("authorization", "x-authorization", "x-auth-token", "token", "auth")
+# 少数镜像把登录令牌放在响应体里时的候选键名。
+AUTH_BODY_KEYS = ("authorization", "auth", "token", "accessToken", "access_token", "jwt")
+# 前端 loginTo 的判定：1001 需要二步验证、1002 需要邮箱验证码。
+LOGIN_NEED_OTP_CODES = (1001,)
+LOGIN_NEED_EMAIL_CODES = (1002,)
 # 凭证不可用 / 未登录时的提示特征。
 PROFILE_NOT_FOUND_KEYWORDS = ("無效的憑證", "无效的凭证", "full authentication",
                               "not authenticated", "unauthorized", "登錄已過期", "登录已过期")
@@ -144,10 +175,30 @@ class AuthPlan:
     token: str = ""
     api_key: str = ""
     cookie: str = ""
+    # jwt（真实登录态，可保活）/ api_key（只读）/ cookie（兜底）
+    scheme: str = ""
 
     @property
     def usable(self) -> bool:
         return bool(self.token or self.api_key or self.cookie)
+
+    @property
+    def kind(self) -> str:
+        """认证类型；未显式指定时按实际携带的凭证推断。"""
+        if self.scheme:
+            return self.scheme
+        if self.token:
+            return "jwt"
+        if self.api_key:
+            return "api_key"
+        if self.cookie:
+            return "cookie"
+        return ""
+
+    @property
+    def keepalive_capable(self) -> bool:
+        """只有真实登录态能刷新「最近动向」；API Key 只读。"""
+        return self.kind in ("jwt", "cookie")
 
 
 @dataclass
@@ -157,6 +208,14 @@ class Credentials:
     token: str = ""
     api_key: str = ""
     cookie: str = ""
+    # 真实登录用的账号密码（站点管理里的备注 note / 站点字段），以及二次验证材料。
+    username: str = ""
+    password: str = ""
+    otp_secret: str = ""
+    otp_code: str = ""
+    email_code: str = ""
+    tg_code: str = ""
+    turnstile: str = ""
     # 人类可读的来源，仅用于展示 / 排错，不含明文凭证。
     source: str = ""
 
@@ -171,8 +230,21 @@ class Credentials:
         return ""
 
     @property
+    def can_login(self) -> bool:
+        """站点管理里是否同时给了账号与密码，可以执行真实登录。"""
+        return bool(self.username and self.password)
+
+    @property
     def usable(self) -> bool:
-        return bool(self.auth_plans())
+        return bool(self.auth_plans()) or self.can_login
+
+    def login_otp_code(self, now: Optional[float] = None) -> str:
+        """动态码：优先用手填的 otp_code，否则用 otp_secret 现算一个。"""
+        if self.otp_code:
+            return self.otp_code
+        if self.otp_secret:
+            return totp(self.otp_secret, now)
+        return ""
 
     def auth_plans(self) -> List[AuthPlan]:
         """按优先级展开成候选认证方案（每个方案只带一种凭证）。"""
@@ -191,20 +263,34 @@ class Credentials:
         cookie = str(self.cookie or "").strip()
 
         if token:
-            _add(AuthPlan(name="站点管理 Token", token=token))
+            _add(AuthPlan(name="站点管理 Token", token=token, scheme="jwt"))
             if not JWT_RE.match(token):
-                # 令牌字段里填的其实是 API Key 时，也让它当一次 x-api-key 试试。
-                _add(AuthPlan(name="站点管理 Token(当作 API Key)", api_key=token))
+                # 令牌字段里填的其实是 API Key 时，也让它当一次 x-api-key 用（只读）。
+                _add(AuthPlan(name="站点管理 Token(当作 API Key)", api_key=token,
+                              scheme="api_key"))
         if cookie_token:
-            _add(AuthPlan(name="站点管理 Cookie 里的令牌", token=cookie_token))
+            _add(AuthPlan(name="站点管理 Cookie 里的令牌", token=cookie_token, scheme="jwt"))
         if api_key:
-            _add(AuthPlan(name="站点管理 API Key", api_key=api_key))
+            _add(AuthPlan(name="站点管理 API Key", api_key=api_key, scheme="api_key"))
         if api_key and JWT_RE.match(api_key):
             # 长得像 JWT 的存取令牌按 authorization 再试一次。
-            _add(AuthPlan(name="站点管理 API Key(Bearer)", token=api_key))
+            _add(AuthPlan(name="站点管理 API Key(Bearer)", token=api_key, scheme="jwt"))
         if cookie:
-            _add(AuthPlan(name="站点管理 Cookie", cookie=cookie))
+            _add(AuthPlan(name="站点管理 Cookie", cookie=cookie, scheme="cookie"))
         return plans
+
+    def keepalive_plans(self) -> List[AuthPlan]:
+        """能用于保活心跳的候选方案：真实登录态 authorization / Cookie。
+
+        API Key 只读，永远不参与保活，避免出现「看着成功其实不算活跃」的假象。
+        """
+        return [plan for plan in self.auth_plans() if plan.keepalive_capable]
+
+    def read_plans(self) -> List[AuthPlan]:
+        """只读接口的候选方案：先用 API Key 之类只读凭证，省掉一次注定失败的请求。"""
+        plans = self.auth_plans()
+        return ([plan for plan in plans if plan.kind == "api_key"]
+                + [plan for plan in plans if plan.kind != "api_key"])
 
 
 @dataclass
@@ -229,6 +315,27 @@ class LoginReport:
     # 实际命中的接口地址（METHOD URL）与是否拿到了 M-Team 的结构化 JSON。
     endpoint: str = ""
     api_ok: bool = False
+    # 本次是否走了「真实登录」（POST /login 换取 authorization）。
+    login_ok: bool = False
+    login_used: bool = False
+    login_message: str = ""
+
+
+@dataclass
+class LoginResult:
+    """一次真实登录（POST /login）的结果。"""
+
+    ok: bool = False
+    code: int = -1
+    message: str = ""
+    # 站点在响应头里返回的 authorization（JWT），绝不写入日志。
+    token: str = ""
+    endpoint: str = ""
+    # 还需要哪种二次验证："" / "otp" / "email"。
+    need: str = ""
+    username: str = ""
+
+
 # --------------------------------------------------------------------- 工具
 
 
@@ -250,6 +357,121 @@ def mask_account(value: Optional[str]) -> str:
     if len(text) <= 2:
         return text[0] + "*"
     return text[0] + "***" + text[-1]
+
+
+def totp(secret: Optional[str], now: Optional[float] = None,
+         digits: int = 6, period: int = 30) -> str:
+    """用 Base32 密钥现算一个 TOTP 动态码（RFC 6238 / SHA1），无第三方依赖。"""
+    text = re.sub(r"[\s\-]", "", str(secret or "")).upper().rstrip("=")
+    if not text or not re.fullmatch(r"[A-Z2-7]+", text):
+        return ""
+    padded = text + "=" * (-len(text) % 8)
+    try:
+        key = base64.b32decode(padded, casefold=True)
+    except Exception:  # noqa: BLE001 - 密钥格式不对时不给动态码
+        return ""
+    counter = int(now if now is not None else time.time()) // max(1, int(period))
+    digest = hmac.new(key, int(counter).to_bytes(8, "big"), hashlib.sha1).digest()
+    offset = digest[-1] & 0x0F
+    number = int.from_bytes(digest[offset:offset + 4], "big") & 0x7FFFFFFF
+    return str(number % (10 ** int(digits))).zfill(int(digits))
+
+
+def jwt_payload(token: Optional[str]) -> Dict[str, Any]:
+    """解析 JWT 的载荷段；不是 JWT 时返回空字典。"""
+    parts = str(token or "").strip().split(".")
+    if len(parts) < 2:
+        return {}
+    segment = parts[1] + "=" * (-len(parts[1]) % 4)
+    try:
+        raw = base64.urlsafe_b64decode(segment.encode("ascii"))
+        data = json.loads(raw.decode("utf-8", errors="replace"))
+    except Exception:  # noqa: BLE001 - 非法 JWT 不参与过期判断
+        return {}
+    return data if isinstance(data, Mapping) else {}
+
+
+def jwt_expires_at(token: Optional[str]) -> Optional[int]:
+    """取 JWT 的 exp（毫秒）；解析不出时返回 None。"""
+    value = jwt_payload(token).get("exp")
+    try:
+        number = int(float(value))
+    except (TypeError, ValueError):
+        return None
+    if number <= 0:
+        return None
+    return number * 1000 if number < 100000000000 else number
+
+
+def jwt_expired(token: Optional[str], now_ms: Optional[int] = None,
+                leeway_seconds: int = 60) -> bool:
+    """判断 JWT 是否已过期（解析不出有效期时按未过期处理，交给站点裁决）。"""
+    expires = jwt_expires_at(token)
+    if expires is None:
+        return False
+    now = int(now_ms if now_ms is not None else time.time() * 1000)
+    return expires - max(0, int(leeway_seconds)) * 1000 <= now
+
+
+def extract_token_from_headers(headers: Optional[Mapping[str, str]]) -> str:
+    """从登录响应头里取 authorization（少数镜像改名为 token / auth）。"""
+    for key, value in (headers or {}).items():
+        if str(key).strip().lower() in AUTH_HEADER_NAMES and str(value or "").strip():
+            return str(value).strip()
+    return ""
+
+
+def extract_token_from_body(body: Optional[Mapping[str, Any]]) -> str:
+    """少数镜像把登录令牌放在响应体里（data.authorization / data.token ...）。"""
+    if not isinstance(body, Mapping):
+        return ""
+    containers: List[Mapping[str, Any]] = []
+    data = body.get("data")
+    if isinstance(data, Mapping):
+        containers.append(data)
+    containers.append(body)
+    for container in containers:
+        for key in AUTH_BODY_KEYS:
+            value = container.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return ""
+
+
+def extract_site_login_credentials(site: Optional[Mapping[str, Any]]) -> Dict[str, str]:
+    """从「站点管理」的站点记录（含备注 note JSON）里读真实登录所需的账号密码。
+
+    站点表本身只有 apikey / token / cookie，没有账号密码列，因此账号密码只能来自：
+    * 站点记录里的同名字段（部分发行版 / 自定义字段）；
+    * 站点「备注(note)」里的 JSON，例如
+      {"username": "xxx", "password": "yyy", "otp_secret": "BASE32"}。
+    键名大小写、下划线都不敏感，值一律当字符串处理。
+    """
+    if not isinstance(site, Mapping):
+        return {}
+    blobs: List[Mapping[str, Any]] = [site]
+    note = site.get("note")
+    if isinstance(note, Mapping):
+        blobs.append(note)
+    elif isinstance(note, str) and note.strip():
+        try:
+            parsed = json.loads(note)
+        except Exception:  # noqa: BLE001 - 备注不是 JSON 就忽略
+            parsed = None
+        if isinstance(parsed, Mapping):
+            blobs.append(parsed)
+    values: Dict[str, str] = {}
+    for alias, names in LOGIN_FIELD_ALIASES.items():
+        for blob in blobs:
+            lowered = {str(key).strip().lower(): value for key, value in blob.items()}
+            for name in names:
+                candidate = lowered.get(name)
+                if candidate not in (None, ""):
+                    values[alias] = str(candidate).strip()
+                    break
+            if alias in values:
+                break
+    return values
 
 
 def normalize_host(host: Optional[str]) -> str:
@@ -371,23 +593,36 @@ def extract_token_from_cookie(cookie: Optional[str]) -> str:
 def credentials_from_site(site: Optional[Mapping[str, Any]]) -> Credentials:
     """把「站点管理」里的一条站点记录转成馒头凭证。
 
-    站点表只有 apikey / token / cookie 三个可用字段，按 token > apikey > cookie 读取。
+    * token   -> 真实登录态 authorization（保活必需，必须是 JWT）
+    * apikey  -> 只读凭证（能读 /member/profile，但**不能**保活）
+    * cookie  -> 从中解析 authorization / token，或整体作为 Cookie 头
+    * note    -> 可选的账号密码 JSON，用于自动真实登录换新令牌
     """
     if not isinstance(site, Mapping):
         return Credentials()
     token = str(site.get("token") or "").strip()
     api_key = str(site.get("apikey") or "").strip()
     cookie = str(site.get("cookie") or "").strip()
+    login = extract_site_login_credentials(site)
     sources: List[str] = []
     if token:
         sources.append("Token")
-    if api_key:
-        sources.append("API Key")
     if extract_token_from_cookie(cookie):
         sources.append("Cookie 令牌")
     elif cookie:
         sources.append("Cookie")
+    if api_key:
+        sources.append("API Key（只读）")
+    if login.get("username") and login.get("password"):
+        sources.append("备注账号密码（真实登录）")
     return Credentials(token=token, api_key=api_key, cookie=cookie,
+                       username=login.get("username", ""),
+                       password=login.get("password", ""),
+                       otp_secret=login.get("otp_secret", ""),
+                       otp_code=login.get("otp_code", ""),
+                       email_code=login.get("email_code", ""),
+                       tg_code=login.get("tg_code", ""),
+                       turnstile=login.get("turnstile", ""),
                        source=" + ".join(sources))
 
 
@@ -499,13 +734,29 @@ def hint_for(message: str) -> str:
     """把站点的原始错误翻译成一句可操作的提示。"""
     text = str(message or "").lower()
     if any(word.lower() in text for word in INVALID_API_KEY_KEYWORDS):
-        return ("（凭证无效或已过期：请在 设置 → 站点管理 更新该馒头站点的 Token / API Key，"
-                "Token 建议直接粘贴浏览器登录后的 authorization）")
+        return ("（凭证无效或已过期：请在 设置 → 站点管理 更新该站点的 Token —— "
+                "必须是浏览器真实登录后的 authorization（JWT）；API Key 只能读数据、不能保活）")
     if any(word.lower() in text for word in METHOD_NOT_SUPPORTED_KEYWORDS):
         return ("（接口地址可能不对：前后端分离的站点后端在 api.<域名>/api，"
                 "请检查「站点管理」里的站点地址或本插件的「API 基址」）")
     if any(word.lower() in text for word in PROFILE_NOT_FOUND_KEYWORDS):
-        return "（凭证已失效：请在 设置 → 站点管理 重新填写该馒头站点的 Token / API Key）"
+        return ("（登录凭证（登录态）已失效：请在 设置 → 站点管理 重新填写该站点的 Token，"
+                "或填好备注里的账号密码让插件自动真实登录）")
+    return ""
+
+
+def login_hint_for(code: int, need: str, message: str = "") -> str:
+    """把真实登录的失败原因翻译成可操作提示。"""
+    if need == "otp":
+        return ("（站点要求二步验证：请在站点「备注(note)」里补 \"otp_secret\"（Base32 密钥）"
+                "或临时的 \"otp_code\"）")
+    if need == "email":
+        return ("（站点要求邮箱验证码：请在站点「备注(note)」里补 \"email_code\"）")
+    text = str(message or "").lower()
+    if any(word.lower() in text for word in INVALID_API_KEY_KEYWORDS):
+        return "（站点管理里的账号或密码不正确）"
+    if code == 1 and ("用户名" in str(message) or "密码" in str(message)):
+        return "（站点管理备注里的账号或密码不正确）"
     return ""
 
 
@@ -539,10 +790,13 @@ def _decode_json(raw_body: bytes) -> Dict[str, Any]:
 
 
 class MTeamClient:
-    """M-Team API 客户端：认证 + 保活心跳（updateLastBrowse）+ 读取最近动向。
+    """M-Team API 客户端：真实登录 + 保活心跳（updateLastBrowse）+ 读取最近动向。
 
-    只会调用三个接口：POST /login（可选，仅用于验证 Token 有效性）、
-    POST /member/updateLastBrowse（保活心跳）、GET|POST /member/profile（只读）。
+    只会调用三个接口：
+    * POST /login——只有站点管理里配了账号密码时才调用，换成真实登录态 authorization；
+    * POST /member/updateLastBrowse——保活心跳，只带真实登录态（authorization / Cookie）；
+    * GET|POST /member/profile——只读，读取 data.memberStatus.lastBrowse。
+    绝不调用 logout / revokeSession 等其它写接口。
     """
 
     def __init__(self, host: str = DEFAULT_API_HOST, timeout: int = DEFAULT_TIMEOUT,
@@ -640,10 +894,16 @@ class MTeamClient:
 
     def keepalive(self, plan: Optional[AuthPlan] = None, ts_ms: Optional[int] = None
                   ) -> KeepAliveResult:
-        """POST /member/updateLastBrowse：真正的保活心跳，把「最近动向」刷成当前时间。"""
+        """POST /member/updateLastBrowse：真实登录态下的保活心跳。
+
+        只有带 authorization（真实登录拿到的 JWT）或浏览器 Cookie 的调用才可能成功；
+        API Key 打这个接口一律 401，所以这里直接拒掉，避免制造"已保活"的假象。
+        """
         plan = plan or AuthPlan()
         if not plan.usable:
-            raise MTeamError("缺少可用的登录凭证（Token / API Key / Cookie）")
+            raise MTeamError("缺少可用的登录凭证（真实登录态 authorization / Cookie）")
+        if not plan.keepalive_capable:
+            raise MTeamError("API Key 只能读取数据，不能用于保活心跳")
         status, _headers, body = self.request("POST", UPDATE_LAST_BROWSE_PATH, fields=[],
                                               plan=plan, ts_ms=ts_ms)
         code = _as_int(body.get("code"))
@@ -651,7 +911,7 @@ class MTeamClient:
         if status >= 400 and not message:
             message = "HTTP " + str(status)
         ok = status < 400 and code == 0
-        if not ok and message and not hint_for(message):
+        if not ok and message:
             message = message + hint_for(message)
         return KeepAliveResult(ok=ok, code=code, message=message,
                                endpoint=self.last_request, auth=plan.name)
@@ -661,7 +921,7 @@ class MTeamClient:
         """GET /member/profile，返回原始响应体（405 时自动回退 POST）。"""
         plan = plan or AuthPlan()
         if not plan.usable:
-            raise MTeamError("缺少 authorization 凭证")
+            raise MTeamError("缺少读取凭证（authorization / API Key / Cookie）")
         status, _headers, body = self.request("GET", PROFILE_PATH, plan=plan, ts_ms=ts_ms)
         if _method_not_supported(status, body):
             # 部分镜像把只读接口也改成 POST-only；自动回退一次。
@@ -683,83 +943,205 @@ class MTeamClient:
             raise MTeamError(message + hint_for(message))
         return format_last_browse(extract_last_browse(body))
 
+    def login(self, credentials: Optional[Credentials] = None,
+              ts_ms: Optional[int] = None) -> LoginResult:
+        """真实登录：POST /login，从**响应头**取回 authorization（JWT）。
+
+        这是与浏览器完全一致的真实登录：前端登录成功后同样把响应头里的
+        authorization 存进 localStorage，并立刻调用 /member/updateLastBrowse。
+        """
+        credentials = credentials or Credentials()
+        if not credentials.can_login:
+            raise MTeamError("缺少账号密码，无法执行真实登录")
+        fields: List[Tuple[str, Any]] = [("username", credentials.username),
+                                        ("password", credentials.password)]
+        otp_code = credentials.login_otp_code()
+        if otp_code:
+            fields.append(("otpCode", otp_code))
+        if credentials.email_code:
+            fields.append(("emailCode", credentials.email_code))
+        if credentials.tg_code:
+            fields.append(("tgCode", credentials.tg_code))
+        if credentials.turnstile:
+            fields.append(("turnstile", credentials.turnstile))
+        status, headers, body = self.request("POST", LOGIN_PATH, fields=fields, ts_ms=ts_ms)
+        code = _as_int(body.get("code"))
+        message = str(body.get("message") or "")
+        if status >= 400 and not message:
+            message = "HTTP " + str(status)
+        token = extract_token_from_headers(headers) or extract_token_from_body(body)
+        ok = status < 400 and code == 0 and bool(token)
+        need = ""
+        if not ok:
+            if code in LOGIN_NEED_OTP_CODES:
+                need = "otp"
+            elif code in LOGIN_NEED_EMAIL_CODES:
+                need = "email"
+        result = LoginResult(ok=ok, code=code, message=message, token=token,
+                             endpoint=self.last_request, need=need,
+                             username=str(credentials.username or ""))
+        if ok:
+            identity = extract_member_identity(body)
+            if identity.get("username"):
+                result.username = str(identity.get("username"))
+        return result
+
     # ---------------------------------------------------------- 组合流程
+
+    def _keepalive_with_plan(self, plan: AuthPlan, failures: List[str]
+                             ) -> Optional[KeepAliveResult]:
+        """跑一次保活心跳，失败时把原因追加到 failures（不抛异常）。"""
+        try:
+            result = self.keepalive(plan=plan)
+        except MTeamError as error:
+            failures.append(plan.name + "：" + str(error))
+            return None
+        if not result.ok:
+            failures.append(plan.name + "：" + (result.message or ("code=" + str(result.code))))
+        return result
+
+    def _run_keepalive(self, credentials: Credentials, failures: List[str]
+                       ) -> Tuple[Optional[KeepAliveResult], Optional[AuthPlan],
+                                  Optional[LoginResult]]:
+        """先试站点管理里的真实登录态，再（必要时）真实登录换新令牌。
+
+        返回值：(保活结果, 命中的认证方案, 真实登录结果或 None)。
+        """
+        plans = credentials.keepalive_plans()
+        for plan in plans:
+            token = plan.token.strip()
+            if token and credentials.can_login and jwt_expired(token):
+                # 令牌已经过期，而且站点管理里配了账号密码：直接走真实登录换新的。
+                failures.append(plan.name + "：authorization 已过期，改用账号密码真实登录")
+                continue
+            result = self._keepalive_with_plan(plan, failures)
+            if result is not None and result.ok:
+                return result, plan, None
+
+        if not credentials.can_login:
+            if not plans and credentials.api_key:
+                failures.append("站点管理里只有 API Key：馒头只认真实登录 "
+                                "authorization（JWT）的保活心跳，API Key 不能保活")
+            return None, None, None
+
+        # 站点管理里没有可用的登录态：用备注里的账号密码真实登录换 authorization。
+        try:
+            login_result = self.login(credentials=credentials)
+        except MTeamError as error:
+            failures.append("真实登录：" + str(error))
+            return None, None, None
+        if not login_result.ok:
+            failures.append("真实登录：" + (login_result.message or ("code=" + str(login_result.code)))
+                            + login_hint_for(login_result.code, login_result.need,
+                                             login_result.message))
+            return None, None, login_result
+        plan = AuthPlan(name="真实登录 authorization", token=login_result.token, scheme="jwt")
+        result = self._keepalive_with_plan(plan, failures)
+        if result is not None and result.ok:
+            return result, plan, login_result
+        return None, None, login_result
+
+    def _fill_from_profile(self, report: LoginReport, plan: AuthPlan) -> LastBrowse:
+        """读 /member/profile，把账号信息与最近动向填进 report。"""
+        browse = self.last_browse(plan=plan)
+        report.last_browse = browse
+        # 保活命中的接口优先展示；没有保活时再退回本次读取接口。
+        report.endpoint = report.endpoint or self.last_request
+        report.api_ok = report.api_ok or self._api_ok
+        identity = extract_member_identity(self.last_body)
+        if identity.get("id") not in (None, ""):
+            report.user_id = identity.get("id")
+        if identity.get("username"):
+            report.username = str(identity.get("username"))
+        return browse
 
     def fetch_last_browse(self, credentials: Optional[Credentials] = None,
                           site_label: str = "") -> LoginReport:
-        """认证 + 保活心跳 + 读取最近动向，返回结构化报表。
+        """真实登录 + 保活心跳 + 读取最近动向，返回结构化报表。
 
-        * 逐个尝试站点管理里的认证方案，第一个能让 updateLastBrowse 返回 code==0 的胜出；
-        * 保活成功后立刻读 /member/profile，此时「最近动向」应为刚刚；
-        * 保活全部失败时不再空跑只读接口，直接给出指向「站点管理」的可操作提示。
+        流程（与浏览器完全一致）：
+        1. 用站点管理里已有的真实登录态 authorization（或浏览器 Cookie）调
+           POST /member/updateLastBrowse；令牌过期且配了账号密码时直接跳过；
+        2. 站点管理里没有可用登录态时，用备注(note)里的账号密码 POST /login
+           真实登录，把响应头里的 authorization 用于保活；
+        3. 保活成功后再读 /member/profile，此时「最近动向」应当就是刚刚；
+        4. 保活失败时仍然读一次 profile，把账号**真实的（很可能是几天前的）**
+           最近动向展示出来，并说明 API Key 为什么不能保活。
         """
         credentials = credentials or Credentials()
         report = LoginReport(ran_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                              site=site_label, credential=credentials.source)
-        plans = credentials.auth_plans()
-        if not plans:
-            report.message = ("站点管理里的馒头站点没有可用的 Token / API Key / Cookie："
-                              "请在 设置 -> 站点管理 补全该站点，再启用本插件。")
+        if not credentials.usable:
+            report.message = ("站点管理里的馒头站点没有可用的登录凭证：" + KEEPALIVE_FIX_HINT)
             return report
 
-        keepalive: Optional[KeepAliveResult] = None
-        winner: Optional[AuthPlan] = None
         failures: List[str] = []
-        for plan in plans:
-            try:
-                result = self.keepalive(plan=plan)
-            except MTeamError as error:
-                failures.append(plan.name + "：" + str(error))
-                continue
-            report.endpoint = self.last_request
-            report.api_ok = self._api_ok
-            if result.ok:
-                keepalive, winner = result, plan
-                break
-            failures.append(plan.name + "：" + (result.message or ("code=" + str(result.code))))
+        keepalive, winner, login_result = self._run_keepalive(credentials, failures)
+        if login_result is not None:
+            report.login_used = True
+            report.login_ok = bool(login_result.ok)
+            report.login_message = login_result.message
+            if login_result.endpoint:
+                report.endpoint = login_result.endpoint
 
-        report.method = "keepalive"
-        if keepalive is not None:
-            report.keepalive_ok = keepalive.ok
+        if keepalive is not None and keepalive.ok and winner is not None:
+            report.method = "login+keepalive" if report.login_used else "keepalive"
+            report.keepalive_ok = True
             report.keepalive_code = keepalive.code
             report.keepalive_message = keepalive.message
             report.code = keepalive.code
-        report.credential = (credentials.source + " · " + (winner or plans[0]).name).strip(" ·")
-
-        if keepalive is None or not keepalive.ok:
-            report.ok = False
-            detail = report.keepalive_message or ("；".join(failures) or "未知原因")
-            report.message = ("保活心跳未成功（" + detail + "）：请在 设置 -> 站点管理 "
-                              "把该馒头站点的 Token 填成浏览器登录后的 authorization，"
-                              "或填写站点 API Key。")
+            report.endpoint = keepalive.endpoint or report.endpoint
+            report.credential = (credentials.source + " · " + winner.name).strip(" ·")
+            try:
+                browse = self._fill_from_profile(report, winner)
+            except MTeamError as error:
+                report.ok = False
+                report.message = "保活心跳已成功，但读取最近动向失败：" + str(error)
+                return report
+            if report.user_id is None and report.username == "":
+                report.username = login_result.username if login_result else ""
+            if browse.empty:
+                report.ok = False
+                report.message = "保活心跳已成功，但站点未返回最近动向"
+                return report
+            report.ok = True
+            report.message = ("已真实登录并保活，最近动向：" + browse.text
+                              if report.login_used else "已保活，最近动向：" + browse.text)
+            if browse.ms is not None:
+                age = int(time.time() * 1000) - int(browse.ms)
+                if age > 5 * 60 * 1000:
+                    # 保活接口返回成功但时间没刷新：站点缓存，或该登录态没有保活权限。
+                    prefix = ("已真实登录并保活，但" if report.login_used
+                              else "保活心跳返回成功，但")
+                    report.message = (prefix + "最近动向仍是 "
+                                      + (browse.relative or browse.text)
+                                      + "；站点可能缓存了该接口，或该凭证没有保活权限。")
             return report
 
-        # 保活成功后读 /member/profile，用 memberStatus.lastBrowse 做校验。
-        try:
-            browse = self.last_browse(plan=winner)
-        except MTeamError as error:
-            report.ok = False
-            report.message = "保活心跳已成功，但读取最近动向失败：" + str(error)
-            return report
+        report.method = "keepalive-failed"
+        report.keepalive_ok = False
+        report.keepalive_code = keepalive.code if keepalive is not None else -1
+        report.keepalive_message = keepalive.message if keepalive is not None else ""
+        report.code = report.keepalive_code
+        if keepalive is not None and keepalive.endpoint:
+            report.endpoint = keepalive.endpoint
 
-        report.last_browse = browse
-        report.api_ok = report.api_ok or self._api_ok
-        identity = extract_member_identity(self.last_body)
-        report.user_id = identity.get("id")
-        report.username = str(identity.get("username") or "")
-
-        if browse.empty:
-            report.ok = False
-            report.message = "保活心跳已成功，但站点未返回最近动向"
-            return report
-
-        report.ok = True
-        report.message = "已保活，最近动向：" + browse.text
-        if browse.ms is not None:
-            age = int(time.time() * 1000) - int(browse.ms)
-            if age > 5 * 60 * 1000:
-                # 保活接口返回成功但时间没刷新：站点缓存，或该凭证只有读取权限。
-                report.message = ("保活心跳返回成功，但最近动向仍是 "
-                                  + (browse.relative or browse.text)
-                                  + "；站点可能缓存了该接口，或该凭证是只读令牌、没有保活权限。")
+        # 保活失败也要把站点里的**真实**最近动向读出来，方便确认账号到底活没活。
+        for plan in credentials.read_plans():
+            try:
+                browse = self._fill_from_profile(report, plan)
+            except MTeamError as error:
+                failures.append("读取最近动向（" + plan.name + "）：" + str(error))
+                continue
+            report.credential = (credentials.source + " · " + plan.name).strip(" ·")
+            if not browse.empty:
+                report.message = ("保活心跳未成功（" + ("；".join(failures) or "未知原因") + "）："
+                                  "账号当前最近动向仍是 " + (browse.relative or browse.text)
+                                  + "。" + KEEPALIVE_FIX_HINT)
+            break
+        if not report.message:
+            report.message = ("保活心跳未成功（" + ("；".join(failures) or "未知原因") + "）："
+                              + KEEPALIVE_FIX_HINT)
+        if not report.username and login_result is not None:
+            report.username = login_result.username
         return report
