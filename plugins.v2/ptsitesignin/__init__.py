@@ -441,9 +441,8 @@ class PTSiteSignIn(_PluginBase):
             login_text = "未提供可用的账号密码"
             logger.info("PT站点签到：%s 的账号信息不完整，只复用站点管理里的 Cookie", site_name)
         elif str(info.get("cookie") or "").strip():
-            # 站点管理里只有 Cookie（MoviePilot 站点管理不保存账号密码），直接拿它签到
-            login_text = "复用站点管理 Cookie"
-            logger.info("PT站点签到：%s 未配置账号密码，复用站点管理里的 Cookie", site_name)
+            # 站点管理里只有 Cookie：直接拿它签到，不再额外提示（默认行为无需说明）
+            pass
         try:
             rule = resolve_rule(info, rules)
             engine = str(rule["engine"])
@@ -497,7 +496,6 @@ class PTSiteSignIn(_PluginBase):
             login_text = "未提供可用的账号密码"
         elif str(info.get("cookie") or "").strip():
             login_ok = True
-            login_text = "复用站点管理 Cookie"
         else:
             login_text = "未配置账号密码或 Cookie"
         activity_text = self._read_site_activity(info) if (login_ok and self._read_activity) else ""
@@ -784,8 +782,11 @@ class PTSiteSignIn(_PluginBase):
                           text=f"{head}\n\n{detail}")
 
     def _notify_line(self, item: Dict[str, Any]) -> str:
-        line = (f"{item.get('site')}：{self._status_meta(item.get('status'))['label']}"
-                f"（{item.get('message')}）")
+        label = self._status_meta(item.get('status'))['label']
+        msg = str(item.get('message') or '').strip()
+        line = f"{item.get('site')}：{label}"
+        if msg:
+            line += f"（{msg}）"
         if item.get("login"):
             line += f"\n　登录：{item['login']}"
         if item.get("activity"):

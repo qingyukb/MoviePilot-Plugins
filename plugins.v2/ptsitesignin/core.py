@@ -175,20 +175,17 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "path": "/attendance.php",
         "submit_selector": "form[action*='attendance.php'] input[type='submit']",
     },
-    # ---- 观众（Audiences）：签到页完成人机验证后由页面 JS 自动签到 ----
-    # 用户实测：打开 /attendance.php 后停在页面等待，Cloudflare 放行后页面会自动完成签到，
-    # 不需要再点复选框，也不需要触发 data-callback 或手工 POST。
-    # 实测结论：
-    #   - 首次 solve 用于处理进站时的 Cloudflare 交互挑战；页面拿到签到页后再等待其自动提交；
-    #   - 第二段 solve 找不到验证码时不应把首次成功的流程拖进 auto 提交兜底，旧预设因此会
-    #     在「验证通过后将自动完成签到」页面超时；
-    #   - 因此本站不再使用 submit_method=auto / 二次 solve，改为 solve_count=1 +
-    #     submit_method=none，等待页面自行完成，再重新打开 attendance.php 回查真实状态。
+    # ---- 观众（Audiences）：签到页内嵌 Turnstile，验证通过后由站点回调自动提交 ----
+    # 多轮实测：solve 能通过 shadow DOM 里的 Turnstile 并把 token 写入隐藏输入框，但
+    # submit_method=none 时站点回调不会自动触发、表单也不会提交，二次核验永远停在
+    # 「验证通过后将自动完成签到」。改为 submit_method=auto：solve 拿到 token 后由
+    # 自动脚本调用 data-callback（拿不到回调时兜底 POST 表单），真正把签到发出去。
     "audiences.me": {
         "engine": "browserless",
         "mode": "cloudflare",
         "path": "/attendance.php",
-        "submit_method": "none",
+        "submit_method": "auto",
+        "auto_wait": 30000,
         "cloudflare_wait": 15,
         "solve_count": 1,
         "solve_timeout": 40000,

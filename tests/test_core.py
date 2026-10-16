@@ -102,17 +102,17 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertEqual(result.status, "already")
 
     def test_audiences_preset_waits_for_page_auto_submit(self):
-        # 实测：打开 /attendance.php 后停页等待，Cloudflare 放行后站点 JS 会自行完成签到。
-        # 只用一次 solve 处理进站交互挑战，不再二次 solve / data-callback / 表单兜底 POST。
+        # 打开 /attendance.php 后一次 solve 处理进站 Cloudflare 挑战；solve 只生成 token，
+        # 不会触发站点回调，所以 submit_method=auto 补一次显式提交把签到真正发出去。
         self.assertEqual(self.audiences["mode"], "cloudflare")
-        self.assertEqual(self.audiences["submit_method"], "none")
+        self.assertEqual(self.audiences["submit_method"], "auto")
+        self.assertEqual(self.audiences["auto_wait"], 30000)
         self.assertEqual(self.audiences["solve_count"], 1)
         self.assertEqual(self.audiences["solve_timeout"], 40000)
         self.assertEqual(self.audiences["cloudflare_wait"], 15)
         self.assertEqual(self.audiences["wait"], 15000)
         self.assertNotIn("solve2_timeout", self.audiences)
         self.assertNotIn("solve2_wait", self.audiences)
-        self.assertNotIn("auto_wait", self.audiences)
         self.assertEqual(self.audiences["verify_success_path"], "/attendance.php")
         self.assertEqual(self.audiences["verify_wait"], 15000)
         self.assertNotIn("submit_selector", self.audiences)
@@ -372,8 +372,8 @@ class BrowserlessAudiencesTests(unittest.TestCase):
         self.assertIn("未能确认为已签到", result.message)
 
     def test_query_waits_for_page_auto_submit(self):
-        # 观众预设：一次 solve 处理进站 Cloudflare 挑战，之后不点提交、不等 token，
-        # 只让页面自行完成签到，再重新打开 attendance.php 回查真实状态。
+        # 观众预设：一次 solve 处理进站 Cloudflare 挑战，solve 生成 token 后再补一次
+        # 显式提交（autoSubmit），最后重新打开 attendance.php 回查真实状态。
         rule = self._rule()
         query = self.core.build_query(rule)
         self.assertIn("solve:solve(timeout:$solveTimeout)", query)
@@ -381,9 +381,9 @@ class BrowserlessAudiencesTests(unittest.TestCase):
         self.assertIn("$solveTimeout", query)
         self.assertNotIn("$solve2Timeout", query)
         self.assertNotIn("$solve2Wait", query)
-        self.assertNotIn("$autoSubmit", query)
-        self.assertNotIn("submit:evaluate(content:$autoSubmit)", query)
-        self.assertNotIn("submit:evaluate", query)
+        self.assertIn("$autoSubmit", query)
+        self.assertIn("submit:evaluate(content:$autoSubmit)", query)
+        self.assertNotIn("submit:click", query)
         self.assertNotIn("waitForTurnstile", query)
         self.assertNotIn("$turnstileWait", query)
         self.assertNotIn("$submit:", query)
@@ -416,7 +416,7 @@ class BrowserlessAudiencesTests(unittest.TestCase):
                          "https://audiences.me/attendance.php")
         self.assertNotIn("selector", signer.calls[1][1])
         self.assertNotIn("turnstileWait", signer.calls[1][1])
-        self.assertNotIn("autoSubmit", signer.calls[1][1])
+        self.assertIn("autoSubmit", signer.calls[1][1])
         self.assertEqual(signer.calls[0][0], "CheckInPreflight")
         self.assertEqual(signer.calls[1][0], "CheckIn")
 
