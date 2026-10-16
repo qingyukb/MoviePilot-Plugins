@@ -2,6 +2,10 @@
 
 签名向量取自对 kp.m-team.cc 前端 bundle 的逆向与真实请求抓包
 （POST&/api/login&1792147233564 的 _sgin 实测值）。
+
+本轮重点：插件必须**真实认证并调用保活心跳** POST /api/member/updateLastBrowse，
+然后才读 GET /api/member/profile 的 memberStatus.lastBrowse 作校验，
+且永不触碰 revokeSession 等其它写接口。
 """
 
 from __future__ import annotations
@@ -22,9 +26,13 @@ PLUGIN_DIRS = (
 # 抓包得到的真实签名向量
 LOGIN_VECTOR = ("POST", "/api/login", 1792147233564, "vbx6OSsNwBNBzq+BrzI6WZ0Tlo0=")
 UNIX_VECTOR = ("GET", "/api/system/unix", 1792147191401, "FyDVc1yB4xNZwd554jpZXRn+d5E=")
-OTP_SECRET = "JBSWY3DPEHPK3PXP"
-# /member/updateLastBrowse 会把「最近动向」刷成当前时间，插件必须永远不碰它。
-FORBIDDEN_PATH = "/member/updateLastBrowse"
+# 保活心跳接口：插件每一轮都必须调用它，否则「最近动向」永远不会刷新。
+KEEPALIVE_PATH = "/member/updateLastBrowse"
+# JWT 形状的令牌（三段、每段足够长），用来保证只展开出一种认证方案
+JWT_TOKEN = "headerxx.payloadyy.signature"
+# 插件绝对不该碰的其它写接口。
+FORBIDDEN_PATHS = ("/member/revokeSession", "/member/logout", "/login",
+                   "/member/updateLastBrowse2")
 
 
 def load_core(directory: Path, name: str):
@@ -71,6 +79,16 @@ class FakeOpener:
         return FakeResponse(status, headers, body)
 
 
+class RawOpener:
+    """直接返回预置响应对象（可以是非 JSON）。"""
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+
+    def open(self, request, timeout=None):  # noqa: ARG002 - 与 urllib 签名保持一致
+        return self.responses.pop(0)
+
+
 def build_client(core, responses):
     client = core.MTeamClient(host=core.DEFAULT_API_HOST, timeout=10)
     opener = FakeOpener(responses)
@@ -94,16 +112,6 @@ def recorded(opener):
     return items
 
 
-def multipart_fields(body: str):
-    """从 multipart 请求体里取出 (字段名, 值) 列表。"""
-    fields = []
-    for part in body.split("\r\n"):
-        if part.startswith("Content-Disposition:"):
-            name = part.split('name="', 1)[1].split('"', 1)[0]
-            fields.append(name)
-    return fields
-
-
 def multipart_values(body: str) -> dict:
     """从 multipart 请求体里取出字段名 -> 值。"""
     values = {}
@@ -117,16 +125,22 @@ def multipart_values(body: str) -> dict:
     return values
 
 
-def login_ok(token="TOKEN", **data):
-    payload = {"id": 12345, "username": "tester"}
-    payload.update(data)
-    return 200, {"authorization": token, "did": "did-1"}, {"code": 0, "message": "ok",
-                                                          "data": payload}
+def keepalive_ok():
+    """保活心跳成功的真实响应形状。"""
+    return 200, {}, {"code": 0, "message": "success", "data": None}
 
 
-def profile_ok(last_browse):
-    return 200, {}, {"code": 0, "message": "ok",
-                     "data": {"id": 12345, "memberStatus": {"lastBrowse": last_browse}}}
+def keepalive_denied(message="Full authentication is required to access this resource",
+                     code=401):
+    return 200, {}, {"code": code, "message": message, "data": None}
+
+
+def profile_ok(last_browse, **member):
+    """最近动向是刚被保活刷新的时间。"""
+    data = {"id": 12345, "username": "tester",
+            "memberStatus": {"lastBrowse": last_browse}}
+    data.update(member)
+    return 200, {}, {"code": 0, "message": "ok", "data": data}
 
 
 class SignatureTests(unittest.TestCase):
@@ -144,49 +158,83 @@ class SignatureTests(unittest.TestCase):
                 self.assertEqual(params["_timestamp"], "1792147233564")
                 self.assertEqual(params["_sgin"], LOGIN_VECTOR[3])
 
-    def test_totp_matches_rfc6238_vector(self):
+
+class CredentialsTests(unittest.TestCase):
+    def test_credentials_from_site_reads_site_management_fields(self):
         for core in CORES:
             with self.subTest(core=core.__name__):
-                # RFC 6238 附录 B：secret = "12345678901234567890"
-                secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
-                self.assertEqual(core.totp(secret, at=59, digits=8), "94287082")
-                self.assertEqual(len(core.totp(OTP_SECRET, at=59)), 6)
+                site = {"domain": "m-team.cc", "apikey": "AK", "token": "TK",
+                        "cookie": "cf_clearance=x; authorization=COOKIETOK"}
+                creds = core.credentials_from_site(site)
+                self.assertEqual(creds.token, "TK")
+                self.assertEqual(creds.api_key, "AK")
+                self.assertIn("Token", creds.source)
+                self.assertIn("API Key", creds.source)
+                self.assertTrue(creds.usable)
+                self.assertEqual(core.credentials_from_site(None).usable, False)
+                self.assertEqual(core.credentials_from_site({}).usable, False)
 
+    def test_extract_token_from_cookie_handles_common_shapes(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                self.assertEqual(
+                    core.extract_token_from_cookie("a=1; authorization=AAA.BBB.CCC"), "AAA.BBB.CCC")
+                self.assertEqual(
+                    core.extract_token_from_cookie("token=shorthand; x=2"), "shorthand")
+                self.assertEqual(core.extract_token_from_cookie("a=1;b=2"), "")
+                self.assertEqual(core.extract_token_from_cookie(""), "")
+                self.assertEqual(core.extract_token_from_cookie(None), "")
+
+    def test_auth_plans_are_single_credential_and_ordered(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                creds = core.Credentials(token="TK", api_key="AK", cookie="authorization=CK")
+                plans = creds.auth_plans()
+                self.assertTrue(plans)
+                # 每个方案只带一种认证方式，避免把互斥的头部混在一起发出去
+                for plan in plans:
+                    used = [bool(plan.token), bool(plan.api_key), bool(plan.cookie)]
+                    self.assertEqual(sum(used), 1, plan)
+                # Token 优先，其次 Cookie 里的令牌，再是 API Key、Cookie
+                self.assertEqual(plans[0].token, "TK")
+                self.assertIn("CK", [plan.token for plan in plans])
+                self.assertIn("AK", [plan.api_key for plan in plans])
+                self.assertEqual(core.Credentials().auth_plans(), [])
 
 class RequestShapeTests(unittest.TestCase):
-    def test_login_request_is_signed_multipart_post(self):
+    def test_keepalive_is_signed_multipart_post(self):
         for core in CORES:
             with self.subTest(core=core.__name__):
-                client, opener = build_client(core, [login_ok()])
-                client.login("tester", "secret", ts_ms=1792147233564)
+                client, opener = build_client(core, [keepalive_ok()])
+                client.keepalive(plan=core.AuthPlan(name="t", token="TOKEN"),
+                                 ts_ms=1792147233564)
                 request = recorded(opener)[0]
                 self.assertEqual(request["method"], "POST")
-                self.assertEqual(request["path"], "/api/login")
-                self.assertIn("multipart/form-data; boundary=", request["headers"]["content-type"])
+                self.assertEqual(request["path"], "/api/member/updateLastBrowse")
+                self.assertIn("multipart/form-data; boundary=",
+                              request["headers"]["content-type"])
                 fields = multipart_values(request["body"])
-                self.assertEqual(list(fields)[:3], ["username", "password", "turnstile"])
-                self.assertEqual(fields["username"], "tester")
-                self.assertEqual(fields["password"], "secret")
-                self.assertEqual(fields["turnstile"], "")
                 self.assertEqual(fields["_timestamp"], "1792147233564")
-                self.assertEqual(fields["_sgin"], LOGIN_VECTOR[3])
+                self.assertEqual(fields["_sgin"],
+                                 core.sign("POST", "/api/member/updateLastBrowse",
+                                           1792147233564))
+                self.assertEqual(request["headers"]["authorization"], "TOKEN")
 
-    def test_login_headers_carry_client_metadata(self):
+    def test_keepalive_uses_x_api_key_for_api_key_plan(self):
         for core in CORES:
             with self.subTest(core=core.__name__):
-                client, opener = build_client(core, [login_ok()])
-                client.login("tester", "secret", ts_ms=1792147233564)
+                client, opener = build_client(core, [keepalive_ok()])
+                client.keepalive(plan=core.AuthPlan(name="k", api_key="AK"))
                 headers = recorded(opener)[0]["headers"]
-                self.assertEqual(headers["ts"], "1792147233")
-                self.assertEqual(headers["version"], core.CLIENT_VERSION)
-                self.assertEqual(headers["webversion"], core.WEB_VERSION)
-                self.assertIn("Mozilla/5.0", headers["user-agent"])
+                self.assertEqual(headers["x-api-key"], "AK")
+                self.assertNotIn("authorization", headers)
 
     def test_profile_request_signs_query_and_sends_authorization(self):
         for core in CORES:
             with self.subTest(core=core.__name__):
                 client, opener = build_client(core, [profile_ok(1792147191401)])
-                client.last_browse(token="TOKEN", ts_ms=1792147191401)
+                client.last_browse(plan=core.AuthPlan(name="t", token="TOKEN"),
+                                   ts_ms=1792147191401)
                 request = recorded(opener)[0]
                 self.assertEqual(request["method"], "GET")
                 self.assertEqual(request["path"], "/api/member/profile")
@@ -196,165 +244,197 @@ class RequestShapeTests(unittest.TestCase):
                 self.assertEqual(request["headers"]["authorization"], "TOKEN")
                 self.assertFalse(request["body"])
 
-    def test_api_key_uses_header_not_authorization(self):
+    def test_headers_carry_client_metadata(self):
         for core in CORES:
             with self.subTest(core=core.__name__):
-                client, opener = build_client(core, [profile_ok(1792147191401)])
-                client.last_browse(api_key="APIKEY")
+                client, opener = build_client(core, [keepalive_ok()])
+                client.keepalive(plan=core.AuthPlan(name="t", token="TOKEN"),
+                                 ts_ms=1792147233564)
                 headers = recorded(opener)[0]["headers"]
-                self.assertEqual(headers["x-api-key"], "APIKEY")
-                self.assertNotIn("authorization", headers)
+                self.assertEqual(headers["ts"], "1792147233")
+                self.assertEqual(headers["version"], core.CLIENT_VERSION)
+                self.assertEqual(headers["webversion"], core.WEB_VERSION)
+                self.assertIn("Mozilla/5.0", headers["user-agent"])
+                self.assertEqual(headers["origin"], "https://kp.m-team.cc")
 
 
-class LoginFlowTests(unittest.TestCase):
-    def test_fetch_last_browse_reads_real_last_browse(self):
+class KeepAliveFlowTests(unittest.TestCase):
+    def test_fetch_last_browse_keeps_alive_then_reads_recent_time(self):
         for core in CORES:
             with self.subTest(core=core.__name__):
-                client, opener = build_client(core, [login_ok(), profile_ok(1792147191401)])
-                report = client.fetch_last_browse(username="tester", password="secret")
-                self.assertTrue(report.ok)
-                self.assertEqual(report.username, "tester")
-                self.assertEqual(report.user_id, 12345)
+                client, opener = build_client(core, [keepalive_ok(),
+                                                     profile_ok(1792147191401)])
+                creds = core.Credentials(token="TOKEN")
+                report = client.fetch_last_browse(credentials=creds, site_label="m-team.cc")
+                self.assertTrue(report.ok, report.message)
+                self.assertTrue(report.keepalive_ok)
+                self.assertEqual(report.keepalive_code, 0)
                 self.assertEqual(report.last_browse.raw, 1792147191401)
                 self.assertEqual(report.last_browse.text, "2026-10-16 18:39:51")
-                self.assertEqual(report.code, 0)
+                self.assertEqual(report.site, "m-team.cc")
+                # 先保活、后读最近动向
+                self.assertEqual([item["path"] for item in recorded(opener)],
+                                 ["/api/member/updateLastBrowse", "/api/member/profile"])
 
-    def test_flow_only_touches_login_and_profile(self):
+    def test_flow_never_touches_other_write_endpoints(self):
         for core in CORES:
             with self.subTest(core=core.__name__):
-                client, opener = build_client(core, [login_ok(), profile_ok(1792147191401)])
-                client.fetch_last_browse(username="tester", password="secret")
-                paths = [item["path"] for item in recorded(opener)]
-                self.assertEqual(paths, ["/api/login", "/api/member/profile"])
-                self.assertNotIn(FORBIDDEN_PATH, paths)
-
-    def test_otp_secret_is_used_when_site_asks_for_2fa(self):
-        for core in CORES:
-            with self.subTest(core=core.__name__):
-                ask_otp = 200, {}, {"code": 1001, "message": "need otp",
-                                    "data": ["otp", "email"]}
-                client, opener = build_client(core, [ask_otp, login_ok(),
+                client, opener = build_client(core, [keepalive_ok(),
                                                      profile_ok(1792147191401)])
-                report = client.fetch_last_browse(username="tester", password="secret",
-                                                 otp_secret=OTP_SECRET)
-                self.assertTrue(report.ok, report.message)
-                requests = recorded(opener)
-                self.assertEqual(len(requests), 3)
-                second = multipart_values(requests[1]["body"])
-                self.assertEqual(second["otpCode"], core.totp(OTP_SECRET))
-                self.assertNotIn("emailCode", second)
+                client.fetch_last_browse(credentials=core.Credentials(token="TOKEN"))
+                paths = [item["path"] for item in recorded(opener)]
+                for path in FORBIDDEN_PATHS:
+                    self.assertNotIn("/api" + path, paths)
+                self.assertEqual(paths.count("/api" + KEEPALIVE_PATH), 1)
 
-    def test_2fa_without_code_returns_actionable_message(self):
+    def test_keepalive_failure_is_reported_with_site_management_hint(self):
         for core in CORES:
             with self.subTest(core=core.__name__):
-                ask_otp = 200, {}, {"code": 1001, "message": "need otp", "data": ["otp"]}
-                client, opener = build_client(core, [ask_otp])
-                report = client.fetch_last_browse(username="tester", password="secret")
+                client, _opener = build_client(core, [keepalive_denied()])
+                # 用 JWT 形状的令牌，保证只展开出一种认证方案
+                report = client.fetch_last_browse(
+                    credentials=core.Credentials(token=JWT_TOKEN), site_label="m-team.cc")
                 self.assertFalse(report.ok)
-                self.assertIn("二次验证", report.message)
-                self.assertIn("动态验证码", report.message)
-                self.assertEqual(len(opener.requests), 1)
+                self.assertFalse(report.keepalive_ok)
+                self.assertIn("保活", report.message)
+                self.assertIn("站点管理", report.message)
 
-    def test_email_verify_code_is_submitted(self):
+    def test_api_key_plan_is_tried_when_token_is_rejected(self):
         for core in CORES:
             with self.subTest(core=core.__name__):
-                ask_email = 200, {}, {"code": 1002, "message": "need email", "data": None}
-                client, opener = build_client(core, [ask_email, login_ok(),
+                # Token 被拒 -> 自动改用站点管理里的 API Key 保活成功
+                client, opener = build_client(core, [keepalive_denied(),
+                                                     keepalive_ok(),
                                                      profile_ok(1792147191401)])
-                report = client.fetch_last_browse(username="tester", password="secret",
-                                                 email_code="654321")
+                creds = core.Credentials(token=JWT_TOKEN, api_key="AK")
+                report = client.fetch_last_browse(credentials=creds)
                 self.assertTrue(report.ok, report.message)
-                second = multipart_values(recorded(opener)[1]["body"])
-                self.assertEqual(second["emailCode"], "654321")
+                self.assertTrue(report.keepalive_ok)
+                requests = recorded(opener)
+                self.assertEqual(requests[1]["headers"]["x-api-key"], "AK")
+                self.assertIn("API Key", report.credential)
 
-    def test_api_key_path_skips_login(self):
+    def test_stale_last_browse_after_keepalive_is_flagged(self):
         for core in CORES:
             with self.subTest(core=core.__name__):
-                client, opener = build_client(core, [profile_ok(1792147191401)])
-                report = client.fetch_last_browse(api_key="APIKEY")
-                self.assertTrue(report.ok)
-                self.assertEqual(report.method, "api_key")
-                self.assertEqual(report.credential, "API Key")
-                paths = [item["path"] for item in recorded(opener)]
-                self.assertEqual(paths, ["/api/member/profile"])
+                # 保活接口说成功，但最近动向还是老的（站点缓存 / 只读令牌）
+                client, _opener = build_client(core, [keepalive_ok(),
+                                                      profile_ok(1600000000000)])
+                report = client.fetch_last_browse(credentials=core.Credentials(token="TOKEN"))
+                self.assertTrue(report.ok, report.message)
+                self.assertTrue(report.keepalive_ok)
+                self.assertIn("最近动向", report.message)
+                self.assertRegex(report.message, r"缓存|只读|权限")
 
-    def test_method_not_supported_falls_back_to_post(self):
+    def test_profile_method_not_supported_falls_back_to_post(self):
         for core in CORES:
             with self.subTest(core=core.__name__):
                 denied = 405, {}, {"timestamp": "2026-10-16T19:16:29", "status": 405,
                                    "error": "Method Not Allowed", "path": "/api/member/profile",
                                    "message": "Request method 'GET' is not supported"}
-                client, opener = build_client(core, [denied, profile_ok(1792147191401)])
-                report = client.fetch_last_browse(api_key="KEY")
+                client, opener = build_client(core, [keepalive_ok(), denied,
+                                                     profile_ok(1792147191401)])
+                report = client.fetch_last_browse(credentials=core.Credentials(token="TOKEN"))
                 self.assertTrue(report.ok, report.message)
                 methods = [item["method"] for item in recorded(opener)]
-                self.assertEqual(methods, ["GET", "POST"])
-                paths = [item["path"] for item in recorded(opener)]
-                self.assertNotIn(FORBIDDEN_PATH, paths)
-
-    def test_report_tracks_endpoint_and_api_ok(self):
-        for core in CORES:
-            with self.subTest(core=core.__name__):
-                ok_client, _o = build_client(core, [profile_ok(1792147191401)])
-                ok = ok_client.fetch_last_browse(api_key="KEY")
-                self.assertTrue(ok.api_ok)
-                self.assertIn(core.DEFAULT_API_HOST + "/member/profile", ok.endpoint)
-                broken = 405, {}, {"timestamp": "2026-10-16T19:16:29", "status": 405,
-                                   "error": "Method Not Allowed", "path": "/api/member/profile",
-                                   "message": "Request method 'GET' is not supported"}
-                bad_client, _o2 = build_client(core, [broken, broken])
-                bad = bad_client.fetch_last_browse(api_key="KEY")
-                self.assertFalse(bad.api_ok)
-                self.assertIn("not supported", bad.message)
-
-    def test_invalid_api_key_returns_failed_report(self):
-        for core in CORES:
-            with self.subTest(core=core.__name__):
-                denied = 200, {}, {"code": 1, "message": "key無效", "data": None}
-                client, _opener = build_client(core, [denied])
-                report = client.fetch_last_browse(api_key="BOGUS", site_label="馒头",
-                                                  credential="API Key")
-                self.assertFalse(report.ok)
-                self.assertEqual(report.site, "馒头")
-                self.assertEqual(report.credential, "API Key")
-                self.assertIn("无效或已过期", report.message)
-
-    def test_bad_credentials_return_message_without_raising(self):
-        for core in CORES:
-            with self.subTest(core=core.__name__):
-                denied = 200, {}, {"code": 1,
-                                   "message": "此帳號不存在，請核對輸入是否正確或使用“封禁査詢”",
-                                   "data": None}
-                client, _opener = build_client(core, [denied])
-                report = client.fetch_last_browse(username="ghost", password="secret")
-                self.assertFalse(report.ok)
-                self.assertIn("不存在", report.message)
+                self.assertEqual(methods, ["POST", "GET", "POST"])
 
     def test_missing_credentials_raise(self):
         for core in CORES:
             with self.subTest(core=core.__name__):
                 client, _opener = build_client(core, [])
                 with self.assertRaises(core.MTeamError):
-                    client.fetch_last_browse()
+                    client.keepalive(plan=core.AuthPlan())
 
-    def test_invalid_token_maps_to_hint(self):
+    def test_missing_credentials_report_is_not_ok(self):
         for core in CORES:
             with self.subTest(core=core.__name__):
-                invalid = 200, {}, {"code": 1, "message": "無效的憑證", "data": None}
-                client, _opener = build_client(core, [invalid])
-                with self.assertRaises(core.MTeamError) as ctx:
-                    client.last_browse(token="bogus")
-                self.assertIn("凭证", str(ctx.exception))
+                client, _opener = build_client(core, [])
+                report = client.fetch_last_browse(credentials=core.Credentials())
+                self.assertFalse(report.ok)
+                self.assertIn("站点管理", report.message)
 
-    def test_empty_last_browse_is_reported(self):
+    def test_report_carries_endpoint_and_api_ok(self):
         for core in CORES:
             with self.subTest(core=core.__name__):
-                empty = 200, {}, {"code": 0, "message": "ok", "data": {"memberStatus": {}}}
-                client, _opener = build_client(core, [login_ok(), empty])
-                report = client.fetch_last_browse(username="tester", password="secret")
-                self.assertTrue(report.ok)
-                self.assertTrue(report.last_browse.empty)
-                self.assertIn("未返回最近动向", report.message)
+                client, _opener = build_client(core, [keepalive_ok(),
+                                                      profile_ok(1792147191401)])
+                report = client.fetch_last_browse(credentials=core.Credentials(token="TOKEN"))
+                self.assertTrue(report.api_ok)
+                self.assertIn(core.DEFAULT_API_HOST + KEEPALIVE_PATH, report.endpoint)
+
+    def test_non_json_backend_is_marked_not_api_ok(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                client = core.MTeamClient(host=core.DEFAULT_API_HOST, timeout=10)
+                # 直接给一个 HTML 403 响应，模拟打到了 nginx 前端
+                client._opener = RawOpener([FakeHtmlResponse()])
+                report = client.fetch_last_browse(
+                    credentials=core.Credentials(token=JWT_TOKEN))
+                self.assertFalse(report.api_ok)
+                self.assertFalse(report.ok)
+
+
+class FakeHtmlResponse:
+    """非 JSON 响应（例如 kp.m-team.cc 的 403 HTML），用来验证接口命中判定。"""
+
+    status = 403
+
+    class _Headers(dict):
+        pass
+
+    headers = _Headers({"content-type": "text/html"})
+
+    def read(self) -> bytes:
+        return b"<html><head><title>403 Forbidden</title></head></html>"
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+class PluginSourceTests(unittest.TestCase):
+    """配置表单与站点管理读取：不能有任何手填凭证字段。"""
+
+    FORBIDDEN_MODELS = ("username", "password", "otp_secret", "otp_code",
+                        "email_code", "tg_code", "api_key")
+
+    def test_form_has_no_manual_credential_fields(self):
+        for directory in PLUGIN_DIRS:
+            with self.subTest(directory=directory.parent.name):
+                source = (directory / "__init__.py").read_text(encoding="utf-8")
+                form = source.split("def get_form", 1)[1].split("def get_page", 1)[0]
+                for model in self.FORBIDDEN_MODELS:
+                    self.assertNotIn('"model": "' + model + '"', form,
+                                     f"表单里不应再有 {model} 手填项")
+                # 表单只保留这几个开关与站点/周期/接口/超时
+                for kept in ("enabled", "proxy", "run_once", "notify_mode",
+                             "site", "cron", "api_host", "timeout"):
+                    self.assertIn('"model": "' + kept + '"', form)
+
+    def test_plugin_reads_credentials_from_site_management(self):
+        for directory in PLUGIN_DIRS:
+            with self.subTest(directory=directory.parent.name):
+                source = (directory / "__init__.py").read_text(encoding="utf-8")
+                # 必须从站点操作层读取站点列表，而不是依赖手填
+                self.assertIn("SiteOper", source)
+                self.assertIn(".list()", source)
+                self.assertIn('config.get("site")', source)
+                self.assertIn("credentials_from_site", source)
+                # 站点缺失 / 缺凭证时给出指向站点管理的可操作提示
+                self.assertIn("站点管理", source)
+                # 前后端分离：按站点地址推导 + 多候选自动回退
+                self.assertIn("api_host_candidates", source)
+                self.assertIn("api_ok", source)
+
+    def test_plugin_surfaces_keepalive_status(self):
+        for directory in PLUGIN_DIRS:
+            with self.subTest(directory=directory.parent.name):
+                source = (directory / "__init__.py").read_text(encoding="utf-8")
+                self.assertIn("keepalive_ok", source)
+                self.assertIn("keepalive_code", source)
+                self.assertIn("保活", source)
 
 
 class HelperTests(unittest.TestCase):
@@ -362,79 +442,48 @@ class HelperTests(unittest.TestCase):
         for core in CORES:
             with self.subTest(core=core.__name__):
                 self.assertEqual(core.format_last_browse(None).text, "")
-                self.assertEqual(core.format_last_browse(1792147191401).text, "2026-10-16 18:39:51")
-                self.assertEqual(core.format_last_browse(1792147191).text, "2026-10-16 18:39:51")
-                self.assertEqual(core.format_last_browse("2026-10-16T17:32:10").text,
-                                 "2026-10-16 17:32:10")
-                self.assertEqual(core.format_last_browse("1594828800").text,
-                                 "2020-07-16 00:00:00")
-                self.assertEqual(core.format_last_browse("刚刚").text, "刚刚")
+                self.assertEqual(core.format_last_browse(1792147191401).text,
+                                 "2026-10-16 18:39:51")
+                self.assertEqual(core.format_last_browse(1792147191).text,
+                                 "2026-10-16 18:39:51")
+                self.assertEqual(core.format_last_browse("2026-10-16 18:39:51").text,
+                                 "2026-10-16 18:39:51")
+                self.assertEqual(core.format_last_browse("").text, "")
+                self.assertEqual(core.format_last_browse("not-a-time").text, "not-a-time")
+                self.assertTrue(core.format_last_browse(None).empty)
+                self.assertFalse(core.format_last_browse(1792147191401).empty)
 
-    def test_humanize(self):
+    def test_extract_last_browse_prefers_member_status(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                payload = {"data": {"memberStatus": {"lastBrowse": 42}}}
+                self.assertEqual(core.extract_last_browse(payload), 42)
+                self.assertIsNone(core.extract_last_browse({"data": {}}))
+                self.assertIsNone(core.extract_last_browse(None))
+                self.assertIsNone(core.extract_last_browse({"data": "nope"}))
+
+    def test_humanize_relative_time(self):
         for core in CORES:
             with self.subTest(core=core.__name__):
                 now = 1792147191401
-                self.assertEqual(core.humanize(now - 30_000, now), "刚刚")
-                self.assertEqual(core.humanize(now - 300_000, now), "5 分钟前")
-                self.assertEqual(core.humanize(now - 7_200_000, now), "2 小时前")
-                self.assertEqual(core.humanize(now - 86_400_000 * 3, now), "3 天前")
                 self.assertEqual(core.humanize(None), "")
+                self.assertEqual(core.humanize(now - 30_000, now), "刚刚")
+                self.assertEqual(core.humanize(now - 90_000, now), "1 分钟前")
+                self.assertEqual(core.humanize(now - 3 * 3600_000, now), "3 小时前")
+                self.assertEqual(core.humanize(now - 2 * 86400_000, now), "2 天前")
+                self.assertEqual(core.humanize(now + 60_000, now), "1 分钟后")
 
-    def test_extract_last_browse_fallbacks(self):
-        for core in CORES:
-            with self.subTest(core=core.__name__):
-                self.assertEqual(core.extract_last_browse(
-                    {"data": {"memberStatus": {"lastBrowse": 5}}}), 5)
-                self.assertEqual(core.extract_last_browse(
-                    {"data": {"lastBrowse": 7}}), 7)
-                self.assertIsNone(core.extract_last_browse({"data": {}}))
-                self.assertIsNone(core.extract_last_browse({"data": None}))
-                self.assertIsNone(core.extract_last_browse({}))
-
-    def test_normalize_host(self):
-        for core in CORES:
-            with self.subTest(core=core.__name__):
-                self.assertEqual(core.normalize_host(""), core.DEFAULT_API_HOST)
-                self.assertEqual(core.normalize_host("https://api.m-team.cc/api/"),
-                                 "https://api.m-team.cc/api")
-                self.assertEqual(core.normalize_host("api.m-team.io"),
-                                 "https://api.m-team.io/api")
-
-    def test_mask_hides_secrets(self):
+    def test_mask_helpers_never_leak_secrets(self):
         for core in CORES:
             with self.subTest(core=core.__name__):
                 self.assertEqual(core.mask(""), "")
-                self.assertEqual(core.mask("abcd"), "****")
-                self.assertNotIn("secret", core.mask("secret-token-value"))
-                self.assertNotIn("longpassword", core.mask("longpassword"))
+                self.assertEqual(core.mask("abc"), "***")
+                self.assertEqual(core.mask("abcdefghij"), "abcd***ghij")
+                self.assertEqual(core.mask_account(""), "")
+                self.assertEqual(core.mask_account("ab"), "a*")
+                self.assertEqual(core.mask_account("tester"), "t***r")
 
-    def test_encode_multipart_body(self):
-        for core in CORES:
-            with self.subTest(core=core.__name__):
-                content_type, body = core.encode_multipart(
-                    [("username", "u"), ("password", "p")], boundary="B")
-                self.assertEqual(content_type, "multipart/form-data; boundary=B")
-                text = body.decode("utf-8")
-                self.assertTrue(text.startswith("--B\r\n"))
-                self.assertTrue(text.endswith("--B--\r\n"))
-                self.assertEqual(list(multipart_values(text)), ["username", "password"])
-
-    def test_core_never_requests_update_last_browse(self):
-        for directory in PLUGIN_DIRS:
-            with self.subTest(directory=directory.name):
-                source = (directory / "core.py").read_text(encoding="utf-8")
-                # 该路径只允许作为常量定义出现，绝不能被拼进任何请求 URL。
-                self.assertEqual(source.count('"' + FORBIDDEN_PATH + '"'), 1)
-                definitions = [line.strip() for line in source.splitlines()
-                               if line.strip().startswith("UPDATE_LAST_BROWSE_PATH")]
-                self.assertEqual(definitions,
-                                 ['UPDATE_LAST_BROWSE_PATH = "' + FORBIDDEN_PATH + '"'])
-
-
-class SiteManagementTests(unittest.TestCase):
-    """凭证来自 MoviePilot「站点管理」：API 基址推导 + 馒头站点识别。"""
-
-    def test_derive_api_host_from_site_url(self):
+    def test_api_host_derivation_and_candidates(self):
         for core in CORES:
             with self.subTest(core=core.__name__):
                 self.assertEqual(core.derive_api_host("https://kp.m-team.cc/"),
@@ -447,6 +496,11 @@ class SiteManagementTests(unittest.TestCase):
                                  "https://api.m-team.cc/api")
                 self.assertEqual(core.derive_api_host(""), core.DEFAULT_API_HOST)
                 self.assertEqual(core.derive_api_host(None), core.DEFAULT_API_HOST)
+                hosts = core.api_host_candidates("https://api.m-team.io/api")
+                self.assertEqual(hosts[0], "https://api.m-team.io/api")
+                self.assertIn(core.DEFAULT_API_HOST, hosts)
+                self.assertEqual(len(hosts), len(set(hosts)))
+                self.assertEqual(core.api_host_candidates(None)[0], core.DEFAULT_API_HOST)
 
     def test_pick_mteam_site_prefers_configured_then_autodetect(self):
         sites = [
@@ -465,25 +519,6 @@ class SiteManagementTests(unittest.TestCase):
                 self.assertFalse(core.is_mteam_site({"domain": "example.com"}))
                 self.assertIsNone(core.pick_mteam_site(None))
 
-    def test_report_carries_site_and_credential(self):
-        for core in CORES:
-            with self.subTest(core=core.__name__):
-                client, _opener = build_client(core, [profile_ok(1792147191401)])
-                report = client.fetch_last_browse(api_key="KEY", site_label="m-team.cc",
-                                                  credential="站点管理 API Key")
-                self.assertTrue(report.ok)
-                self.assertEqual(report.site, "m-team.cc")
-                self.assertEqual(report.credential, "站点管理 API Key")
-
-    def test_api_host_candidates_prefers_primary_then_known(self):
-        for core in CORES:
-            with self.subTest(core=core.__name__):
-                hosts = core.api_host_candidates("https://api.m-team.io/api")
-                self.assertEqual(hosts[0], "https://api.m-team.io/api")
-                self.assertIn(core.DEFAULT_API_HOST, hosts)
-                self.assertEqual(len(hosts), len(set(hosts)))
-                self.assertEqual(core.api_host_candidates(None)[0], core.DEFAULT_API_HOST)
-
     def test_looks_like_api_response(self):
         for core in CORES:
             with self.subTest(core=core.__name__):
@@ -492,22 +527,17 @@ class SiteManagementTests(unittest.TestCase):
                 self.assertFalse(core.looks_like_api_response({}))
                 # 原始响应体：真 JSON 才算命中，HTML（如 403）不算
                 self.assertTrue(core.looks_like_api_response(b'{"code":1,"message":"bogus"}'))
-                self.assertFalse(core.looks_like_api_response(b"<html><title>403 Forbidden</title></html>"))
+                self.assertFalse(
+                    core.looks_like_api_response(b"<html><title>403 Forbidden</title></html>"))
                 self.assertFalse(core.looks_like_api_response(b""))
 
-    def test_plugin_reads_credentials_from_site_management(self):
-        for directory in PLUGIN_DIRS:
-            with self.subTest(directory=directory.name):
-                source = (directory / "__init__.py").read_text(encoding="utf-8")
-                # 必须从站点操作层读取站点列表，而不是只依赖手动填写
-                self.assertIn("SiteOper", source)
-                self.assertIn(".list()", source)
-                self.assertIn('config.get("site")', source)
-                # 站点缺失 / 缺 API Key 时给出指向站点管理的可操作提示
-                self.assertIn("站点管理", source)
-                # 前后端分离：按站点地址推导 + 多候选自动回退
-                self.assertIn("api_host_candidates", source)
-                self.assertIn("api_ok", source)
+    def test_hint_for_translates_site_errors(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                self.assertIn("站点管理", core.hint_for("key\u7121\u6548"))
+                self.assertIn("凭证", core.hint_for("\u7121\u6548\u7684\u6191\u8b49"))
+                self.assertIn("api.", core.hint_for("Request method 'GET' is not supported"))
+                self.assertEqual(core.hint_for("something else"), "")
 
 
 if __name__ == "__main__":
