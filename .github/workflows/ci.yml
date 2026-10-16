@@ -25,4 +25,13 @@ jobs:
       - name: Run unit tests
         run: python -m unittest discover -s tests -t . -v
       - name: Check V2/V3 byte-for-byte parity
-        run: diff -r plugins.v2/ptsitesignin plugins.v3/ptsitesignin
+        run: |
+          for dir in plugins.v2/*/; do
+            name="$(basename "$dir")"
+            diff -r "plugins.v2/$name" "plugins.v3/$name"
+          done
+          # 反向检查：V3 里也不能有 V2 缺失的插件目录
+          for dir in plugins.v3/*/; do
+            name="$(basename "$dir")"
+            test -d "plugins.v2/$name"
+          done

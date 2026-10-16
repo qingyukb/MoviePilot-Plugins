@@ -32,6 +32,24 @@
 - 插件详情页统计表（站点 / 方式 / 状态 / 时间 / 结果，含实际奖励如爆米花 / 魔力值）+ 通知模式三档（每次执行后 / 仅失败时 / 不通知）
 - Cookie 与 Token 不写入日志，签到结果按天留存（自动清理，仅保留最近 30 天）
 
+### [馒头登录](plugins.v2/mteamlogin)
+
+登录 [M-Team（馒头）](https://kp.m-team.cc/) 并读取站点**真实**的「最近动向」时间，支持 MoviePilot V2 与 V3。
+
+M-Team 的网页前端在登录成功后会立刻调用 `/member/updateLastBrowse`，把「最近动向」刷新成当前时间——所以用浏览器或普通脚本登录后看到的时间其实是刚刚的登录动作。本插件只调用 `POST /api/login` 与 `GET /api/member/profile`，**从不**调用 `updateLastBrowse`，因此拿到的是账号真实的最后活跃时间。
+
+- V2：[`plugins.v2/mteamlogin`](plugins.v2/mteamlogin)
+- V3：[`plugins.v3/mteamlogin`](plugins.v3/mteamlogin)
+
+主要功能：
+
+- 账号密码登录，自动计算 M-Team 的自定义签名（`base64(HMAC-SHA1(secret, "METHOD&path&ts_ms"))`，表单字段是站点自身的拼写 `_sgin`）
+- 登录成功后从响应头取 `authorization`，再读 `/member/profile` 的 `data.memberStatus.lastBrowse`（页面上「最近动向」的取值字段）
+- 支持两步验证：填 OTP 密钥自动生成动态码，或临时填 6 位动态码 / 邮箱验证码 / Telegram 验证码
+- 支持 API Key（`x-api-key`）兜底，绕开登录环节与人机验证
+- 插件详情页展示「最近动向」绝对时间与距今时长，保留最近 30 天历史
+- Cron 定时执行、保存后立即执行一次、三档通知模式；密码与 Token 不写入日志
+
 ## 安装
 
 ### 通过插件市场（推荐）
@@ -67,15 +85,21 @@ cp -r /tmp/mp-plugins/plugins.v3/ptsitesignin /config/plugins/
 ├── package.v3.json            # V3 插件市场清单
 ├── icons/                     # 插件图标
 ├── plugins.v2/                # 兼容 MoviePilot V2 的插件
-│   └── ptsitesignin/
-│       ├── __init__.py        # 插件入口：配置页 / 结果页 / 调度
-│       ├── core.py            # 双引擎核心逻辑（不依赖 MoviePilot）
+│   ├── ptsitesignin/
+│   │   ├── __init__.py        # 插件入口：配置页 / 结果页 / 调度
+│   │   ├── core.py            # 双引擎核心逻辑（不依赖 MoviePilot）
+│   │   ├── README.md
+│   │   ├── signin.png
+│   │   └── tools/
+│   │       └── collect-rule-snippet.js   # 新站点规则采集脚本
+│   └── mteamlogin/
+│       ├── __init__.py        # 插件入口：配置页 / 详情页 / 调度
+│       ├── core.py            # 签名、登录、最近动向查询（不依赖 MoviePilot）
 │       ├── README.md
-│       ├── signin.png
-│       └── tools/
-│           └── collect-rule-snippet.js   # 新站点规则采集脚本
+│       └── mteam.png
 └── plugins.v3/                # 兼容 MoviePilot V3 的插件
-    └── ptsitesignin/
+    ├── ptsitesignin/
+    └── mteamlogin/
 ```
 
 ## 添加新站点规则
