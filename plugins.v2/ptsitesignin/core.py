@@ -47,6 +47,13 @@ DEFAULT_CLOUDFLARE_WAIT = 10
 AUTO_SUBMIT_METHODS = {"auto", "turnstile_auto"}
 # auto 提交方式等待 Turnstile token 出现的默认毫秒数，可用站点规则字段 auto_wait 覆盖。
 DEFAULT_AUTO_WAIT = 20000
+# 二次注入（把 solve 返回的 token 回填页面并触发提交）的 evaluate 步骤必须在脚本自身等待
+# 预算之外再留出余量：BQL 的 evaluate 步骤默认 30 秒超时（可用 preferences 改），预算相等时
+# 脚本会在等待循环里被步骤超时掐死，连一句诊断都写不出来——只留下脚本刚启动时的初始快照，
+# 日志里那句「未拿到 Turnstile token」就是这么来的假结论。
+INJECT_STEP_MARGIN_MS = 12000
+# 复用 solve 所在浏览器会话（BrowserQL reconnect）的默认空闲保留毫秒数。
+DEFAULT_RECONNECT_WAIT = 60000
 # 第一段 Cloudflare 挑战通过后，等待签到页内嵌 Turnstile 渲染的默认毫秒数。
 DEFAULT_SOLVE2_WAIT = 3000
 # Turnstile 复选框从外层 Cloudflare 放行到 iframe 渲染完成的最长等待时间。
@@ -175,11 +182,15 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "path": "/attendance.php",
         "submit_selector": "form[action*='attendance.php'] input[type='submit']",
     },
-    # ---- 观众（Audiences）：签到页内嵌 Turnstile，验证通过后由站点回调自动提交 ----
-    # 多轮实测：solve 能通过 shadow DOM 里的 Turnstile 并把 token 写入隐藏输入框，但
-    # submit_method=none 时站点回调不会自动触发、表单也不会提交，二次核验永远停在
-    # 「验证通过后将自动完成签到」。改为 submit_method=auto：solve 拿到 token 后由
-    # 自动脚本调用 data-callback（拿不到回调时兜底 POST 表单），真正把签到发出去。
+    # ---- 观众（Audiences）：签到页内嵌 Turnstile，验证通过后由站点自行提交 ----
+    # 该站 Turnstile 渲染在 closed shadow DOM 里（本地 Edge 复现），页面 JS 读不到
+    # cf-turnstile-response，DOM 上也没有可调的 data-callback；而 Browserless 的 solve 只
+    # 负责生成 token（写在响应的 token 字段里），不会触发站点挂在自己 widget 上的提交逻辑。
+    # 所以 submit_method=auto 走两段式：
+    #   第一段：打开签到页 + solve 拿 token + reconnect 留住同一个浏览器会话；
+    #   第二段：在同一会话里把 token 回填页面、试着调站点回调，必要时按表单真实 action 兜底
+    #          POST（上游 NexusPHP 的契约就是 POST /attendance.php 带 cf-turnstile-response），
+    #          最后在同一个会话里重新打开 attendance.php 核验真实状态。
     "audiences.me": {
         "engine": "browserless",
         "mode": "cloudflare",
@@ -865,6 +876,23 @@ def bql_endpoint(address: str, token: str) -> str:
                                     urllib.parse.urlencode(query), ""))
 
 
+def session_endpoint(address: str, token: str) -> str:
+    """给 BrowserQL ``reconnect`` 返回的会话地址补上 API token（该地址本身不含 token）。
+
+    只补查询参数、不改路径：会话地址自带 ``/e/<uuid>/...`` 前缀，重写路径会让它失效。
+    """
+    address, token = str(address or "").strip(), str(token or "").strip()
+    if not address or not token:
+        return ""
+    parsed = urllib.parse.urlparse(address)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return ""
+    query = dict(urllib.parse.parse_qsl(parsed.query, keep_blank_values=True))
+    query["token"] = token
+    return urllib.parse.urlunparse((parsed.scheme, parsed.netloc, parsed.path, "",
+                                    urllib.parse.urlencode(query), ""))
+
+
 def _submit_script(selector: str, method: str, captcha_input: Optional[str] = None,
                    submit_text: Optional[str] = None) -> str:
     selector_json = json.dumps(selector)
@@ -916,64 +944,124 @@ def _trigger_script(selector: str) -> str:
     })()""" % json.dumps(selector)
 
 
-def _turnstile_auto_script(rule: Mapping[str, Any]) -> str:
-    """页面内嵌 Turnstile「验证通过后自动签到」的补充提交脚本（观众 Audiences 类站点）。
+def _turnstile_inject_script(rule: Mapping[str, Any], token: str = "") -> str:
+    """把 solve 返回的 Turnstile token 回填页面并触发站点提交（观众 Audiences 类站点）。
 
-    Browserless 的 solve 只会把验证结果写进隐藏输入框（必要时连勾选都不显示），**不会**
-    触发站点挂在 Turnstile 回调上的自动提交逻辑，所以这里按页面实际结构依次补一刀：
+    Browserless 的 ``solve`` 只负责生成 token（写在响应的 ``token`` 字段里），**不会**触发
+    站点挂在 Turnstile 上的提交逻辑；而签到页的 widget 渲染在 closed shadow DOM 里，页面 JS
+    既读不到 ``input[name=cf-turnstile-response]``，也找不到 ``data-callback`` 元素。所以
+    token 必须由插件从 solve 响应里带回来，在同一个浏览器会话里显式注入，再按页面实际结构
+    依次补一刀：
 
-    1. 先主动调用 ``data-callback`` 指向的站点回调，让站点自己的 JS 完成提交；
-    2. 回调不存在或抛错时，再按表单真实 ``action`` 做同源 POST（没有表单则 POST 当前
-       签到页），并带上表单中已有的字段和提交按钮字段。
+    1. 把 token 写进所有能找到的 ``cf-turnstile-response`` 输入框（含 open shadow DOM）；
+       页面自己已经产出 token 时（``turnstile.getResponse()``）优先用它；
+    2. 调用站点回调：DOM 上的 ``data-callback``，以及闭包渲染时常见的全局函数名候选；
+    3. 页面仍停在 pending 文案时，再按表单真实 ``action`` 做同源 POST 兜底（没有表单就 POST
+       当前签到页），带上表单字段与 token——上游 NexusPHP 的签到契约就是
+       ``POST /attendance.php`` 带 ``cf-turnstile-response``。
 
-    回调有可能触发整页提交，因此回调放到 setTimeout 中异步触发，当前 evaluate 先返回；
-    回调若只是 AJAX，等 2.5 秒后若页面仍在 pending 状态，再触发一次表单 POST 兜底。
-    每步结果写入 ``window.__ptsignin_auto`` / sessionStorage，失败时由
-    ``auto_submit_hint`` 输出，便于判断到底是 token、回调还是提交环节出了问题。
+    每一步都写进 ``window.__ptsignin_auto`` / sessionStorage，由 ``auto_submit_hint`` 输出，
+    保证诊断是真实观测，而不是脚本刚启动时的初始快照。脚本自身等待预算为 ``auto_wait``，
+    调用方必须把 evaluate 步骤超时设成 ``auto_wait + INJECT_STEP_MARGIN_MS``（见
+    ``submit_timeout_ms``），否则脚本会在等待循环里被步骤超时掐死，诊断全丢。
     """
     wait = auto_wait_ms(rule)
     pending = json.dumps([str(item) for item in (rule.get("pending_keywords") or [])],
                          ensure_ascii=False)
     return """(async () => {
-      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const solveToken = %s;
       const pendingWords = %s;
-      const diag = {token: false, src: null, cb: null, form: false, act: null, post: null};
+      const sel = %s;
+      const waitBudget = %d;
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const diag = {token: false, src: null, len: 0, cb: null, cands: [], called: null,
+                    form: false, act: null, post: null, still: null, turnstile: false,
+                    inputs: 0, widget: false, frames: 0, text: ''};
       const save = () => {
         window.__ptsignin_auto = diag;
         try { sessionStorage.setItem('__ptsignin_auto', JSON.stringify(diag)); } catch (err) {}
       };
       save();
-      const sel = '%s';
-      const inputToken = () => { const el = document.querySelector(sel); return (el && (el.value || '').trim()) || ''; };
-      const apiToken = () => {
-        try {
-          if (window.turnstile && typeof window.turnstile.getResponse === 'function') {
-            return (window.turnstile.getResponse() || '').trim();
+
+      // open shadow root 也要一起扫：widget 用 open 模式渲染时，响应输入框藏在 shadow root 里
+      const picker = () => {
+        const roots = [document];
+        for (let index = 0; index < roots.length; index += 1) {
+          const all = roots[index].querySelectorAll('*');
+          for (let i = 0; i < all.length; i += 1) {
+            if (all[i].shadowRoot) roots.push(all[i].shadowRoot);
           }
-        } catch (err) { return ''; }
-        return '';
+        }
+        return (selector) => {
+          const found = [];
+          roots.forEach((root) => {
+            root.querySelectorAll(selector).forEach((node) => {
+              if (found.indexOf(node) < 0) found.push(node);
+            });
+          });
+          return found;
+        };
       };
-      const readToken = () => {
-        const viaInput = inputToken();
-        if (viaInput) { diag.src = 'input'; return viaInput; }
-        const viaApi = apiToken();
-        if (viaApi) { diag.src = 'turnstile'; return viaApi; }
-        return '';
+      let pick = picker();
+      let inputs = pick(sel);
+      const callbackNodes = pick('[data-callback]');
+      diag.inputs = inputs.length;
+      diag.widget = pick('[data-sitekey], .cf-turnstile').length > 0;
+      diag.frames = pick('iframe').length;
+      diag.turnstile = !!(window.turnstile && typeof window.turnstile.getResponse === 'function');
+      save();
+
+      const readApi = () => {
+        try { return diag.turnstile ? (window.turnstile.getResponse() || '').trim() : ''; }
+        catch (err) { return ''; }
       };
-      const deadline = Date.now() + %d;
-      while (!readToken() && Date.now() < deadline) await sleep(250);
-      const token = readToken();
+      const readInput = () => {
+        return inputs.map((node) => (node.value || '').trim()).filter(Boolean)[0] || '';
+      };
+      const putToken = (value) => {
+        inputs.forEach((node) => {
+          node.value = value;
+          node.dispatchEvent(new Event('input', { bubbles: true }));
+          node.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+      };
+      let token = (solveToken || '').trim();
+      if (token) { diag.src = 'solve'; }
+      else {
+        token = readInput();
+        if (token) { diag.src = 'input'; }
+        else { token = readApi(); if (token) { diag.src = 'turnstile'; } }
+      }
+      if (token) { putToken(token); }
+      const stillPending = () => {
+        const text = (document.body && document.body.innerText) || '';
+        return pendingWords.some((word) => word && text.indexOf(word) !== -1);
+      };
+      // solve 没给 token 时，再给页面一点时间自己产出
+      if (!token) {
+        const deadline = Date.now() + waitBudget;
+        let refresh = false;
+        while (!token && Date.now() < deadline) {
+          await sleep(250);
+          if (refresh) { pick = picker(); inputs = pick(sel); }
+          refresh = !refresh;
+          token = readInput() || readApi();
+          if (token) { diag.src = diag.src || 'late'; putToken(token); }
+        }
+      }
       diag.token = !!token;
-      const forms = Array.prototype.slice.call(document.querySelectorAll('form'));
+      diag.len = token.length;
+      save();
+
+      const forms = pick('form');
       const form = forms.filter((item) => /attendance/i.test(item.getAttribute('action') || ''))[0]
         || forms.filter((item) => item.querySelector(sel))[0]
         || forms.filter((item) => (item.method || '').toLowerCase() === 'post')[0] || null;
       if (form) { diag.form = true; }
-
       const formData = () => {
         const data = form ? new FormData(form) : new FormData();
         if (!form) {
-          document.querySelectorAll('input[name], textarea[name], select[name]').forEach((el) => {
+          pick('input[name], textarea[name], select[name]').forEach((el) => {
             if (!el.disabled && !data.has(el.name)) data.append(el.name, el.value || '');
           });
         }
@@ -981,15 +1069,14 @@ def _turnstile_auto_script(rule: Mapping[str, Any]) -> str:
         if (submit && submit.name && !submit.disabled && !data.has(submit.name)) {
           data.append(submit.name, submit.value || '');
         }
-        if (token) data.set('cf-turnstile-response', token);
+        if (token) { data.set('cf-turnstile-response', token); }
         return data;
       };
-
       const postFallback = async () => {
         const actionValue = form ? (form.getAttribute('action') || location.href) : location.href;
         const action = new URL(actionValue, location.href);
         if (action.origin !== location.origin) {
-          diag.act = diag.act ? diag.act + '+post-blocked' : 'post-blocked';
+          diag.act = (diag.act ? diag.act + '+' : '') + 'post-blocked';
           save();
           return;
         }
@@ -997,96 +1084,112 @@ def _turnstile_auto_script(rule: Mapping[str, Any]) -> str:
           const response = await fetch(action.href, {
             method: 'POST', credentials: 'same-origin', body: formData()
           });
-          window.__ptsignin_response = {status: response.status, url: response.url, text: await response.text()};
+          window.__ptsignin_response = {status: response.status, url: response.url,
+                                        text: await response.text()};
           diag.post = response.status;
-          diag.act = diag.act ? diag.act + '+post' : 'post';
-          save();
         } catch (err) {
           diag.post = 'error';
-          diag.act = diag.act ? diag.act + '+post-error' : 'post-error';
-          save();
         }
+        save();
       };
 
-      const stillPending = () => {
-        const text = (document.body && document.body.innerText) || '';
-        return pendingWords.some((word) => word && text.indexOf(word) !== -1);
-      };
-
-      const widget = document.querySelector('[data-callback]');
-      const cbName = (widget && (widget.getAttribute('data-callback') || '').trim()) || '';
-      if (cbName) {
-        diag.cb = cbName;
-        const cb = window[cbName];
-        if (typeof cb === 'function') {
-          diag.act = 'callback-scheduled';
-          save();
-          setTimeout(async () => {
-            try {
-              cb(token);
-              diag.act = 'callback';
-              save();
-            } catch (err) {
-              diag.act = 'callback-error';
-              save();
-              await postFallback();
-              return;
-            }
-            setTimeout(async () => {
-              if (stillPending()) {
-                diag.act = diag.act + '+fallback';
-                save();
-                await postFallback();
-              }
-            }, 2500);
-          }, 0);
-          return JSON.stringify(diag);
-        }
-        diag.act = 'callback-missing';
+      // 进页面就已经不在 pending 状态：站点可能已自行签完（例如本轮之前就签过），别重复提交
+      if (pendingWords.length && !stillPending()) {
+        diag.still = false;
+        diag.act = 'already-done';
+        diag.text = ((document.body && document.body.innerText) || '').slice(0, 160);
+        save();
+        return JSON.stringify(diag);
       }
 
-      // 二次 solve 可能已经触发了站点回调并完成签到，此时不要再重复 POST 一次。
-      if (token && (!pendingWords.length || stillPending())) await postFallback();
+      // 1) 站点回调：data-callback 优先，其次是闭包渲染时的常见全局名
+      const names = [];
+      callbackNodes.forEach((node) => {
+        const name = (node.getAttribute('data-callback') || '').trim();
+        if (name && names.indexOf(name) < 0) names.push(name);
+      });
+      diag.cb = names[0] || null;
+      ['cfCallback', 'turnstileCallback', 'onTurnstileSuccess', 'onTurnstileVerify',
+       'onVerify', 'verifyCallback', 'onCaptchaSuccess', 'captchaCallback'].forEach((name) => {
+        if (names.indexOf(name) < 0) names.push(name);
+      });
+      diag.cands = names.slice(0, 12);
+      if (!token) {
+        diag.act = 'no-token';
+      } else {
+        let lastError = '';
+        for (let i = 0; i < names.length; i += 1) {
+          if (typeof window[names[i]] !== 'function') { continue; }
+          try {
+            window[names[i]](token);
+            diag.called = names[i];
+            diag.act = 'callback';
+            break;
+          } catch (err) {
+            lastError = names[i];
+          }
+        }
+        if (!diag.called && lastError) { diag.act = 'callback-error:' + lastError; }
+        else if (!diag.called) { diag.act = callbackNodes.length ? 'callback-missing' : 'callback-absent'; }
+      }
+      save();
+      if (diag.called) { await sleep(2500); }
+      // 2) 页面还停在验证中（或站点没配 pending 文案）时，按表单真实 action 兜底 POST
+      if (token && !diag.post && (stillPending() || !pendingWords.length)) {
+        diag.act = (diag.act ? diag.act + '+' : '') + 'fallback';
+        save();
+        await postFallback();
+        await sleep(1500);
+      }
+      diag.still = stillPending();
+      diag.text = ((document.body && document.body.innerText) || '').slice(0, 160);
       save();
       return JSON.stringify(diag);
-    })()""" % (pending, TURNSTILE_TOKEN_SELECTOR, wait)
+    })()""" % (json.dumps(token or ""), pending, json.dumps(TURNSTILE_TOKEN_SELECTOR), wait)
 
 
-def build_query(rule: Mapping[str, Any], user_agent: Optional[str] = None) -> str:
-    """构造一次签到的 BrowserQL mutation。
+def build_query(rule: Mapping[str, Any], user_agent: Optional[str] = None,
+                reuse_session: bool = True) -> str:
+    """构造第一段签到的 BrowserQL mutation。
 
-    Cloudflare / Turnstile 默认使用 ``solve:solve``（不限制类型）以支持自动检测。
-    ``submit_method=turnstile_click`` 用于必须手动勾选复选框的页面：先用 BrowserQL
-    深度选择器等待 iframe 内 checkbox 可见，再用原生 click 点击；点击成功后站点回调
-    会自动提交表单。``solve_count=0`` 时不调用 solve。
+    Cloudflare / Turnstile 默认使用 ``solve:solve``（不限制类型）以支持自动检测，并把
+    ``token`` 一起取回来：官方文档明确 ``solve`` 只负责生成 token，站点挂在 Turnstile 上的
+    回调不会因此触发，必须由插件把 token 回填页面（见 ``build_inject_query``）。
+
+    所以 ``submit_method=auto`` 的站点这一轮只做「打开签到页 + solve 拿 token + 保留会话」：
+    ``reconnect`` 返回下一次请求要用的 ``browserQLEndpoint``，第二段请求打到该地址即可拿到
+    同一个浏览器（cookie / cf_clearance / 页面状态都还在）。``reuse_session=False`` 时不申请
+    会话复用，用于自建 / 旧版 Browserless 没有 ``reconnect`` 的情况。
+
+    ``submit_method=turnstile_click`` 用于必须手动勾选复选框的页面：先用 BrowserQL 深度选择器
+    等待 iframe 内 checkbox 可见，再用原生 click 点击；``solve_count=0`` 时不调用 solve。
     """
     image = rule["mode"] in {"image", "trigger_image"}
     triggered_image = rule["mode"] == "trigger_image"
     altcha = rule["mode"] == "altcha"
-    verifies_success = bool(rule.get("verify_success_path"))
+    submit_method = str(rule.get("submit_method") or "click")
+    auto_submit = submit_method in AUTO_SUBMIT_METHODS
+    # auto 提交的核验放在第二段（注入 token 之后）做：这一轮还没有提交动作可核验
+    verifies_success = bool(rule.get("verify_success_path")) and not auto_submit
     needs_solver = solver_enabled(rule)
     second_solve = secondary_solve_enabled(rule)
-    submit_method = str(rule.get("submit_method") or "click")
     native_click = submit_method in {"click", "turnstile_click"}
     turnstile_click = submit_method == "turnstile_click"
-    # submit_method=auto：页面没有提交按钮、由验证回调自己提交（自定义规则）；solve 只
-    # 生成 token 不触发回调，所以由插件补一刀显式提交。
-    auto_submit = submit_method in AUTO_SUBMIT_METHODS
-    # submit_method=none：什么都不点，纯等页面自己签完
-    skip_submit = submit_method in {"none", "skip"}
+    # auto 这一轮不点提交：只等页面把验证组件渲染出来，token 由 solve 取回后第二段再注入
+    skip_submit = submit_method in {"none", "skip"} or auto_submit
     solve = (
-        "solve:solveImageCaptcha(captchaSelector:$captchaSelector,inputSelector:$captchaInputSelector,timeout:$solveTimeout){found solved time}"
+        "solve:solveImageCaptcha(captchaSelector:$captchaSelector,inputSelector:$captchaInputSelector,timeout:$solveTimeout){found solved time token}"
         if image and needs_solver
-        else "solve:solve(timeout:$solveTimeout){found solved time}"
+        else "solve:solve(timeout:$solveTimeout){found solved time token}"
         if rule["mode"] == "cloudflare" and needs_solver
         else "solve:evaluate(content:\"'skipped'\"){value}"
     )
     if second_solve:
         # 第一次 solve 可能解决 /attendance.php 外层的 Cloudflare 交互挑战；等待页面切换后，
         # 再对签到页内嵌的 Turnstile 执行一次 solve。没有这一步时，第一次 solve 返回时
-        # 第二段验证尚未发生，后续 autoSubmit 就只会看到空的 cf-turnstile-response。
+        # 第二段验证尚未发生，第二段注入就只会拿到空的 cf-turnstile-response。
         solve += ("\n      waitBetweenSolves:waitForTimeout(time:$solve2Wait){time}"
-                  "\n      solve2:solve(timeout:$solve2Timeout){found solved time}")
+                  "\n      solve2:solve(timeout:$solve2Timeout){found solved time token}")
     extra = "$captchaSelector:String! $captchaInputSelector:String!" if image else ""
     set_user_agent = "userAgent(userAgent:$userAgent){time}" if user_agent else ""
     user_agent_variable = " $userAgent:String!" if user_agent else ""
@@ -1097,8 +1200,8 @@ def build_query(rule: Mapping[str, Any], user_agent: Optional[str] = None) -> st
         variable_suffix += " $selector:String!"
         if turnstile_click:
             variable_suffix += " $turnstileWait:Float!"
-    elif auto_submit:
-        variable_suffix += " $autoSubmit:String!"
+    elif auto_submit and reuse_session:
+        variable_suffix += " $reconnectTimeout:Float!"
     elif not skip_submit:
         variable_suffix += " $submit:String!"
     if triggered_image:
@@ -1114,8 +1217,9 @@ def build_query(rule: Mapping[str, Any], user_agent: Optional[str] = None) -> st
         if rule.get("verify_wait") is not None:
             verify += "\n      waitForVerify:waitForTimeout(time:$verifyWait){time}"
         verify += "\n      verifyPage:html{html}"
-    auto_diag = ("" if not auto_submit else
-                 'autoDiag:evaluate(content:"JSON.stringify(window.__ptsignin_auto || (function(){try{return JSON.parse(sessionStorage.getItem(\'__ptsignin_auto\')||\'null\')}catch(e){return null}})())"){value}')
+    keep_session = ""
+    if auto_submit and reuse_session:
+        keep_session = "\n      session:reconnect(timeout:$reconnectTimeout){browserQLEndpoint}"
     if extra:
         variable_suffix += " " + extra
     variable_suffix += user_agent_variable
@@ -1132,8 +1236,7 @@ def build_query(rule: Mapping[str, Any], user_agent: Optional[str] = None) -> st
       waitAfter:waitForTimeout(time:$wait){time}
       response:evaluate(content:"JSON.stringify(window.__ptsignin_response || null)"){value}
       %s
-      %s
-      after:html{html}
+      after:html{html}%s
     }""" % (variable_suffix, set_user_agent,
             "trigger:evaluate(content:$trigger){value}\n      waitForTrigger:waitForTimeout(time:$triggerWait){time}" if triggered_image else "",
             "altcha:click(selector:$altchaSelector){selector time}" if altcha else "",
@@ -1141,10 +1244,51 @@ def build_query(rule: Mapping[str, Any], user_agent: Optional[str] = None) -> st
             ("waitForTurnstile:waitForSelector(selector:$selector,timeout:$turnstileWait,visible:true){selector time}\n      "
              if turnstile_click else "")
             + ("submit:click(selector:$selector){selector time}" if native_click
-               else "submit:evaluate(content:$autoSubmit){value}" if auto_submit
                else "" if skip_submit else "submit:evaluate(content:$submit){value}"),
-            auto_diag,
-            verify)
+            verify,
+            keep_session)
+
+
+def build_inject_query(rule: Mapping[str, Any], user_agent: Optional[str] = None,
+                       navigate: bool = False) -> str:
+    """构造第二段 BrowserQL：把 solve 拿到的 Turnstile token 回填签到页并提交。
+
+    ``navigate=True`` 是没有会话复用地址（自建 / 旧版 Browserless 没有 ``reconnect``）时的
+    退路：新会话里先补一次 goto 打开签到页，并按 cloudflare_wait 等挑战放行；复用会话时页面
+    状态都还在，不需要重新导航。提交与核验（``verify_success_path``）都在这一段完成，所以
+    最终判定以这一段为准。``evaluate`` 显式带上 ``timeout``：默认 30 秒会砍掉脚本自己的等待。
+    """
+    set_user_agent = "userAgent(userAgent:$userAgent){time}" if user_agent else ""
+    user_agent_variable = " $userAgent:String!" if user_agent else ""
+    # 只声明真正用到的变量：BQL 是 GraphQL，多声明一个就会整段查询报错
+    variables = "$cookies:[CookieInput!]! $wait:Float! $autoSubmit:String! $autoTimeout:Float!"
+    steps: List[str] = ["cookies(cookies:$cookies){cookies{name}}"]
+    if navigate:
+        variables += " $url:String! $beforeWait:Float!"
+        steps.append("goto(url:$url,waitUntil:domContentLoaded){status}")
+        steps.append("waitBefore:waitForTimeout(time:$beforeWait){time}")
+        steps.append("before:html{html}")
+    steps.append("submit:evaluate(content:$autoSubmit,timeout:$autoTimeout){value}")
+    steps.append("waitAfter:waitForTimeout(time:$wait){time}")
+    steps.append("autoDiag:evaluate(content:\"JSON.stringify(window.__ptsignin_auto "
+                 "|| (function(){try{return JSON.parse(sessionStorage.getItem('__ptsignin_auto')"
+                 "||'null')}catch(e){return null}})())\"){value}")
+    steps.append("response:evaluate(content:\"JSON.stringify(window.__ptsignin_response "
+                 "|| null)\"){value}")
+    steps.append("after:html{html}")
+    if rule.get("verify_success_path"):
+        variables += " $verifyUrl:String!"
+        if rule.get("verify_wait") is not None:
+            variables += " $verifyWait:Float!"
+        steps.append("verify:goto(url:$verifyUrl,waitUntil:domContentLoaded){status}")
+        if rule.get("verify_wait") is not None:
+            steps.append("waitForVerify:waitForTimeout(time:$verifyWait){time}")
+        steps.append("verifyPage:html{html}")
+    variables += user_agent_variable
+    return """mutation CheckInSubmit(%s) {
+      %s
+      %s
+    }""" % (variables, set_user_agent, "\n      ".join(steps))
 
 
 def build_preflight_query(user_agent: Optional[str] = None, wait: int = 2000) -> str:
@@ -1258,11 +1402,41 @@ def solve2_timeout_ms(rule: Mapping[str, Any]) -> int:
     return max(5000, min(milli, 120000))
 
 
-def bql_wait_budget_ms(rule: Mapping[str, Any]) -> int:
-    """估算一次 BQL mutation 内部的等待总时长（毫秒）。
+def submit_timeout_ms(rule: Mapping[str, Any]) -> int:
+    """第二段「注入 token 并提交」的 evaluate 步骤超时（毫秒）。
 
-    BrowserQL 是「整段执行完才返回响应」的整包请求：如果 HTTP 读超时比页面内等待预算
-    还短，插件会自己先掐断连接，报出 The read operation timed out 这种自伤式失败。
+    BQL 的 ``evaluate`` 步骤默认 30 秒超时（可用 preferences 改），而脚本自身的等待预算就是
+    ``auto_wait``：两者相等时脚本会在等待循环里被步骤超时掐死，窗口里只剩脚本启动瞬间写下的
+    初始快照——历史日志里那句「未拿到 Turnstile token / 页面没有 data-callback 回调」就是这么
+    来的假结论。这里固定比脚本预算多留 ``INJECT_STEP_MARGIN_MS``。
+    """
+    return max(15000, min(auto_wait_ms(rule) + INJECT_STEP_MARGIN_MS, 120000))
+
+
+def reconnect_wait_ms(rule: Mapping[str, Any]) -> int:
+    """BrowserQL 会话复用的空闲保留毫秒数（10~300 秒，可用 reconnect_wait 覆盖）。
+
+    solve 生成的 token 只能在同一个浏览器会话里注入，所以第一段结束后要把会话留住，
+    第二段才来得及用 ``browserQLEndpoint`` 接回同一个浏览器。
+    """
+    try:
+        milli = int(float(rule.get("reconnect_wait") or DEFAULT_RECONNECT_WAIT))
+    except (TypeError, ValueError):
+        milli = DEFAULT_RECONNECT_WAIT
+    return max(10000, min(milli, 300000))
+
+
+def navigation_wait_ms(rule: Mapping[str, Any]) -> int:
+    """打开页面后留给 Cloudflare 交互挑战自行放行的毫秒数（非 cloudflare 模式只等 2 秒）。"""
+    return cloudflare_wait_ms(rule) if str(rule.get("mode")) == "cloudflare" else 2000
+
+
+def bql_wait_budget_ms(rule: Mapping[str, Any]) -> int:
+    """估算一次签到的 BQL 页面内等待总时长（毫秒）。
+
+    BrowserQL 是「整段执行完才返回响应」的整包请求：如果 HTTP 读超时比页面内等待预算还短，
+    插件会自己先掐断连接，报出 The read operation timed out 这种自伤式失败。``auto`` 提交的
+    站点会跑两段请求（第一段 solve 拿 token、第二段注入提交），这里按两段之和上估，宁大勿小。
     """
     total = 0
     if str(rule.get("mode")) == "cloudflare":
@@ -1283,12 +1457,21 @@ def bql_wait_budget_ms(rule: Mapping[str, Any]) -> int:
         total += max(0, int(rule.get("wait") or 3500))
     except (TypeError, ValueError):
         total += 3500
+    if str(rule.get("submit_method") or "").lower() in AUTO_SUBMIT_METHODS:
+        # 第二段：导航等待 + 注入脚本预算（含 evaluate 余量）+ 提交后的等待
+        total += navigation_wait_ms(rule)
+        total += submit_timeout_ms(rule)
+        try:
+            total += max(0, int(rule.get("wait") or 3500))
+        except (TypeError, ValueError):
+            total += 3500
     if rule.get("verify_success_path"):
         try:
             total += max(1000, min(int(rule.get("verify_wait") or 8000), 20000))
         except (TypeError, ValueError):
             total += 8000
     return total
+
 
 
 def solver_enabled(rule: Mapping[str, Any]) -> bool:
@@ -1389,11 +1572,27 @@ def solver_hint(first: Any, second: Any = None) -> str:
     return "解题诊断：" + "；".join(parts) if parts else ""
 
 
+def solve_token(*results: Any) -> str:
+    """取出 solve / solve2 响应里的 Turnstile token。
+
+    官方 ``CaptchaResponse`` 里本来就有 ``token`` 字段：``solve`` 只负责生成 token，不会触发
+    站点挂在 Turnstile 上的提交逻辑。所以这个 token 必须由插件带回页面注入（见
+    ``build_inject_query``）；只取 found/solved/time 等于把唯一能用的东西扔了。
+    """
+    for item in results:
+        if isinstance(item, Mapping):
+            value = str(item.get("token") or "").strip()
+            if value:
+                return value
+    return ""
+
+
 def auto_submit_hint(value: Any) -> str:
     """把页面里 ``window.__ptsignin_auto`` 的现场诊断翻译成一句中文提示。
 
-    用于「页面仍停在人机验证」这类失败：token 到底有没有生成、站点回调有没有触发、
-    表单有没有提交、兜底 POST 返回什么，直接写在失败原因里，省得来回猜。
+    用于「页面仍停在人机验证」这类失败：token 到底有没有拿到、从哪儿拿到的、站点回调有没有
+    触发、表单有没有提交、兜底 POST 返回什么、页面是不是真的还在等人机验证，直接写在失败原因
+    里，省得来回猜。
     """
     if not value or value == "null":
         return ""
@@ -1403,22 +1602,34 @@ def auto_submit_hint(value: Any) -> str:
         return ""
     if not isinstance(state, Mapping):
         return ""
-    parts = ["已拿到 Turnstile token" if state.get("token") else "未拿到 Turnstile token"]
+    source_label = {"solve": "来自 solve 返回的 token", "input": "来自页面输入框",
+                    "turnstile": "来自 turnstile.getResponse()",
+                    "late": "页面后来自行产出"}.get(str(state.get("src") or ""), "")
+    length = state.get("len")
+    if state.get("token"):
+        detail = f"（{source_label}，长度 {length}）" if source_label and length else ""
+        parts = [f"已拿到 Turnstile token{detail}"]
+    else:
+        parts = ["未拿到 Turnstile token"]
     name = str(state.get("cb") or "").strip()
+    called = str(state.get("called") or "").strip()
     action = str(state.get("act") or "")
-    if name:
-        if action.startswith("callback-scheduled"):
-            parts.append(f"已调度站点回调 {name}（执行结果未确认）")
-        elif action.startswith("callback-error"):
-            parts.append(f"站点回调 {name} 执行失败")
+    if called:
+        parts.append(f"已调用站点回调 {called}")
+    elif name:
+        if action.startswith("callback-error"):
+            failed = action.split(":", 1)[-1] or name
+            parts.append(f"站点回调 {failed} 执行失败")
         elif action.startswith("callback-missing"):
             parts.append(f"页面声明的站点回调 {name} 不存在")
         elif action.startswith("callback"):
             parts.append(f"已调用站点回调 {name}")
         else:
-            parts.append(f"站点回调 {name} 没能调用")
+            parts.append(f"站点回调 {name} 未调用（{action or '原因未知'}）")
     else:
-        parts.append("页面没有 data-callback 回调")
+        candidates = [str(item) for item in (state.get("cands") or []) if str(item).strip()]
+        parts.append("页面没有 data-callback 回调"
+                     + (f"（{len(candidates)} 个常见回调名都不存在）" if candidates else ""))
     if state.get("form"):
         parts.append("已提交页面表单")
     post = state.get("post")
@@ -1426,7 +1637,23 @@ def auto_submit_hint(value: Any) -> str:
         parts.append(f"兜底 POST 返回 HTTP {post}")
     elif post:
         parts.append("兜底 POST 失败")
+    if state.get("still") is True:
+        parts.append("页面仍停在人机验证")
+    scene: List[str] = []
+    inputs = state.get("inputs")
+    if state.get("widget") is False and inputs == 0:
+        scene.append("页面没有 Turnstile widget / 响应输入框")
+    elif inputs == 0:
+        scene.append("widget 在 closed shadow DOM 内，页面 JS 取不到响应输入框")
+    if state.get("turnstile") is False:
+        scene.append("window.turnstile 不可用")
+    if scene:
+        parts.append("现场：" + "、".join(scene))
+    text = str(state.get("text") or "").strip()
+    if text and state.get("still"):
+        parts.append("页面文字「" + text[:60] + "」")
     return "诊断：" + "；".join(parts)
+
 
 
 def classify(html: str, rule: Mapping[str, Any]) -> SignResult:
@@ -1493,6 +1720,8 @@ class BrowserlessSigner:
 
     def __init__(self, address: str, token: str, timeout: int = 100):
         self.endpoint = bql_endpoint(address, token)
+        # reconnect 返回的会话地址不带 token，第二段请求要靠它复用同一个浏览器
+        self.token = str(token or "").strip()
         self.timeout = max(15, min(int(timeout), 300))
 
     def request_timeout(self, rule: Mapping[str, Any]) -> int:
@@ -1530,6 +1759,57 @@ class BrowserlessSigner:
             return SignResult("success", _bonus_message(
                 "主流程响应丢失，但重新打开签到页确认签到成功", page_text(html), rule))
         return None
+
+    def _inject_submit(self, base_url: str, cookies: List[Dict[str, Any]], user_agent: str,
+                       rule: Mapping[str, Any], token: str,
+                       first: Mapping[str, Any]) -> Any:
+        """第二段：把 solve 拿到的 token 回填签到页并触发站点提交。
+
+        返回 ``dict``（第二段的 BrowserQL 数据，交给调用方判定）、``SignResult``（已经能确定的
+        结论，例如回查确认已签到、Browserless 鉴权 / 额度错误）或 ``None``（拿不到可用结果，
+        调用方回落到第一段数据判定）。
+        """
+        session = first.get("session") if isinstance(first, Mapping) else None
+        endpoint = session_endpoint(str((session or {}).get("browserQLEndpoint") or ""), self.token)
+        navigate = not endpoint
+        variables: Dict[str, Any] = {
+            "cookies": cookies,
+            "url": target_url(base_url, str(rule["path"])),
+            "wait": int(rule.get("wait") or 3500),
+            "autoSubmit": _turnstile_inject_script(rule, token),
+            "autoTimeout": submit_timeout_ms(rule),
+        }
+        if navigate:
+            # 拿不到会话复用地址：新会话里页面还没打开，先补一次导航与放行等待
+            variables["beforeWait"] = navigation_wait_ms(rule)
+        if rule.get("verify_success_path"):
+            variables["verifyUrl"] = target_url(base_url, str(rule["verify_success_path"]))
+            if rule.get("verify_wait") is not None:
+                try:
+                    verify_wait = int(rule.get("verify_wait"))
+                except (TypeError, ValueError):
+                    verify_wait = 8000
+                variables["verifyWait"] = max(1000, min(verify_wait, 20000))
+        if user_agent:
+            variables["userAgent"] = user_agent
+        data = self._request(variables, "CheckInSubmit",
+                             build_inject_query(rule, user_agent, navigate=navigate),
+                             timeout=self.request_timeout(rule), endpoint=endpoint or None)
+        if isinstance(data, SignResult):
+            if not data.transient:
+                return data
+            # 响应丢失时结果未知：补一次只读回查，别把已签到报成网络失败
+            rechecked = self._recheck_after_transient(base_url, cookies, user_agent, rule)
+            if rechecked is not None:
+                return rechecked
+            return SignResult(
+                "failed",
+                f"{data.message}；token 注入阶段的响应丢失，已重新打开签到页核对，"
+                "未能确认为已签到")
+        if isinstance(data, dict):
+            # 复用会话的第二段没有 goto 步骤：调用方据此跳过导航状态判定
+            data["_reused_session"] = not navigate
+        return data
 
     def sign(self, site: Mapping[str, Any], rule: Mapping[str, Any]) -> SignResult:
         base_url = str(site.get("url") or "").rstrip("/")
@@ -1580,8 +1860,9 @@ class BrowserlessSigner:
         if submit_method in {"click", "turnstile_click"}:
             variables["selector"] = rule["submit_selector"]
         elif submit_method in AUTO_SUBMIT_METHODS:
-            # solve 只生成 Turnstile token、不触发站点回调：这里补一次显式提交
-            variables["autoSubmit"] = _turnstile_auto_script(rule)
+            # 第一段只负责 solve 拿 token（token 由插件带回，第二段注入提交，见 _inject_submit）；
+            # 这里只把会话多留一会儿，保证第二段还能接回同一个浏览器。
+            variables["reconnectTimeout"] = reconnect_wait_ms(rule)
         elif submit_method in {"none", "skip"}:
             # 页面在人机验证通过后自己提交签到，不需要点任何按钮
             pass
@@ -1605,7 +1886,8 @@ class BrowserlessSigner:
         if rule["mode"] in {"image", "trigger_image"}:
             variables.update({"captchaSelector": rule["captcha_selector"],
                               "captchaInputSelector": rule["captcha_input_selector"]})
-        if rule.get("verify_success_path"):
+        if rule.get("verify_success_path") and submit_method not in AUTO_SUBMIT_METHODS:
+            # auto 提交的核验放在第二段（注入 token 之后）做
             variables["verifyUrl"] = target_url(base_url, str(rule["verify_success_path"]))
             if rule.get("verify_wait") is not None:
                 try:
@@ -1618,6 +1900,13 @@ class BrowserlessSigner:
 
         data = self._request(variables, "CheckIn", build_query(rule, user_agent),
                              timeout=self.request_timeout(rule))
+        if (isinstance(data, SignResult) and submit_method in AUTO_SUBMIT_METHODS
+                and not data.transient and "reconnect" in data.message.lower()):
+            # 自建 / 旧版 Browserless 可能没有 reconnect：去掉会话复用再试一次
+            variables.pop("reconnectTimeout", None)
+            data = self._request(variables, "CheckIn",
+                                 build_query(rule, user_agent, reuse_session=False),
+                                 timeout=self.request_timeout(rule))
         if isinstance(data, SignResult):
             if data.transient:
                 # 超时 / 连接中断时结果未知：补一次只读回查，别把已签到报成网络失败
@@ -1629,21 +1918,54 @@ class BrowserlessSigner:
                     f"{data.message}；已重新打开签到页核对，未能确认为已签到，"
                     "请稍后重试或改用更近的 Browserless 节点")
             return data
-        after_html = str((data.get("after") or {}).get("html") or "")
         solve = data.get("solve") or {}
         solve2 = data.get("solve2") or {}
+        inject_note = ""
+        if submit_method in AUTO_SUBMIT_METHODS:
+            # 第一段页面就已经是成功 / 已签到：站点自己签完了，别再注入一次
+            first_after = str((data.get("after") or {}).get("html") or "")
+            settled = classify(first_after, rule)
+            if settled.status == "success":
+                return settled
+            if settled.status == "already":
+                # 预检时还停在人机验证、solve 之后变成「今日已签到」：本轮刚签上，按成功上报
+                if pre_state_pending:
+                    return SignResult("success",
+                                      _bonus_message("签到成功", page_text(first_after), rule))
+                return settled
+            first_errors = list(data.get("_errors") or [])
+            outcome = self._inject_submit(base_url, cookies, user_agent, rule,
+                                          solve_token(solve, solve2), data)
+            if isinstance(outcome, SignResult):
+                return outcome
+            if isinstance(outcome, dict):
+                data = outcome
+                data["_errors"] = first_errors + list(outcome.get("_errors") or [])
+            else:
+                inject_note = "token 注入阶段未拿到可用响应"
+        after_html = str((data.get("after") or {}).get("html") or "")
+        # data 可能已经换成第二段的结果：solve 诊断仍以第一段为准（第二段没有 solve 步骤）
+        solve = data.get("solve") or solve
+        solve2 = data.get("solve2") or solve2
         # auto 提交的现场诊断：token 有没有生成、回调有没有触发、表单有没有提交；
         # 再加上 BrowserQL 各步骤自己的报错（如 solve 超时），它只是诊断、不代表整轮失败。
         auto_hint = auto_submit_hint((data.get("autoDiag") or {}).get("value"))
         solve_hint = solver_hint(solve, solve2)
         step_hint = step_error_hint(data.get("_errors"))
-        auto_hint = "；".join(part for part in (solve_hint, step_hint, auto_hint) if part)
+        auto_hint = "；".join(part for part in (solve_hint, step_hint, inject_note, auto_hint)
+                              if part)
         # 已经等满预算却仍卡在挑战页：给出可操作的提示，而不是笼统的「打开签到页失败」
         if mode == "cloudflare" and cloudflare_pending(after_html):
             return SignResult("failed", append_hint(
                 f"Cloudflare 挑战在 {page_wait // 1000} 秒内未自动放行；"
                 "可在该站规则里调大 cloudflare_wait 后重试", auto_hint))
-        if not navigation_ok(mode, (data.get("goto") or {}).get("status"), after_html):
+        goto = data.get("goto")
+        if isinstance(goto, Mapping):
+            navigation_broken = not navigation_ok(mode, goto.get("status"), after_html)
+        else:
+            # 复用会话的第二段没有 goto 步骤，没有状态码可判：按会话复用标记跳过导航判定
+            navigation_broken = not data.get("_reused_session")
+        if navigation_broken:
             return SignResult("failed", append_hint("打开签到页失败", auto_hint))
         if rule["mode"] in {"image", "trigger_image"} and not solve.get("found"):
             return SignResult("failed", "未找到图片验证码；请检查验证码图片选择器")

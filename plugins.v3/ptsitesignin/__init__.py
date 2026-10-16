@@ -62,7 +62,7 @@ class PTSiteSignIn(_PluginBase):
     plugin_desc = ("双引擎 PT 签到，可选真实登录刷新 Cookie 并读取站点「最近动向」：HTTP 直连签到接口，"
                    "或经 Browserless 完成验证码 / Cloudflare / Turnstile 挑战。")
     plugin_icon = "signin.png"
-    plugin_version = "1.3.1"
+    plugin_version = "1.3.2"
     plugin_author = "qingyu"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "ptsignin_"
@@ -299,6 +299,8 @@ class PTSiteSignIn(_PluginBase):
                              "label": "自定义站点规则 JSON（可留空）", "rows": 10,
                              "hint": '键为域名或站点 ID。HTTP：{"path":"/attendance.php","success":"正则","already":"正则"}；'
                                      'Browserless：{"engine":"browserless","mode":"cloudflare|image|trigger_image|altcha|open_page", ...}；'
+                                     '页面内嵌 Turnstile、验证通过后由站点自己提交的站点（如观众）用 {"submit_method":"auto","solve_count":1}：'
+                                     '插件先 solve 取回 token，再在同一个浏览器会话里把 token 注入页面并提交（auto_wait 控等 token 时间、reconnect_wait 控会话保留时间）；'
                                      'Cloudflare「Just a moment...」交互挑战默认在页面等待 10 秒自动放行，可用 {"cloudflare_wait": 20} 调大',
                              "persistent-hint": True}}]},
             ]},

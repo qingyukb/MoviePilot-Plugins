@@ -67,17 +67,46 @@ def make_stub_signer(core, responses):
         def __init__(self):
             # 不联网：只补齐 request_timeout() 需要的属性，_request 由下面的桩接管
             self.endpoint = "https://example.test/bql"
+            self.token = "token"
             self.timeout = 100
             self.responses = list(responses)
             self.calls = []
             self.queries = []
+            self.endpoints = []
 
         def _request(self, variables, operation, query, **kwargs):
             self.calls.append((operation, dict(variables)))
             self.queries.append(query)
+            self.endpoints.append(kwargs.get("endpoint"))
             return self.responses.pop(0)
 
     return _StubSigner()
+
+
+def inject_payload(after_html, verify_html=None, diag=None, goto=None):
+    """第二段（CheckInSubmit）的预置响应：注入脚本现场诊断 + 提交后的页面。
+
+    goto 只在第二段自己导航（没有会话可复用）时才有值。
+    """
+    state = {"token": True, "src": "solve", "len": 1180, "cb": None, "cands": [],
+             "called": None, "form": False, "act": "callback-absent", "post": None,
+             "still": True, "turnstile": True, "inputs": 0, "widget": True, "frames": 2,
+             "text": "每日签到 完成人机验证即可领取今日爆米花奖励"}
+    if diag:
+        state.update(diag)
+    body = json.dumps(state, ensure_ascii=False)
+    payload = {
+        "submit": {"value": body},
+        "autoDiag": {"value": body},
+        "response": {"value": None},
+        "after": {"html": after_html},
+    }
+    if goto is not None:
+        payload["goto"] = {"status": goto}
+    if verify_html is not None:
+        payload["verify"] = {"status": 200}
+        payload["verifyPage"] = {"html": verify_html}
+    return payload
 
 
 class CoreRegressionTests(unittest.TestCase):
@@ -335,8 +364,10 @@ class BrowserlessAudiencesTests(unittest.TestCase):
         # 否则插件会自己先掐断连接，报出 The read operation timed out 这种自伤式失败。
         rule = self._rule()
         budget = self.core.bql_wait_budget_ms(rule)
-        # cloudflare_wait 15s + solve 40s + wait 15s + verify_wait 15s
-        self.assertEqual(budget, 85000)
+        # 第一段：cloudflare_wait 15s + solve 40s + wait 15s
+        # 第二段：导航等待 15s + 注入脚本预算 42s（auto_wait 30s + evaluate 余量 12s）+ wait 15s
+        # 再加回查等待 verify_wait 15s
+        self.assertEqual(budget, 157000)
         signer = self.core.BrowserlessSigner("https://example.test/bql", "token", 100)
         self.assertGreater(signer.request_timeout(rule), 100)
         self.assertGreaterEqual(signer.request_timeout(rule) * 1000, budget + 45000)
@@ -371,52 +402,77 @@ class BrowserlessAudiencesTests(unittest.TestCase):
         self.assertIn("Browserless 请求超时", result.message)
         self.assertIn("未能确认为已签到", result.message)
 
-    def test_query_waits_for_page_auto_submit(self):
-        # 观众预设：一次 solve 处理进站 Cloudflare 挑战，solve 生成 token 后再补一次
-        # 显式提交（autoSubmit），最后重新打开 attendance.php 回查真实状态。
+    def test_query_solves_and_keeps_session_for_injection(self):
+        # 观众预设：第一段只「打开签到页 + solve 拿 token + reconnect 保留会话」，
+        # 提交与核验都在第二段（token 回填页面之后）做。
         rule = self._rule()
         query = self.core.build_query(rule)
-        self.assertIn("solve:solve(timeout:$solveTimeout)", query)
+        self.assertIn("solve:solve(timeout:$solveTimeout){found solved time token}", query)
         self.assertNotIn("solve2:solve", query)
         self.assertIn("$solveTimeout", query)
         self.assertNotIn("$solve2Timeout", query)
         self.assertNotIn("$solve2Wait", query)
-        self.assertIn("$autoSubmit", query)
-        self.assertIn("submit:evaluate(content:$autoSubmit)", query)
-        self.assertNotIn("submit:click", query)
-        self.assertNotIn("waitForTurnstile", query)
-        self.assertNotIn("$turnstileWait", query)
-        self.assertNotIn("$submit:", query)
-        self.assertIn("verify:goto", query)
-        self.assertIn("waitForVerify", query)
-        self.assertIn("$verifyWait", query)
+        self.assertIn("session:reconnect(timeout:$reconnectTimeout){browserQLEndpoint}", query)
+        self.assertIn("$reconnectTimeout", query)
+        # 第一段没有提交动作，也不在这里核验
+        self.assertNotIn("$autoSubmit", query)
+        self.assertNotIn("submit:", query)
+        self.assertNotIn("verify:goto", query)
+        self.assertNotIn("$verifyWait", query)
+        # 不复用会话时（自建 / 旧版 Browserless）不能声明用不到的变量，否则 GraphQL 整段报错
+        self.assertNotIn("reconnect", self.core.build_query(rule, None, reuse_session=False))
 
-    def test_solves_outer_challenge_then_reports_success(self):
+    def test_inject_query_shape(self):
+        rule = self._rule()
+        reused = self.core.build_inject_query(rule, navigate=False)
+        self.assertIn("mutation CheckInSubmit(", reused)
+        self.assertIn("submit:evaluate(content:$autoSubmit,timeout:$autoTimeout)", reused)
+        self.assertIn("verify:goto(url:$verifyUrl,waitUntil:domContentLoaded)", reused)
+        self.assertNotIn("goto(url:$url", reused)
+        self.assertNotIn("$url:", reused)
+        navigated = self.core.build_inject_query(rule, navigate=True)
+        self.assertIn("goto(url:$url,waitUntil:domContentLoaded)", navigated)
+        self.assertIn("waitBefore:waitForTimeout(time:$beforeWait)", navigated)
+        self.assertIn("$url:String!", navigated)
+
+    def test_solve_token_is_injected_in_same_session(self):
         signer = self._signer([
             # 预检：页面还是「未签到 + 等人机验证」
             {"goto": {"status": 200}, "before": {"html": AUDIENCES_PENDING_HTML}},
-            # 主流程：只 solve 一次进站挑战，之后等待页面自行完成签到并回查状态
-            {"goto": {"status": 200}, "solve": {"found": True, "solved": True},
+            # 第一段：solve 拿 token，并申请复用同一个浏览器会话
+            {"goto": {"status": 200},
+             "solve": {"found": True, "solved": True, "token": "TURNSTILE-TOKEN"},
              "response": {},
              "before": {"html": AUDIENCES_PENDING_HTML},
-             "after": {"html": AUDIENCES_HOME_HTML},
-             "verify": {"status": 200},
-             "verifyPage": {"html": AUDIENCES_SIGNED_HTML}},
+             "after": {"html": AUDIENCES_PENDING_HTML},
+             "session": {"browserQLEndpoint":
+                         "https://production-sfo.browserless.io/e/abc/chromium/bql/xyz"}},
+            # 第二段：注入 token 后站点签上了，回查看到成功页
+            inject_payload(AUDIENCES_PENDING_HTML, verify_html=AUDIENCES_SIGNED_HTML),
         ])
         result = signer.sign(self.site, self._rule())
         self.assertEqual(result.status, "success")
         self.assertIn("22", result.message)
+        # 第一段：只 solve 拿 token + 留住会话
         self.assertEqual(signer.calls[1][1]["beforeWait"], 15000)
         self.assertEqual(signer.calls[1][1]["solveTimeout"], 40000)
+        self.assertEqual(signer.calls[1][1]["reconnectTimeout"], 60000)
         self.assertNotIn("solve2Timeout", signer.calls[1][1])
         self.assertNotIn("solve2Wait", signer.calls[1][1])
         self.assertEqual(signer.calls[1][1]["wait"], 15000)
-        self.assertEqual(signer.calls[1][1]["verifyWait"], 15000)
-        self.assertEqual(signer.calls[1][1]["verifyUrl"],
-                         "https://audiences.me/attendance.php")
         self.assertNotIn("selector", signer.calls[1][1])
         self.assertNotIn("turnstileWait", signer.calls[1][1])
-        self.assertIn("autoSubmit", signer.calls[1][1])
+        self.assertNotIn("autoSubmit", signer.calls[1][1])
+        self.assertIsNone(signer.endpoints[1])
+        # 第二段：打到 reconnect 返回的会话地址，token 由插件带回页面注入
+        self.assertEqual(signer.calls[2][0], "CheckInSubmit")
+        self.assertEqual(signer.endpoints[2],
+                         "https://production-sfo.browserless.io/e/abc/chromium/bql/xyz?token=token")
+        self.assertIn('"TURNSTILE-TOKEN"', signer.calls[2][1]["autoSubmit"])
+        self.assertEqual(signer.calls[2][1]["autoTimeout"], 42000)
+        self.assertEqual(signer.calls[2][1]["verifyWait"], 15000)
+        self.assertEqual(signer.calls[2][1]["verifyUrl"],
+                         "https://audiences.me/attendance.php")
         self.assertEqual(signer.calls[0][0], "CheckInPreflight")
         self.assertEqual(signer.calls[1][0], "CheckIn")
 
@@ -431,25 +487,37 @@ class BrowserlessAudiencesTests(unittest.TestCase):
     def test_still_pending_reports_actionable_failure(self):
         signer = self._signer([
             {"goto": {"status": 200}, "before": {"html": AUDIENCES_PENDING_HTML}},
-            {"goto": {"status": 200}, "solve": {}, "submit": {}, "response": {},
+            {"goto": {"status": 200}, "solve": {"found": True, "solved": True, "token": "T"},
+             "response": {},
              "before": {"html": AUDIENCES_PENDING_HTML},
              "after": {"html": AUDIENCES_PENDING_HTML},
-             "verify": {"status": 200},
-             "verifyPage": {"html": AUDIENCES_PENDING_HTML}},
+             "session": {"browserQLEndpoint": "https://example.test/e/1/bql/2"}},
+            inject_payload(AUDIENCES_PENDING_HTML, verify_html=AUDIENCES_PENDING_HTML,
+                           diag={"post": 200, "form": True,
+                                 "act": "callback-absent+fallback"}),
         ])
         result = signer.sign(self.site, self._rule())
         self.assertEqual(result.status, "failed")
         self.assertIn("人机验证", result.message)
         self.assertIn("自动完成签到", result.message)
+        # 现场诊断必须说清 token 来源、回调、兜底 POST 与页面残留状态
+        self.assertIn("已拿到 Turnstile token", result.message)
+        self.assertIn("来自 solve 返回的 token", result.message)
+        self.assertIn("没有 data-callback", result.message)
+        self.assertIn("兜底 POST 返回 HTTP 200", result.message)
+        self.assertIn("页面仍停在人机验证", result.message)
 
-    def test_pending_main_but_signed_verify_is_success(self):
+    def test_pending_after_injection_but_signed_verify_is_success(self):
+        # 兜底 POST 不会刷新页面（after 仍是「等人机验证」），但站点已经签上了：
+        # 回查 attendance.php 看到签到状态就按成功上报。
         signer = self._signer([
             {"goto": {"status": 200}, "before": {"html": AUDIENCES_PENDING_HTML}},
-            {"goto": {"status": 200}, "solve": {}, "submit": {}, "response": {},
+            {"goto": {"status": 200}, "solve": {"found": True, "solved": True, "token": "T"},
+             "response": {},
              "before": {"html": AUDIENCES_PENDING_HTML},
              "after": {"html": AUDIENCES_PENDING_HTML},
-             "verify": {"status": 200},
-             "verifyPage": {"html": AUDIENCES_SIGNED_HTML}},
+             "session": {"browserQLEndpoint": "https://example.test/e/1/bql/2"}},
+            inject_payload(AUDIENCES_PENDING_HTML, verify_html=AUDIENCES_SIGNED_HTML),
         ])
         result = signer.sign(self.site, self._rule())
         self.assertEqual(result.status, "success")
@@ -458,11 +526,12 @@ class BrowserlessAudiencesTests(unittest.TestCase):
     def test_homepage_and_pending_verify_is_failure(self):
         signer = self._signer([
             {"goto": {"status": 200}, "before": {"html": AUDIENCES_PENDING_HTML}},
-            {"goto": {"status": 200}, "solve": {}, "submit": {}, "response": {},
+            {"goto": {"status": 200}, "solve": {"found": True, "solved": True, "token": "T"},
+             "response": {},
              "before": {"html": AUDIENCES_PENDING_HTML},
-             "after": {"html": AUDIENCES_HOME_HTML},
-             "verify": {"status": 200},
-             "verifyPage": {"html": AUDIENCES_PENDING_HTML}},
+             "after": {"html": AUDIENCES_PENDING_HTML},
+             "session": {"browserQLEndpoint": "https://example.test/e/1/bql/2"}},
+            inject_payload(AUDIENCES_HOME_HTML, verify_html=AUDIENCES_PENDING_HTML),
         ])
         result = signer.sign(self.site, self._rule())
         self.assertEqual(result.status, "failed")
@@ -472,11 +541,12 @@ class BrowserlessAudiencesTests(unittest.TestCase):
     def test_homepage_and_homepage_verify_is_failure(self):
         signer = self._signer([
             {"goto": {"status": 200}, "before": {"html": AUDIENCES_PENDING_HTML}},
-            {"goto": {"status": 200}, "solve": {}, "submit": {}, "response": {},
+            {"goto": {"status": 200}, "solve": {"found": True, "solved": True, "token": "T"},
+             "response": {},
              "before": {"html": AUDIENCES_PENDING_HTML},
-             "after": {"html": AUDIENCES_HOME_HTML},
-             "verify": {"status": 200},
-             "verifyPage": {"html": AUDIENCES_HOME_HTML}},
+             "after": {"html": AUDIENCES_PENDING_HTML},
+             "session": {"browserQLEndpoint": "https://example.test/e/1/bql/2"}},
+            inject_payload(AUDIENCES_HOME_HTML, verify_html=AUDIENCES_HOME_HTML),
         ])
         result = signer.sign(self.site, self._rule())
         self.assertEqual(result.status, "failed")
@@ -496,46 +566,61 @@ class BrowserlessAudiencesTests(unittest.TestCase):
         result = signer.sign(self.site, self._rule())
         self.assertEqual(result.status, "success")
 
-    def test_auto_submit_script_and_failure_diagnostics(self):
-        # 自定义为 auto 时仍保留 solve -> callback / 表单 POST 的兼容路径
-        rule = dict(self._rule(), submit_method="auto", solve_count=2,
-                    solve_timeout=20000, solve2_wait=3000)
+    def test_auto_inject_script_and_failure_diagnostics(self):
+        # solve 只生成 token、不触发站点提交：token 必须由插件带回第二段注入页面再提交
+        rule = self._rule()
         signer = self._signer([
             {"goto": {"status": 200}, "before": {"html": AUDIENCES_PENDING_HTML}},
-            {"goto": {"status": 200}, "solve": {"found": True, "solved": True},
-             "solve2": {"found": True, "solved": False},
-             "submit": {}, "response": {},
-             "autoDiag": {"value": json.dumps(
-                 {"token": False, "cb": None, "form": False, "act": None, "post": None},
-                 ensure_ascii=False)},
+            {"goto": {"status": 200}, "solve": {"found": True, "solved": True, "token": "TOKEN-X"},
+             "response": {},
              "before": {"html": AUDIENCES_PENDING_HTML},
              "after": {"html": AUDIENCES_PENDING_HTML},
-             "verify": {"status": 200},
-             "verifyPage": {"html": AUDIENCES_PENDING_HTML}},
+             "session": {"browserQLEndpoint": "https://example.test/e/1/bql/2"}},
+            inject_payload(AUDIENCES_PENDING_HTML, verify_html=AUDIENCES_PENDING_HTML,
+                           diag={"post": 200, "form": True,
+                                 "act": "callback-absent+fallback"}),
         ])
         result = signer.sign(self.site, rule)
         self.assertEqual(result.status, "failed")
-        self.assertIn("submit:evaluate(content:$autoSubmit)", signer.queries[1])
-        self.assertIn("solve2:solve", signer.queries[1])
-        self.assertNotIn("$submit:", signer.queries[1])
-        script = signer.calls[1][1]["autoSubmit"]
+        # 第一段只有 solve + 会话复用
+        self.assertIn("solve:solve(timeout:$solveTimeout){found solved time token}",
+                      signer.queries[1])
+        self.assertIn("session:reconnect", signer.queries[1])
+        self.assertNotIn("$autoSubmit", signer.queries[1])
+        # 第二段：注入 + 提交 + 回查，evaluate 必须显式带 timeout
+        self.assertIn("mutation CheckInSubmit", signer.queries[2])
+        self.assertIn("submit:evaluate(content:$autoSubmit,timeout:$autoTimeout)",
+                      signer.queries[2])
+        self.assertIn("verify:goto", signer.queries[2])
+        script = signer.calls[2][1]["autoSubmit"]
+        self.assertIn('"TOKEN-X"', script)
         self.assertIn("cf-turnstile-response", script)
         self.assertIn("data-callback", script)
         self.assertIn("method: 'POST'", script)
         self.assertIn("credentials: 'same-origin'", script)
         self.assertIn("getAttribute('action')", script)
         self.assertIn("sessionStorage", script)
-        self.assertIn("callback-scheduled", script)
         self.assertIn("return JSON.stringify(diag)", script)
         self.assertIn("__ptsignin_auto", script)
-        self.assertIn("未拿到 Turnstile token", result.message)
-        self.assertIn("页面没有 data-callback 回调", result.message)
+        self.assertNotIn("%", script)   # %-格式化后不应残留占位符
         self.assertIn("解题诊断", result.message)
-        self.assertIn("二次 solve", result.message)
+        self.assertIn("二次核验", result.message)
 
-    def test_auto_submit_script_waits_token_with_rule_budget(self):
-        script = self.core._turnstile_auto_script(dict(self._rule(), auto_wait=15000))
-        self.assertIn("Date.now() + 15000", script)
+    def test_script_budget_and_step_timeout_are_ordered(self):
+        script = self.core._turnstile_inject_script(dict(self._rule(), auto_wait=15000), "T")
+        self.assertIn("const waitBudget = 15000;", script)
+        self.assertIn("Date.now() < deadline", script)
+        # 步骤超时必须严格大于脚本自身预算：两者相等时脚本会被 evaluate 默认的 30 秒超时
+        # 掐死在等待循环里，窗口里只剩启动瞬间的初始快照（历史那句假诊断就是这么来的）。
+        self.assertEqual(self.core.auto_wait_ms({"auto_wait": 30000}), 30000)
+        self.assertGreater(self.core.submit_timeout_ms({"auto_wait": 30000}), 30000)
+        self.assertEqual(self.core.submit_timeout_ms({"auto_wait": 30000}), 42000)
+        self.assertEqual(self.core.submit_timeout_ms({}), 32000)
+        self.assertEqual(self.core.reconnect_wait_ms({}), 60000)
+        self.assertEqual(self.core.reconnect_wait_ms({"reconnect_wait": 1000}), 10000)
+        self.assertEqual(self.core.reconnect_wait_ms({"reconnect_wait": 999999}), 300000)
+        self.assertEqual(self.core.navigation_wait_ms({"mode": "cloudflare"}), 10000)
+        self.assertEqual(self.core.navigation_wait_ms({"mode": "open_page"}), 2000)
         self.assertEqual(self.core.auto_wait_ms({"auto_wait": 1}), 3000)
         self.assertEqual(self.core.auto_wait_ms({}), 20000)
         rule = dict(self._rule(), solve_count=2, solve_timeout=20000, solve2_wait=3000)
@@ -563,12 +648,25 @@ class BrowserlessAudiencesTests(unittest.TestCase):
         self.assertIn("HTTP 200", hint)
 
     def test_diagnostics_distinguish_callback_states(self):
-        scheduled = self.core.auto_submit_hint(json.dumps(
-            {"token": True, "cb": "onTurnstileOk", "act": "callback-scheduled"},
+        solve_sourced = self.core.auto_submit_hint(json.dumps(
+            {"token": True, "src": "solve", "len": 1180, "cb": None, "cands": ["cfCallback"],
+             "act": "callback-absent"}, ensure_ascii=False))
+        self.assertIn("来自 solve 返回的 token", solve_sourced)
+        self.assertIn("长度 1180", solve_sourced)
+        self.assertIn("页面没有 data-callback", solve_sourced)
+
+        called = self.core.auto_submit_hint(json.dumps(
+            {"token": True, "cb": "cfCallback", "called": "cfCallback", "act": "callback"},
             ensure_ascii=False))
-        self.assertIn("已调度站点回调", scheduled)
-        self.assertIn("执行结果未确认", scheduled)
-        self.assertNotIn("已调用站点回调", scheduled)
+        self.assertIn("已调用站点回调 cfCallback", called)
+
+        stuck = self.core.auto_submit_hint(json.dumps(
+            {"token": True, "cb": None, "act": "no-token", "still": True, "inputs": 0,
+             "widget": True, "turnstile": False, "text": "验证通过后将自动完成签到"},
+            ensure_ascii=False))
+        self.assertIn("页面仍停在人机验证", stuck)
+        self.assertIn("closed shadow DOM", stuck)
+        self.assertIn("window.turnstile 不可用", stuck)
 
         failed = self.core.auto_submit_hint(json.dumps(
             {"token": True, "cb": "onTurnstileOk", "act": "callback-error+post"},
@@ -592,11 +690,12 @@ class BrowserlessAudiencesTests(unittest.TestCase):
     def test_verify_login_page_reports_cookie_problem(self):
         signer = self._signer([
             {"goto": {"status": 200}, "before": {"html": AUDIENCES_PENDING_HTML}},
-            {"goto": {"status": 200}, "solve": {}, "submit": {}, "response": {},
+            {"goto": {"status": 200}, "solve": {"found": True, "solved": True, "token": "T"},
+             "response": {},
              "before": {"html": AUDIENCES_PENDING_HTML},
              "after": {"html": AUDIENCES_PENDING_HTML},
-             "verify": {"status": 200},
-             "verifyPage": {"html": LOGIN_PAGE_HTML}},
+             "session": {"browserQLEndpoint": "https://example.test/e/1/bql/2"}},
+            inject_payload(AUDIENCES_PENDING_HTML, verify_html=LOGIN_PAGE_HTML),
         ])
         result = signer.sign(self.site, self._rule())
         self.assertEqual(result.status, "failed")
@@ -628,17 +727,58 @@ class BrowserlessAudiencesTests(unittest.TestCase):
             {"goto": {"status": 200}, "solve": None, "solve2": None,
              "_errors": [{"path": "solve",
                           "message": "Captcha solving timed out after 40000 ms"}],
-             "autoDiag": {"value": "null"}, "submit": {}, "response": {},
+             "response": {},
              "before": {"html": AUDIENCES_PENDING_HTML},
              "after": {"html": AUDIENCES_PENDING_HTML},
-             "verify": {"status": 200},
-             "verifyPage": {"html": AUDIENCES_PENDING_HTML}},
+             "session": {"browserQLEndpoint": "https://example.test/e/1/bql/2"}},
+            inject_payload(AUDIENCES_PENDING_HTML, verify_html=AUDIENCES_PENDING_HTML,
+                           diag={"token": False, "src": None, "len": 0, "still": True,
+                                 "act": "no-token"}),
         ])
         result = signer.sign(self.site, self._rule())
         self.assertEqual(result.status, "failed")
         self.assertIn("Browserless 步骤", result.message)
         self.assertIn("solve", result.message)
         self.assertIn("Captcha solving timed out", result.message)
+        # 第一段没拿到 token 时第二段照样跑：注入的是空 token，诊断如实说「未拿到」
+        self.assertIn('const solveToken = "";', signer.calls[2][1]["autoSubmit"])
+        self.assertIn("未拿到 Turnstile token", result.message)
+
+    def test_first_phase_already_signed_skips_injection(self):
+        # 第一段页面就已经是成功状态（例如今天早先已签）：不再注入一次，避免重复提交
+        signer = self._signer([
+            {"goto": {"status": 200}, "before": {"html": AUDIENCES_PENDING_HTML}},
+            {"goto": {"status": 200}, "solve": {"found": True, "solved": True, "token": "T"},
+             "response": {},
+             "before": {"html": AUDIENCES_PENDING_HTML},
+             "after": {"html": AUDIENCES_SIGNED_HTML}},
+        ])
+        result = signer.sign(self.site, self._rule())
+        self.assertEqual(result.status, "success")
+        self.assertEqual(len(signer.calls), 2)
+
+    def test_reconnect_unsupported_retries_without_session_reuse(self):
+        # 自建 / 旧版 Browserless 没有 reconnect 时整段查询会被拒：去掉会话复用再试一次
+        signer = self._signer([
+            {"goto": {"status": 200}, "before": {"html": AUDIENCES_PENDING_HTML}},
+            self.core.SignResult(
+                "failed",
+                'Browserless 执行失败：Cannot query field "reconnect" on type "Mutation"'),
+            {"goto": {"status": 200}, "solve": {"found": True, "solved": True, "token": "T"},
+             "response": {},
+             "before": {"html": AUDIENCES_PENDING_HTML},
+             "after": {"html": AUDIENCES_PENDING_HTML}},
+            inject_payload(AUDIENCES_PENDING_HTML, verify_html=AUDIENCES_SIGNED_HTML, goto=200),
+        ])
+        result = signer.sign(self.site, self._rule())
+        self.assertEqual(result.status, "success")
+        self.assertIn("session:reconnect", signer.queries[1])
+        self.assertNotIn("reconnect", signer.queries[2])
+        self.assertNotIn("reconnectTimeout", signer.calls[2][1])
+        # 没有会话可复用：第二段自己导航打开签到页
+        self.assertIn("goto(url:$url", signer.queries[3])
+        self.assertIn("beforeWait", signer.calls[3][1])
+        self.assertIsNone(signer.endpoints[3])
 
 
 class BrowserlessRequestTests(unittest.TestCase):

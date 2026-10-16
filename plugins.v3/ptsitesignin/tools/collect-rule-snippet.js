@@ -30,6 +30,54 @@
   const captchaInputs = [...document.querySelectorAll("input")]
     .filter((i) => /imagestring|captcha|verify|code|checkcode/i.test(i.name + i.id));
 
+  // Turnstile / 人机验证现场：widget 怎么渲染的、token 落在哪里、有没有可调的回调、
+  // 有没有提交按钮或表单——决定插件该用 auto（两段式注入提交）还是别的提交方式。
+  const turnstile = (() => {
+    const roots = [document];
+    for (let index = 0; index < roots.length; index += 1) {
+      roots[index].querySelectorAll("*").forEach((el) => {
+        if (el.shadowRoot) roots.push(el.shadowRoot);
+      });
+    }
+    const pickAll = (selector) => {
+      const found = [];
+      roots.forEach((root) => {
+        root.querySelectorAll(selector).forEach((node) => {
+          if (found.indexOf(node) < 0) found.push(node);
+        });
+      });
+      return found;
+    };
+    const widgets = pickAll(".cf-turnstile, [data-sitekey]");
+    const responses = pickAll('input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"]');
+    const callbackNodes = pickAll("[data-callback]");
+    const globals = [];
+    try {
+      Object.keys(window).forEach((key) => {
+        if (typeof window[key] === "function" && /turnstile|callback|verify|captcha/i.test(key)) {
+          globals.push(key);
+        }
+      });
+    } catch (err) { /* 跨域属性访问失败时忽略 */ }
+    return {
+      widgetCount: widgets.length,
+      widgetHtml: widgets.map((el) => (el.outerHTML || "").replace(/\s+/g, " ").slice(0, 240)),
+      dataCallback: callbackNodes.map((el) => el.getAttribute("data-callback")),
+      responseInputs: responses.map((el) => ({ sel: pick(el), valueLen: (el.value || "").length })),
+      openShadowRoots: roots.length - 1,
+      apiAvailable: !!(window.turnstile && typeof window.turnstile.getResponse === "function"),
+      apiTokenLen: (() => {
+        try {
+          return window.turnstile && window.turnstile.getResponse
+            ? (window.turnstile.getResponse() || "").length : 0;
+        } catch (err) { return -1; }
+      })(),
+      candidateGlobals: globals.slice(0, 20),
+      submitButtons: [...document.querySelectorAll("input[type=submit], button[type=submit]")]
+        .map((el) => ({ sel: pick(el), text: text(el) })),
+    };
+  })();
+
   const result = {
     url: location.href,
     title: document.title,
@@ -42,6 +90,7 @@
     buttons: buttons.map((b) => ({ sel: pick(b), text: text(b) })),
     captchaImgs: captchaImgs.map((i) => ({ sel: pick(i), src: i.src.slice(0, 90) })),
     captchaInputs: captchaInputs.map((i) => pick(i)),
+    turnstile,
     signals: {
       turnstile: !!document.querySelector(".cf-turnstile, iframe[src*='challenges.cloudflare.com']"),
       cloudflare: !!document.querySelector("#cf-chl-widget, .cf-turnstile, iframe[src*='challenges.cloudflare.com']"),

@@ -25,9 +25,9 @@
 - 默认复用 MoviePilot「站点管理」已保存的站点 Cookie 与 UA；账号密码直接写在站点管理的「附加信息」(note) 中（`{"username": "...", "password": "..."}`），签到前真实登录换回新 Cookie，不再维护插件内的账号 JSON
 - 内置 Audiences、OpenCD、包子、慕雪阁、OshenPT、LuckPT、YemaPT、HDSky、dstudio.me、mua.xloli.cc、share.ilolicon.com 的签到预设，按域名自动匹配
 - 签到后用登录态打开站点页面（站点管理里的 `activity_path` → 签到页 / 校验页 → 用户页 → 首页），读取「最近动向」（上次访问 / 上次签到等）并连站点自带的相对时间一起写入结果表与通知，形如 `2026-10-16 23:44:21 ( < 1分前 )`；没有账号密码时直接用站点管理里的 Cookie 签到，并在结果表标注「复用站点管理 Cookie」
-- 观众（Audiences）签到页内嵌 Cloudflare：实测打开 `/attendance.php` 后停在页面等待，Cloudflare 放行后页面会自行完成签到，不需要点复选框或触发 `data-callback`；预设改为 `submit_method=none` + `solve_count=1`，只处理进站交互挑战，随后等页面自动签到并回查 `/attendance.php` 确认真实状态
+- 观众（Audiences）签到页内嵌 Cloudflare Turnstile，且 widget 渲染在 closed shadow DOM 里：页面 JS 读不到 `cf-turnstile-response`，DOM 上也没有可调的 `data-callback`，而官方 `solve` 只生成 token（响应里的 `token` 字段）、不触发站点自己的提交逻辑。预设 `submit_method=auto` 走两段式：第一段 `solve` 取回 token 并用 `reconnect` 留住同一个浏览器会话，第二段在同一会话把 token 回填页面、尝试站点回调、必要时按表单真实 action 兜底 POST（上游 NexusPHP 契约即 `POST /attendance.php` 带 `cf-turnstile-response`），随后回查 `/attendance.php` 确认真实状态
 - BrowserQL 单步失败（如 `solve` 超时）不会中止整个 mutation，插件不再把它当成整轮失败：失败步骤的错误会并入诊断，页面或回查已显示签到成功时仍如实上报成功
-- 观众签到后会跳回首页，插件在同一浏览器会话回查 `/attendance.php` 并等待 15 秒，只有看到真实的已签到 / 签到成功状态才上报成功；仍停留在人机验证页或 302 到 `login.php` 时分别给出明确失败原因
+- 观众签到后会跳回首页，插件在第二段（注入 token 之后）于同一浏览器会话回查 `/attendance.php` 并等待 15 秒，只有看到真实的已签到 / 签到成功状态才上报成功；仍停留在人机验证页或 302 到 `login.php` 时分别给出明确失败原因，并把 token 来源与长度、站点回调是否被调用、兜底 POST 状态码、widget 是否在 closed shadow DOM 里一并写进失败原因
 - 观众成功页的奖励文案不会再误判为「今日已签到」，预检已签到与本轮刚签到的结果会分别确认
 - Cron 定时执行、保存后立即执行一次、进程级并发控制、后台 Timer 失败重试（不阻塞执行线程）
 - 未写规则的站点遇 Cloudflare / 验证码时自动回退到浏览器引擎重试，无需手工配规则
