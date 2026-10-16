@@ -3,13 +3,13 @@
     "name": "PT站点签到",
     "description": "双引擎 PT 签到，可选真实登录刷新 Cookie 并读取站点「最近动向」：HTTP 直连签到接口，或经 Browserless 完成图片验证码 / Cloudflare / Turnstile 挑战。",
     "labels": "站点,签到",
-    "version": "1.4.1",
+    "version": "1.4.2",
     "icon": "https://raw.githubusercontent.com/qingyukb/MoviePilot-Plugins/main/icons/ptsignin.png",
     "author": "qingyu",
     "level": 2,
     "system_version": ">=3.0.0",
     "history": {
-      "v1.4.1": "界面精简：详情页顶部改成一行统计胶囊（站点 / 成功 / 失败 / 未确认 / 未记录），每个站点只保留一张明细表（签到状态为「时间 / 状态 / 结果」，登录状态为「时间 / 状态 / 登录 / 最近动向」），同一个结果不再重复出现三次，「最近动向」只在登录卡片顶部显示一行；设置页改成扁平布局——顶部一行开关 + 两列字段，去掉分区大标题，站点多选提示统一为「选择全部后自动包含后续新增站点」，Browserless 说明精简为一行。"
+      "v1.4.2": "新增 AGSVPT（agsvpt.com）内置预设并修复其签到失败：该站签到页是一个「立即签到」表单提交按钮，GET /attendance.php 只会渲染按钮、不点不会签到（实测未登录时 302 到 login.php?returnto=attendance.php），所以预设改用 HTTP POST；万一站点开了验证码或撞上 Cloudflare，自动回退到浏览器引擎时会按「立即签到」按钮的文案与选择器点击（自动回退规则现在会沿用 HTTP 规则里的 submit_selector / submit_text）。判定文案仍用默认正则（签到成功 / 已经签到），不额外收窄。"
     }
   }
 }

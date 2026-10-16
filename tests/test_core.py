@@ -328,6 +328,20 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertEqual(len(grouped["A"]), 2)
         self.assertEqual(self.core.site_record_counts(rows), {"A": 2, "B": 1})
 
+    def test_agsvpt_preset_uses_post_and_click_fallback(self):
+        # AGSVPT 的签到页是个「立即签到」提交按钮：GET 不签到，必须 POST；
+        # 自动回退到浏览器时要沿用这个按钮选择器与按钮文字。
+        rule = self.core.resolve_rule({"url": "https://www.agsvpt.com/", "cookie": "c=1"}, {})
+        self.assertEqual(rule["engine"], "http")
+        self.assertEqual(rule["method"], "POST")
+        self.assertEqual(rule["path"], "/attendance.php")
+        self.assertTrue(rule["auto_fallback"])
+        fallback = self.core.fallback_rule(rule, "captcha")
+        self.assertEqual(fallback["engine"], "browserless")
+        self.assertEqual(fallback["mode"], "open_page")
+        self.assertIn("立即签到", fallback["submit_text"])
+        self.assertIn("button", fallback["submit_selector"])
+
     def test_fallback_rule_carries_cloudflare_wait(self):
         fallback = self.core.fallback_rule(
             {"engine": "http", "path": "/attendance.php", "cloudflare_wait": 25}, "cloudflare")

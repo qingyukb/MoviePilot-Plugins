@@ -170,6 +170,18 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "success_keywords": ["已签到"],
     },
     "dstudio.me": {"engine": "browserless", "mode": "cloudflare", "path": "/attendance.php"},
+    # ---- AGSVPT（agsvpt.com）：NexusPHP 签到页，页面上是一个「立即签到」表单提交按钮 ----
+    # GET /attendance.php 只会把按钮渲染出来，不点按钮不会签到（实测未登录时 302 到
+    # login.php?returnto=attendance.php），所以 HTTP 引擎必须用 POST；万一站点开了验证码 /
+    # 撞上盾，自动回退到浏览器引擎时会按下面的选择器与按钮文字点「立即签到」。
+    # 判定文案沿用默认正则（签到成功 / 已经签到），不额外收窄。
+    "agsvpt.com": {
+        "engine": "http",
+        "method": "POST",
+        "path": "/attendance.php",
+        "submit_selector": "input[type='submit'], button[type='submit'], button",
+        "submit_text": "立即签到",
+    },
     "mua.xloli.cc": {
         "engine": "browserless",
         "mode": "cloudflare",
@@ -354,8 +366,9 @@ def fallback_rule(rule: Mapping[str, Any], challenge: str) -> Dict[str, Any]:
     }
     if rule.get("route_fragment"):
         fallback["route_fragment"] = rule["route_fragment"]
-    # 让用户在 HTTP 规则里写的等待参数（如 cloudflare_wait）对自动回退同样生效
-    for name in ("cloudflare_wait", "wait", "preflight_wait"):
+    # 让用户在 HTTP 规则里写的等待参数（如 cloudflare_wait）与点击目标（submit_selector /
+    # submit_text，例如 AGSVPT 的「立即签到」）对自动回退同样生效
+    for name in ("cloudflare_wait", "wait", "preflight_wait", "submit_selector", "submit_text"):
         if rule.get(name) is not None:
             fallback[name] = rule[name]
     return validate_rule(fallback)

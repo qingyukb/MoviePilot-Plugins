@@ -144,6 +144,7 @@ ptsitesignin/
 | LuckPT (`pt.luckpt.de`) | `open_page` | 领取奖励需确认弹窗 |
 | YemaPT (`yemapt.org`) | `altcha` | Hash 路由 + Altcha 复选框 + 提交按钮 |
 | HDSky (`hdsky.me`) | `trigger_image` | 先点开签到弹窗再解图片验证码 |
+| AGSVPT (`agsvpt.com`) | HTTP `POST` | NexusPHP 签到页，页面上是「立即签到」提交按钮：GET 只渲染按钮不签到，预设用 `method: POST`；撞上验证码 / 盾时自动回退到浏览器并按「立即签到」按钮点击 |
 | `dstudio.me` / `mua.xloli.cc` / `share.ilolicon.com` | `cloudflare` | Cloudflare 托管挑战自动通过 |
 
 ### 关于 Cloudflare Turnstile
