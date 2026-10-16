@@ -3,14 +3,14 @@
     "name": "PT站点签到",
     "description": "双引擎 PT 签到，可选真实登录刷新 Cookie 并读取站点「最近动向」：HTTP 直连签到接口，或经 Browserless 完成图片验证码 / Cloudflare / Turnstile 挑战。",
     "labels": "站点,签到",
-    "version": "1.4.5",
+    "version": "1.4.6",
     "icon": "https://raw.githubusercontent.com/qingyukb/MoviePilot-Plugins/main/icons/ptsignin.png",
     "author": "qingyu",
     "level": 2,
     "v2": true,
     "system_version": ">=2.0.0",
     "history": {
-      "v1.4.5": "代理改为跟随 MoviePilot「站点管理 → 使用代理访问」：去掉插件自己的「HTTP 引擎使用代理」开关，站点记录勾了才走 MoviePilot 全局代理（设置 → 系统 → 代理），Browserless 引擎走它自己的出口；勾了但全局代理为空时日志会写明「本次仍走直连」，不会再有『勾了却没效果』的困惑。另外修复签到路径写死导致 404 的问题（学校 pt.btschool.club）：HTTP 引擎在默认路径返回 404 / 405 时会自动换签到入口——先从站点首页找文字含「签到 / 打卡」的同站链接，再依次试 /signin.php、/sign_in.php、/checkin.php、/plugin_sign-in.php、/attendance.php?action=sign；都找不到时失败原因会列出试过的路径，并提示可用 path 指定。http_sign 改用 requests.Session，便于测试与复用。"
+      "v1.4.6": "设置页精简：新增「发送通知」开关（开 / 关），删掉原来的「通知模式」三档下拉；删掉「遇验证码 / CF 自动用浏览器」开关——自动回退恒为开启，未在规则里写 engine 的站点撞上 Cloudflare / 验证码时总是会自动改用浏览器重试一次（在规则里显式写 engine 的站点仍不参与，尊重手工配置）。通知开关兼容旧配置：1.3.x 的 notify_mode（off 视为关闭）与 1.2.x 的 notify 都会正确迁移。"
     }
   }
 }

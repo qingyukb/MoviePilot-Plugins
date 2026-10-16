@@ -262,6 +262,35 @@ class PagePluginTests(unittest.TestCase):
         captions = [site for site, _status, _result in table_rows(page)]
         self.assertTrue(any("共 12 条记录" in caption for caption in captions))
 
+    def test_notify_switch_and_message(self):
+        plugin = self._make({}, _notify_enabled=True)
+        sent = []
+        plugin.post_message = lambda **kwargs: sent.append(kwargs)
+        results = [
+            {"site": "观众", "status": "success", "message": "签到成功（获得 20 粒爆米花）"},
+            {"site": "红豆饭", "status": "failed", "message": "Cookie 无效或已过期"},
+        ]
+        plugin._notify(results, failed=1)
+        self.assertEqual(len(sent), 1)
+        text = sent[0]["text"]
+        self.assertTrue(text.startswith("站点 2 个｜成功 1｜失败 1"))
+        self.assertIn("· 红豆饭：Cookie 无效或已过期", text)
+        self.assertNotIn("观众", text)                    # 成功站点不逐条罗列
+        plugin._notify_enabled = False                    # 关掉开关 → 不发送
+        plugin._notify(results, failed=1)
+        self.assertEqual(len(sent), 1)
+        plugin._notify_enabled = True                     # 全部成功 → 只有一行
+        plugin._notify([results[0]], failed=0)
+        self.assertEqual(sent[-1]["text"], "站点 1 个｜成功 1｜失败 0")
+
+    def test_notify_switch_backward_compatible(self):
+        parse = self.plugin_module.PTSiteSignIn._parse_notify_switch
+        self.assertFalse(parse({"notify": False}))
+        self.assertTrue(parse({"notify": True}))
+        self.assertFalse(parse({"notify_mode": "off"}))    # 1.3.x 的三档配置
+        self.assertTrue(parse({"notify_mode": "failed"}))
+        self.assertTrue(parse({}))
+
     def test_proxy_follows_site_switch(self):
         # 代理不再由插件开关控制，直接跟随「站点管理 → 使用代理访问」
         plugin = self._make({})
@@ -306,9 +335,12 @@ class PagePluginTests(unittest.TestCase):
         # 顶部是开关行，然后是两列字段，没有分区大标题（参考 MP 官方插件的扁平布局）
         switches = [node.get("props") or {} for node in nodes(form, "VSwitch")]
         models = {props.get("model") for props in switches}
-        for expected in ("enabled", "run_once", "fallback_browserless", "read_activity"):
+        for expected in ("enabled", "notify", "run_once", "read_activity"):
             self.assertIn(expected, models)
+        self.assertNotIn("fallback_browserless", models)   # 自动回退恒为开启，不再给开关
         self.assertNotIn("proxy", models)      # 代理改成跟随站点管理里的「使用代理访问」
+        select_models = {node.get("props", {}).get("model") for node in nodes(form, "VSelect")}
+        self.assertNotIn("notify_mode", select_models)     # 通知模式下拉已由「发送通知」开关取代
         selects = [node.get("props") or {} for node in nodes(form, "VSelect")]
         select_models = {props.get("model") for props in selects}
         self.assertIn("site_ids", select_models)

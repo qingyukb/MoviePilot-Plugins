@@ -94,7 +94,7 @@ class PTSiteSignIn(_PluginBase):
     plugin_desc = ("双引擎 PT 签到，可选真实登录刷新 Cookie 并读取站点「最近动向」：HTTP 直连签到接口，"
                    "或经 Browserless 完成验证码 / Cloudflare / Turnstile 挑战。")
     plugin_icon = "signin.png"
-    plugin_version = "1.4.5"
+    plugin_version = "1.4.6"
     plugin_author = "qingyu"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "ptsignin_"
@@ -102,7 +102,7 @@ class PTSiteSignIn(_PluginBase):
     auth_level = 2
 
     _enabled = False
-    _notify_mode = "always"
+    _notify_enabled = True
     _cron = "25 8 * * *"
     _site_ids: List[int] = []
     _login_site_ids: List[int] = []
@@ -112,7 +112,6 @@ class PTSiteSignIn(_PluginBase):
     _timeout = 30
     _retry_delay_minutes = 10
     _retry_count = 1
-    _fallback_browserless = True
     _browserless_url = DEFAULT_BROWSERLESS_URL
     _browserless_token = ""
     _browserless_timeout = 100
@@ -137,7 +136,7 @@ class PTSiteSignIn(_PluginBase):
         self._run_id = getattr(self, "_run_id", 0) + 1
         config = config or {}
         self._enabled = bool(config.get("enabled", False))
-        self._notify_mode = self._parse_notify_mode(config)
+        self._notify_enabled = self._parse_notify_switch(config)
         self._cron = str(config.get("cron") or "25 8 * * *")
         self._site_ids, self._all_sites = self._parse_site_ids(config.get("site_ids"))
         self._login_site_ids, self._all_login_sites = self._parse_site_ids(
@@ -147,7 +146,6 @@ class PTSiteSignIn(_PluginBase):
         retry_count = config.get("retry_count")
         self._retry_count = max(0, min(int(1 if retry_count in (None, "") else retry_count), 5))
         self._retry_delay_minutes = max(1, min(int(config.get("retry_delay_minutes") or 10), 1440))
-        self._fallback_browserless = bool(config.get("fallback_browserless", True))
         self._browserless_url = str(config.get("browserless_url") or DEFAULT_BROWSERLESS_URL).strip()
         self._browserless_token = str(config.get("browserless_token") or "").strip()
         self._browserless_timeout = max(15, min(int(config.get("browserless_timeout") or 100), 300))
@@ -202,7 +200,7 @@ class PTSiteSignIn(_PluginBase):
     def _config(self) -> Dict[str, Any]:
         return {
             "enabled": self._enabled,
-            "notify_mode": self._notify_mode,
+            "notify": self._notify_enabled,
             "cron": self._cron,
             "site_ids": self._site_ids + ([ALL_SITES] if self._all_sites else []),
             "login_site_ids": self._login_site_ids + ([ALL_SITES] if self._all_login_sites else []),
@@ -210,7 +208,6 @@ class PTSiteSignIn(_PluginBase):
             "timeout": self._timeout,
             "retry_count": self._retry_count,
             "retry_delay_minutes": self._retry_delay_minutes,
-            "fallback_browserless": self._fallback_browserless,
             "browserless_url": self._browserless_url,
             "browserless_token": self._browserless_token,
             "browserless_timeout": self._browserless_timeout,
@@ -220,13 +217,19 @@ class PTSiteSignIn(_PluginBase):
         }
 
     @staticmethod
-    def _parse_notify_mode(config: Dict[str, Any]) -> str:
-        """通知模式：always 每次通知 / failed 仅失败通知 / off 不通知。"""
+    def _parse_notify_switch(config: Dict[str, Any]) -> bool:
+        """通知开关：新配置用 notify（布尔）。
+
+        兼容旧配置：1.3.x 的 notify_mode（off 视为关闭，其余视为开启）、1.2.x 的 notify。
+        """
+        if "notify" in config:
+            return bool(config.get("notify"))
         mode = str(config.get("notify_mode") or "").lower()
-        if mode in {"always", "failed", "off"}:
-            return mode
-        # 兼容 1.2.x 的布尔开关 notify
-        return "always" if config.get("notify", True) else "off"
+        if mode in {"always", "failed"}:
+            return True
+        if mode == "off":
+            return False
+        return True
 
     def get_state(self) -> bool:
         return self._enabled
@@ -258,24 +261,17 @@ class PTSiteSignIn(_PluginBase):
         options: List[Dict[str, Any]] = [{"title": "全部站点（含后续新增）", "value": ALL_SITES}]
         options += [{"title": site.name, "value": site.id}
                     for site in sites if getattr(site, "cookie", None)]
-        notify_items = [
-            {"title": "每次执行后通知", "value": "always"},
-            {"title": "仅失败时通知", "value": "failed"},
-            {"title": "不通知", "value": "off"},
-        ]
         return [{"component": "VForm", "content": [
             {"component": "VRow", "content": [
-                {"component": "VCol", "props": {"cols": 12, "md": 3},
+                {"component": "VCol", "props": {"cols": 12, "md": 4},
                  "content": [{"component": "VSwitch", "props": {"model": "enabled", "label": "启用插件"}}]},
+                {"component": "VCol", "props": {"cols": 12, "md": 4},
+                 "content": [{"component": "VSwitch", "props": {"model": "notify", "label": "发送通知",
+                             "hint": "只报成功 / 失败数量，有失败才附上失败原因", "persistent-hint": True}}]},
                 {"component": "VCol", "props": {"cols": 12, "md": 4},
                  "content": [{"component": "VSwitch", "props": {"model": "run_once",
                              "label": "保存后立即执行一次",
                              "hint": "保存配置后延后 3 秒在后台跑一轮", "persistent-hint": True}}]},
-                {"component": "VCol", "props": {"cols": 12, "md": 4},
-                 "content": [{"component": "VSwitch", "props": {"model": "fallback_browserless",
-                             "label": "遇验证码 / CF 自动用浏览器",
-                             "hint": "内置预设或未声明引擎的站点遇盾时自动换浏览器重试一次",
-                             "persistent-hint": True}}]},
             ]},
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12, "md": 6},
@@ -301,12 +297,6 @@ class PTSiteSignIn(_PluginBase):
                  "content": [{"component": "VTextField", "props": {"model": "timeout",
                              "label": "HTTP 超时（秒）", "type": "number", "min": 5, "max": 120}}]},
                 {"component": "VCol", "props": {"cols": 12, "md": 6},
-                 "content": [{"component": "VSelect", "props": {"model": "notify_mode", "label": "通知模式",
-                             "items": notify_items, "hint": "签到结束后推送结果到 MoviePilot 通知渠道",
-                             "persistent-hint": True}}]},
-            ]},
-            {"component": "VRow", "content": [
-                {"component": "VCol", "props": {"cols": 12},
                  "content": [{"component": "VSwitch", "props": {"model": "read_activity",
                              "label": "读取「最近动向」",
                              "hint": "用站点 Cookie（配置了账号时会真实登录换回新 Cookie）打开用户页 / 签到页，"
@@ -574,7 +564,7 @@ class PTSiteSignIn(_PluginBase):
         """按最终生效的站点规则判断是否需要初始化 Browserless 引擎。
 
         两类站点需要浏览器：① 规则显式声明 engine=browserless；
-        ② 未声明引擎且开启自动回退的 HTTP 站点（遇盾 / 验证码时会改用浏览器）。
+        ② 未声明引擎的 HTTP 站点（遇盾 / 验证码时自动改用浏览器，恒为开启）。
         """
         for info in infos:
             try:
@@ -583,7 +573,7 @@ class PTSiteSignIn(_PluginBase):
                 continue
             if str(rule.get("engine")) == "browserless":
                 return True
-            if self._fallback_browserless and rule.get("auto_fallback"):
+            if rule.get("auto_fallback"):
                 return True
         return False
 
@@ -731,7 +721,8 @@ class PTSiteSignIn(_PluginBase):
         只对未显式声明引擎的站点生效（rule 的 auto_fallback），并可在配置里整体关闭。
         返回（结果, 实际使用的引擎）。
         """
-        if not (self._fallback_browserless and rule.get("auto_fallback")):
+        # 自动回退恒为开启（设置页不再提供开关）；用户在规则里显式写了 engine 的站点不参与
+        if not rule.get("auto_fallback"):
             return outcome, "http"
         label = "Cloudflare 验证" if outcome.challenge == "cloudflare" else "验证码"
         if signer is None:
@@ -991,14 +982,11 @@ class PTSiteSignIn(_PluginBase):
         self.save_data(key, None)
 
     def _notify(self, results: List[Dict[str, str]], failed: int) -> None:
-        """按通知模式推送结果：always 每次通知 / failed 仅失败通知 / off 不通知。
+        """推送结果（由「发送通知」开关控制）。
 
         消息保持简短：一行「成功几个 / 失败几个」，只有失败时才附上失败原因（每个站点一行）。
         """
-        mode = self._notify_mode
-        if mode == "off" or not results:
-            return
-        if mode == "failed" and not failed:
+        if not self._notify_enabled or not results:
             return
         success = max(0, len(results) - failed)
         lines = [f"站点 {len(results)} 个｜成功 {success}｜失败 {failed}"]

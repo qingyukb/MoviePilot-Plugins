@@ -7,7 +7,7 @@
 | **HTTP 直连** | `requests` 请求签到接口（NexusPHP `attendance.php`） | 普通站点、无验证码的标签到 | 免费、毫秒级 |
 | **Browserless** | BrowserQL 驱动真实浏览器，自动解题/点击/提交 | 图片验证码、Cloudflare、**Turnstile 自动解题**、弹窗签到、Altcha | 消耗 Browserless 额度 |
 
-默认走 HTTP 直连；内置预设或「自定义站点规则 JSON」中用 `engine` 声明为 `browserless` 的站点会自动改用浏览器引擎，其余站点一律 HTTP，无需手动切换全局引擎。**未声明引擎的站点**在 HTTP 直连遇到 Cloudflare 或图片验证码时，会自动改用 Browserless 重试一次（可在配置中关闭，见下「自动回退到浏览器引擎」）。
+默认走 HTTP 直连；内置预设或「自定义站点规则 JSON」中用 `engine` 声明为 `browserless` 的站点会自动改用浏览器引擎，其余站点一律 HTTP，无需手动切换全局引擎。**未声明引擎的站点**在 HTTP 直连遇到 Cloudflare 或图片验证码时，会自动改用 Browserless 重试一次（恒为开启，见下「自动回退到浏览器引擎」）。
 
 > Browserless 部分参考并精简自 tmzg0000 的 `captchasignin` 插件，保留其验证码求解、页面预检与 AJAX 结果判定逻辑。
 
@@ -98,7 +98,7 @@ ptsitesignin/
 | 页面要求图片验证码（`captcha.php` / `id="captcha"` / `name="imagestring"` / 「验证码」等） | 浏览器打开签到页（`mode=open_page`） |
 
 - 每个站点每轮只回退一次，且仅在 HTTP 判定为失败时触发；需要已填写 Browserless Token，未填写时结果会明确提示。
-- 可在插件设置中用「遇验证码 / CF 自动用浏览器」开关整体关闭。
+- 自动回退**恒为开启**（设置页不再提供开关），避免「忘记打开导致 HTTP 站点一直失败」。
 - 只有你在**自定义规则**里显式写了 `"engine": "http"` 的站点不回退（尊重手工配置）；内置预设里声明 `engine=http` 的站点仍会自动回退。
 
 ### Cloudflare「Just a moment...」交互挑战
@@ -123,7 +123,7 @@ ptsitesignin/
 1. 打开账号面板 <https://browserless.io/account/>，用邮箱注册（免费额度 **1000 units/月**，不需要信用卡）。
 2. 登录后，面板**首页的「API Key」卡片**就显示你的 Token（默认打码，点眼睛图标显示、点复制按钮复制）；卡片上的 **Manage API keys** 可新建 / 管理多个 Token。
 3. 回到 MoviePilot 插件设置，把 Token 粘贴到 **Browserless Token**，地址保持默认 `https://production-sfo.browserless.io` 即可 —— 插件会自动补全 `/stealth/bql` 并带上 `?token=`。
-4. 保留「遇验证码 / CF 自动用浏览器」开关为开启（默认开），未写规则的站点遇到 Cloudflare 或验证码时会自动调用它。
+4. 未写规则的站点遇到 Cloudflare 或验证码时会自动改用浏览器重试一次（恒为开启，无需开关）。
 
 要点：
 
@@ -181,12 +181,11 @@ ptsitesignin/
 | 签到站点 | 多选，只做签到；仅列出已保存 Cookie 的站点，第一项「全部站点（含后续新增）」会自动包含以后新增的站点 | 空 |
 | 登录站点 | 多选，只做真实登录并读取「最近动向」，不签到；同样有「全部站点」选项。**与签到站点同时选中时两件事都执行**：一轮内完成真实登录 + 签到 + 读最近动向（不会为了登录再登一次），并同时计入详情页的「签到状态」与「登录状态」 | 空 |
 | 读取「最近动向」 | 用站点管理里的 Cookie（配置了账号时会真实登录换回新 Cookie）打开用户页 / 签到页，把最近动向时间 + 相对时间（如 `2026-10-16 23:44:21 ( < 1分前 )`）写入详情页的「登录状态」表；撞上 Cloudflare 挑战页的候选页会自动跳过，读不到时页面会给出提示 | 开 |
-| 通知模式 | 每次执行后 / 仅失败时 / 不通知。通知内容保持简短：一行「站点 N 个｜成功 X｜失败 Y」，只有失败时才附「站点：原因」（每条最多 180 字） | 每次执行后 |
+| 发送通知 | 开 / 关。通知保持简短：一行「站点 N 个｜成功 X｜失败 Y」，只有失败时才附「站点：原因」（每条最多 180 字） | 开 |
 | 并发数 | 同时签到站点数 | 2 |
 | HTTP 超时 | 秒 | 30 |
 | 失败重试次数 / 等待分钟 | 额外重试次数与间隔；重试由后台 Timer 延迟执行，不占用执行线程 | 1 次 / 10 分钟 |
 | 走代理 | **不用插件开关**：跟随 MoviePilot「站点管理 → 使用代理访问」——勾了的站点才走 MoviePilot 全局代理（设置 → 系统 → 代理），Browserless 引擎走它自己的出口；勾了但全局代理为空时日志会写明本次仍直连 | 关 |
-| 遇验证码 / CF 自动用浏览器 | 内置预设或未声明引擎的站点 HTTP 撞上 CF / 验证码时自动换浏览器重试（手工写了 engine 的除外） | 开 |
 | Browserless 地址 / Token / 超时 | Browserless 连接参数；读超时自动抬升到「页面内等待预算 + 45 秒余量」（上限 300 秒），避免读超时短于 BrowserQL 内部等待 | 官方地址 / 空 / 100 秒 |
 | 自定义站点规则 | JSON；Cloudflare 交互挑战可用 `cloudflare_wait`（秒）覆盖默认 10 秒；页面内嵌 Turnstile、且验证通过后由站点自己提交的站点（如观众 Audiences）用 `submit_method: "auto"` + `solve_count: 1`：插件会两段式处理（solve 取 token → 同一会话注入并提交），`auto_wait` 控制脚本等 token 的时间、`reconnect_wait` 控制会话保留时间；只有确实能命中的站点才用 `turnstile_click` + `submit_selector` 原生点击 | 空 |
 
