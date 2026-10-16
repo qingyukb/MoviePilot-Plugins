@@ -20,6 +20,7 @@
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timedelta
 from threading import Lock, Thread
 from typing import Any, Dict, List, Optional, Tuple
@@ -52,7 +53,7 @@ class MTeamLogin(_PluginBase):
     plugin_name = "馒头登录"
     plugin_desc = "插件配置页手填馒头（M-Team）账号密码或 authorization，真实登录保活并校验「最近动向」。"
     plugin_icon = "mteam.png"
-    plugin_version = "1.3.1"
+    plugin_version = "1.4.0"
     plugin_author = "qingyu"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "mteamlogin_"
@@ -76,6 +77,7 @@ class MTeamLogin(_PluginBase):
     _token = ""
     _api_key = ""
     _cookie = ""
+    _did = ""
 
     _history_days = 30
     _run_lock: Lock = Lock()
@@ -102,6 +104,12 @@ class MTeamLogin(_PluginBase):
         self._token = str(config.get("token") or "").strip()
         self._api_key = str(config.get("api_key") or "").strip()
         self._cookie = str(config.get("cookie") or "").strip()
+        # 馒头把登录态 authorization 绑定到 did（浏览器 localStorage.did）：登录与
+        # 后续保活必须带同一个 did。留空时自动生成一个并写回配置，保证每轮一致。
+        self._did = str(config.get("did") or "").strip()
+        if not self._did:
+            self._did = os.urandom(16).hex()
+            self.update_config(self._config())
 
         if self._run_once:
             self._run_once = False
@@ -126,6 +134,7 @@ class MTeamLogin(_PluginBase):
             "token": self._token,
             "api_key": self._api_key,
             "cookie": self._cookie,
+            "did": self._did,
         }
 
     @staticmethod
@@ -255,6 +264,15 @@ class MTeamLogin(_PluginBase):
                  "content": [{"component": "VCombobox", "props": {
                              "model": "api_host", "label": "API 基址（可选）", "items": host_items,
                              "hint": "留空使用 " + DEFAULT_API_HOST + "；前后端分离时填后端 API，不能填 kp 前端地址",
+                             "persistent-hint": True}}]},
+            ]},
+            {"component": "VRow", "content": [
+                {"component": "VCol", "props": {"cols": 12},
+                 "content": [{"component": "VTextField", "props": {
+                             "model": "did", "label": "设备标识 did（可选，通常留空）",
+                             "placeholder": "留空自动生成并固定；也可填浏览器 localStorage.did",
+                             "hint": "馒头把登录态绑定到 did：登录和保活必须用同一个 did，"
+                                     "否则会被站点判定为登录态失效。留空时插件自动生成并保存。",
                              "persistent-hint": True}}]},
             ]},
             {"component": "VRow", "content": [
@@ -389,7 +407,7 @@ class MTeamLogin(_PluginBase):
         reports: List[LoginReport] = []
         for host in hosts:
             client = MTeamClient(host=host, timeout=timeout, proxy=self._proxy,
-                                 user_agent=DEFAULT_USER_AGENT)
+                                 user_agent=DEFAULT_USER_AGENT, did=self._did)
             try:
                 report = client.fetch_last_browse(credentials=credentials,
                                                   site_label=host)

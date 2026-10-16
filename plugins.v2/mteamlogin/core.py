@@ -766,12 +766,15 @@ class MTeamClient:
 
     def __init__(self, host: str = DEFAULT_API_HOST, timeout: int = DEFAULT_TIMEOUT,
                  proxy: bool = False, user_agent: str = DEFAULT_USER_AGENT,
-                 secret: str = SIGN_SECRET) -> None:
+                 secret: str = SIGN_SECRET, did: str = "") -> None:
         self.host = normalize_host(host)
         self.timeout = max(5, int(timeout or DEFAULT_TIMEOUT))
         self.proxy = bool(proxy)
         self.user_agent = user_agent or DEFAULT_USER_AGENT
         self.secret = secret or SIGN_SECRET
+        # 设备标识：站点把登录态 authorization 绑定到 did（浏览器 localStorage.did），
+        # 登录与后续所有请求必须携带同一个 did，否则会被判定为登录态失效。
+        self.did = str(did or "").strip() or os.urandom(16).hex()
         self._base_path = urllib.parse.urlsplit(self.host).path.rstrip("/") or "/api"
         # 最近一次请求的诊断信息（供上层判断是否需要回退其它地址）。
         self.last_request = ""
@@ -818,6 +821,7 @@ class MTeamClient:
             "version": CLIENT_VERSION,
             "webVersion": WEB_VERSION,
             "visitorId": os.urandom(8).hex(),
+            "did": self.did,
         }
         plan = plan or AuthPlan()
         if plan.token:

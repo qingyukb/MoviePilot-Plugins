@@ -35,9 +35,9 @@
 
 ### [馒头登录 + 保活](plugins.v2/mteamlogin)
 
-从 MoviePilot 的「站点管理」读取馒头（M-Team）凭证，**真实登录该账号并保活**，再用站点返回的「最近动向」时间自检，支持 MoviePilot V2 与 V3。
+在插件配置页手填馒头（M-Team）账号密码或 authorization，**真实登录该账号并保活**，再用站点返回的「最近动向」时间自检，支持 MoviePilot V2 与 V3。
 
-馒头是前后端分离的：前端 `kp.m-team.cc`，后端 API `api.m-team.cc`。前端每次登录 / 校验通过后会**立刻**调用 `POST /api/member/updateLastBrowse`（保活心跳），把「最近动向」刷成当前时间。旧版插件只读 `profile`、从不保活，所以拿到的永远是「上一次别处登录」留下的时间。
+馒头是前后端分离的：前端 `kp.m-team.cc`，后端 API `api.m-team.io`（登录态绑定设备标识 `did`，插件会自动生成并固定）。前端每次登录 / 校验通过后会**立刻**调用 `POST /api/member/updateLastBrowse`（保活心跳），把「最近动向」刷成当前时间。旧版插件只读 `profile`、从不保活，所以拿到的永远是「上一次别处登录」留下的时间。
 
 - V2：[`plugins.v2/mteamlogin`](plugins.v2/mteamlogin)
 - V3：[`plugins.v3/mteamlogin`](plugins.v3/mteamlogin)

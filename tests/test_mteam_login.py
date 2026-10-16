@@ -310,6 +310,23 @@ class RequestShapeTests(unittest.TestCase):
                 self.assertEqual(headers["webversion"], core.WEB_VERSION)
                 self.assertIn("Mozilla/5.0", headers["user-agent"])
                 self.assertEqual(headers["origin"], "https://kp.m-team.cc")
+                # 设备标识 did：登录态绑定它，登录与保活必须同一个 did。
+                self.assertEqual(len(headers["did"]), 32)
+                self.assertTrue(all(c in "0123456789abcdef" for c in headers["did"]))
+
+    def test_same_client_reuses_one_did_and_explicit_did_wins(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                client, opener = build_client(core, [keepalive_ok(), keepalive_ok()])
+                client.keepalive(plan=core.AuthPlan(name="t", token="TOKEN"))
+                client.keepalive(plan=core.AuthPlan(name="t", token="TOKEN"))
+                first, second = recorded(opener)[0]["headers"], recorded(opener)[1]["headers"]
+                self.assertEqual(first["did"], second["did"])
+
+                pinned = core.MTeamClient(did="0123456789abcdef0123456789abcdef")
+                self.assertEqual(pinned.did, "0123456789abcdef0123456789abcdef")
+                # 未提供 did 时自动生成，且长度固定 32 位十六进制。
+                self.assertEqual(len(core.MTeamClient().did), 32)
 
 
 class KeepAliveFlowTests(unittest.TestCase):
@@ -531,6 +548,15 @@ class PluginSourceTests(unittest.TestCase):
 
     CREDENTIAL_MODELS = ("username", "password", "otp_secret", "otp_code",
                          "email_code", "tg_code", "token", "api_key", "cookie")
+
+    def test_form_exposes_did_field(self):
+        for directory in PLUGIN_DIRS:
+            with self.subTest(directory=directory.parent.name):
+                source = (directory / "__init__.py").read_text(encoding="utf-8")
+                form = source.split("def get_form", 1)[1].split("def get_page", 1)[0]
+                self.assertIn('"model": "did"', form)
+                self.assertIn('config.get("did")', source)
+                self.assertIn("did=self._did", source)
 
     def test_form_has_all_manual_credential_fields(self):
         for directory in PLUGIN_DIRS:
