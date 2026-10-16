@@ -62,7 +62,7 @@ class PTSiteSignIn(_PluginBase):
     plugin_desc = ("双引擎 PT 签到，可选真实登录刷新 Cookie 并读取站点「最近动向」：HTTP 直连签到接口，"
                    "或经 Browserless 完成验证码 / Cloudflare / Turnstile 挑战。")
     plugin_icon = "signin.png"
-    plugin_version = "1.2.1"
+    plugin_version = "1.3.0"
     plugin_author = "qingyu"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "ptsignin_"
@@ -73,6 +73,7 @@ class PTSiteSignIn(_PluginBase):
     _notify_mode = "always"
     _cron = "25 8 * * *"
     _site_ids: List[int] = []
+    _login_site_ids: List[int] = []
     _concurrency = 2
     _timeout = 30
     _retry_delay_minutes = 10
@@ -106,6 +107,7 @@ class PTSiteSignIn(_PluginBase):
         self._notify_mode = self._parse_notify_mode(config)
         self._cron = str(config.get("cron") or "25 8 * * *")
         self._site_ids = [int(v) for v in (config.get("site_ids") or []) if str(v).isdigit()]
+        self._login_site_ids = [int(v) for v in (config.get("login_site_ids") or []) if str(v).isdigit()]
         self._concurrency = max(1, min(int(config.get("concurrency") or 2), 5))
         self._timeout = max(5, min(int(config.get("timeout") or 30), 120))
         retry_count = config.get("retry_count")
@@ -156,6 +158,7 @@ class PTSiteSignIn(_PluginBase):
             "notify_mode": self._notify_mode,
             "cron": self._cron,
             "site_ids": self._site_ids,
+            "login_site_ids": self._login_site_ids,
             "concurrency": self._concurrency,
             "timeout": self._timeout,
             "retry_count": self._retry_count,
@@ -236,6 +239,12 @@ class PTSiteSignIn(_PluginBase):
             ]},
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12, "md": 6},
+                 "content": [{"component": "VSelect", "props": {"model": "login_site_ids", "label": "仅登录站点",
+                             "items": options, "multiple": True, "chips": True,
+                             "hint": "只执行真实登录并读取「最近动向」，不签到；与签到站点重复时按签到处理", "persistent-hint": True}}]},
+            ]},
+            {"component": "VRow", "content": [
+                {"component": "VCol", "props": {"cols": 12, "md": 6},
                  "content": [{"component": "VSelect", "props": {"model": "notify_mode", "label": "通知模式",
                              "items": notify_items,
                              "hint": "签到结束后通过 MoviePilot 通知渠道推送结果", "persistent-hint": True}}]},
@@ -307,7 +316,7 @@ class PTSiteSignIn(_PluginBase):
             records = []
         records = [row for row in records if isinstance(row, dict)]
         total = len(records)
-        success = sum(row.get("status") in {"success", "already"} for row in records)
+        success = sum(row.get("status") in {"success", "already", "login"} for row in records)
         failed = total - success
         if not records:
             return [{"component": "VAlert", "props": {"type": "info", "variant": "tonal",
@@ -334,7 +343,7 @@ class PTSiteSignIn(_PluginBase):
              ".ptsignin-table-wrap{overflow-x:auto;border:1px solid rgba(var(--v-theme-on-surface),.08);border-radius:8px}"},
             {"component": "div", "props": {"class": "ptsignin-summary"}, "content": [
                 self._stat("本次站点", str(total), "已选择并完成处理", "info"),
-                self._stat("成功或已签到", f"{success}/{total}", "无需重复签到", "success"),
+                self._stat("成功/已签到/登录", f"{success}/{total}", "含仅登录站点", "success"),
                 self._stat("失败", str(failed), "请查看失败原因或更新 Cookie", "error" if failed else "success"),
             ]},
             {"component": "div", "props": {"class": "ptsignin-table-wrap mt-3"},
@@ -352,6 +361,10 @@ class PTSiteSignIn(_PluginBase):
     def _status_meta(status: str) -> Dict[str, str]:
         if status in {"success", "already"}:
             return {"label": "签到成功", "color": "success", "icon": "mdi-check-circle"}
+        if status == "login":
+            return {"label": "登录成功", "color": "success", "icon": "mdi-login"}
+        if status == "login_failed":
+            return {"label": "登录失败", "color": "error", "icon": "mdi-alert-circle"}
         return {"label": "签到失败", "color": "error", "icon": "mdi-alert-circle"}
 
     @staticmethod
@@ -459,6 +472,50 @@ class PTSiteSignIn(_PluginBase):
                 "status": outcome.status, "message": outcome.message,
                 "login": login_text, "activity": activity_text, "ran_at": self._now()}
 
+    def _login_one(self, info: Dict[str, Any]) -> Dict[str, str]:
+        """仅登录站点：真实登录（或复用站点管理 Cookie）后读取最近动向，不触发签到。"""
+        site_name = str(info.get("name") or info.get("url") or "未知站点")
+        logger.info("PT站点签到：仅登录 %s", site_name)
+        login_text = ""
+        login_ok = False
+        account = account_from_site(info)
+        if account_ready(account):
+            proxies = self._proxies() if self._proxy else None
+            try:
+                login_result = site_login(info, account, timeout=self._timeout, proxies=proxies)
+            except Exception:
+                logger.exception("PT站点签到：%s 真实登录异常", site_name)
+                login_text = "异常：真实登录出现未预期错误"
+            else:
+                if login_result.status == "success":
+                    info = dict(info, cookie=login_result.cookie)
+                    login_ok = True
+                    login_text = "成功（已换用新 Cookie）"
+                else:
+                    login_text = "失败：" + login_result.message
+        elif account:
+            login_text = "未提供可用的账号密码"
+        elif str(info.get("cookie") or "").strip():
+            login_ok = True
+            login_text = "复用站点管理 Cookie"
+        else:
+            login_text = "未配置账号密码或 Cookie"
+        activity_text = self._read_site_activity(info) if (login_ok and self._read_activity) else ""
+        return {"site": site_name, "site_id": str(info.get("id") or ""),
+                "state_key": site_state_key(info), "engine": "http",
+                "status": "login" if login_ok else "login_failed",
+                "message": login_text, "login": "", "activity": activity_text,
+                "ran_at": self._now()}
+
+    def _run_login_batch(self, infos: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+        if not infos:
+            return []
+        workers = min(self._concurrency, len(infos))
+        if workers <= 1:
+            return [self._login_one(info) for info in infos]
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            return list(executor.map(self._login_one, infos))
+
     def _read_site_activity(self, info: Dict[str, Any],
                             rule: Optional[Dict[str, Any]] = None) -> str:
         """用登录态 Cookie 打开站点页面，返回站点展示的「最近动向」原文。"""
@@ -545,8 +602,11 @@ class PTSiteSignIn(_PluginBase):
             self._finish([{"site": "配置", "status": "failed", "engine": "-",
                            "message": f"读取站点失败：{error}", "ran_at": self._now()}])
             return
+        signin_ids = set(self._site_ids)
         selected = [all_sites[sid] for sid in self._site_ids if sid in all_sites]
-        if not selected:
+        login_selected = [all_sites[sid] for sid in self._login_site_ids
+                          if sid in all_sites and sid not in signin_ids]
+        if not selected and not login_selected:
             self._finish([{"site": "配置", "status": "failed", "engine": "-",
                            "message": "未选择可用的 MoviePilot 站点", "ran_at": self._now()}])
             return
@@ -557,6 +617,7 @@ class PTSiteSignIn(_PluginBase):
                            "message": str(error), "ran_at": self._now()}])
             return
         infos = [self._site_dict(site) for site in selected]
+        login_infos = [self._site_dict(site) for site in login_selected]
         signer: Optional[BrowserlessSigner] = None
         if self._should_init_signer(infos, rules):
             if not self._browserless_token or not self._browserless_url:
@@ -571,7 +632,8 @@ class PTSiteSignIn(_PluginBase):
                     return
 
         results = self._run_batch(infos, rules, signer)
-        result_by_key = {r.get("state_key") or r.get("site"): r for r in results}
+        login_results = self._run_login_batch(login_infos)
+        result_by_key = {r.get("state_key") or r.get("site"): r for r in results + login_results}
         retry_times = self._retry_count if allow_retry else 0
         failed_infos = [info for info, result in zip(infos, results)
                         if result.get("status") == "failed"]
@@ -656,9 +718,11 @@ class PTSiteSignIn(_PluginBase):
         results = self._save_results(results)
         signed = sum(item.get("status") == "success" for item in results)
         already = sum(item.get("status") == "already" for item in results)
-        failed = len(results) - signed - already
-        logger.info("PT站点签到：完成，新签到 %s，今日已签到 %s，失败 %s", signed, already, failed)
-        self._notify(results, signed, already, failed)
+        login_ok = sum(item.get("status") == "login" for item in results)
+        failed = len(results) - signed - already - login_ok
+        logger.info("PT站点签到：完成，新签到 %s，今日已签到 %s，仅登录 %s，失败 %s",
+                    signed, already, login_ok, failed)
+        self._notify(results, signed, already, login_ok, failed)
 
     def _save_results(self, results: List[Dict[str, str]]) -> List[Dict[str, str]]:
         """保存最新结果与当天历史（重试期间先落盘，最终结果会覆盖同一天）。"""
@@ -702,7 +766,7 @@ class PTSiteSignIn(_PluginBase):
         self.save_data(key, None)
 
     def _notify(self, results: List[Dict[str, str]], signed: int, already: int,
-                failed: int) -> None:
+                login_ok: int, failed: int) -> None:
         """按通知模式推送签到结果：always 每次通知 / failed 仅失败通知 / off 不通知。"""
         mode = self._notify_mode
         if mode == "off" or not results:
@@ -710,6 +774,8 @@ class PTSiteSignIn(_PluginBase):
         if mode == "failed" and not failed:
             return
         head = f"站点 {len(results)} 个｜新签到 {signed}｜今日已签到 {already}"
+        if login_ok:
+            head += f"｜仅登录 {login_ok}"
         if failed:
             head += f"｜失败 {failed}"
         detail = "\n".join(self._notify_line(item) for item in results)
