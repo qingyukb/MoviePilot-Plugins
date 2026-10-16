@@ -1177,10 +1177,16 @@ def build_query(rule: Mapping[str, Any], user_agent: Optional[str] = None,
     turnstile_click = submit_method == "turnstile_click"
     # auto 这一轮不点提交：只等页面把验证组件渲染出来，token 由 solve 取回后第二段再注入
     skip_submit = submit_method in {"none", "skip"} or auto_submit
+    # 只有 auto 提交才需要 token 字段（它靠这个 token 回填页面、再触发站点提交）；其它站点
+    # 不索取该字段，免得旧版 / 自建 Browserless 的 schema 里没有 CaptchaResponse.token 时
+    # 整段查询被拒（GraphQL 只认写出来的字段）。
+    token_field = " token" if auto_submit else ""
     solve = (
-        "solve:solveImageCaptcha(captchaSelector:$captchaSelector,inputSelector:$captchaInputSelector,timeout:$solveTimeout){found solved time token}"
+        ("solve:solveImageCaptcha(captchaSelector:$captchaSelector,"
+         "inputSelector:$captchaInputSelector,timeout:$solveTimeout){found solved time"
+         + token_field + "}")
         if image and needs_solver
-        else "solve:solve(timeout:$solveTimeout){found solved time token}"
+        else ("solve:solve(timeout:$solveTimeout){found solved time" + token_field + "}")
         if rule["mode"] == "cloudflare" and needs_solver
         else "solve:evaluate(content:\"'skipped'\"){value}"
     )
@@ -1189,7 +1195,8 @@ def build_query(rule: Mapping[str, Any], user_agent: Optional[str] = None,
         # 再对签到页内嵌的 Turnstile 执行一次 solve。没有这一步时，第一次 solve 返回时
         # 第二段验证尚未发生，第二段注入就只会拿到空的 cf-turnstile-response。
         solve += ("\n      waitBetweenSolves:waitForTimeout(time:$solve2Wait){time}"
-                  "\n      solve2:solve(timeout:$solve2Timeout){found solved time token}")
+                  "\n      solve2:solve(timeout:$solve2Timeout){found solved time"
+                  + token_field + "}")
     extra = "$captchaSelector:String! $captchaInputSelector:String!" if image else ""
     set_user_agent = "userAgent(userAgent:$userAgent){time}" if user_agent else ""
     user_agent_variable = " $userAgent:String!" if user_agent else ""

@@ -421,6 +421,12 @@ class BrowserlessAudiencesTests(unittest.TestCase):
         self.assertNotIn("$verifyWait", query)
         # 不复用会话时（自建 / 旧版 Browserless）不能声明用不到的变量，否则 GraphQL 整段报错
         self.assertNotIn("reconnect", self.core.build_query(rule, None, reuse_session=False))
+        # 只有 auto 提交才索取 token 字段：旧版 / 自建 Browserless 的 schema 里可能没有
+        # CaptchaResponse.token，写了就会整段查询被拒，非 auto 站点保持原样
+        plain = {"engine": "browserless", "mode": "cloudflare", "path": "/attendance.php"}
+        plain_query = self.core.build_query(plain)
+        self.assertIn("solve:solve(timeout:$solveTimeout){found solved time}", plain_query)
+        self.assertNotIn("token", plain_query)
 
     def test_inject_query_shape(self):
         rule = self._rule()
