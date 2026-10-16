@@ -25,14 +25,15 @@
   },
   "MTeamLogin": {
     "name": "馒头登录",
-    "description": "登录 M-Team（馒头）并读取站点真实的「最近动向」时间：只调用 /login 与 /member/profile，绝不触发 updateLastBrowse。",
+    "description": "从「站点管理」读取馒头（M-Team）凭证（API Key / 账号密码），读取站点真实的「最近动向」时间：只读 /member/profile，绝不触发 updateLastBrowse。",
     "labels": "站点,登录",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "icon": "https://raw.githubusercontent.com/qingyukb/MoviePilot-Plugins/main/icons/mteam.png",
     "author": "qingyu",
     "level": 2,
     "system_version": ">=3.0.0",
     "history": {
+      "v1.0.1": "凭证改为从 MoviePilot「站点管理」自动读取：自动识别馒头（M-Team）站点，直接使用其中的 API Key（实测 x-api-key 无需签名即可读取 /member/profile）、User-Agent、代理与超时，并按站点地址推导 API 基址；无需再手填账号密码，仍保留可选的账号密码登录与手动 API Key 覆盖。",
       "v1.0.0": "初始版本：账号密码登录 M-Team（支持 OTP 密钥自动补动态码、邮箱 / Telegram 验证码、API Key 兜底），登录后只读 /member/profile 的 memberStatus.lastBrowse，得到账号真实的「最近动向」时间；插件详情页展示绝对时间与距今时长，保留最近 30 天记录，支持 Cron、保存后立即执行一次与三档通知模式。"
     }
   }

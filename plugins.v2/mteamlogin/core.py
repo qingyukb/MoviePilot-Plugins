@@ -59,6 +59,8 @@ VERIFY_LABELS = {"otp": "动态验证码(OTP)", "email": "邮箱验证码", "tg"
 # 服务端要求人机验证（Turnstile）时的提示特征。
 TURNSTILE_HINT_KEYWORDS = ("人機驗證", "人机验证", "turnstile", "驗證失敗", "验证失败")
 PROFILE_NOT_FOUND_KEYWORDS = ("無效的憑證", "无效的凭证", "Full authentication")
+# 站点管理里的 API Key 失效时的提示特征。
+INVALID_API_KEY_KEYWORDS = ("key無效", "key无效", "無效的key", "invalid api key", "invalid key")
 
 # --------------------------------------------------------------------- 签名
 
@@ -160,6 +162,9 @@ class LoginReport:
     verify_types: List[str] = field(default_factory=list)
     code: int = -1
     ran_at: str = ""
+    # 本次使用的馒头站点（站点管理里的 domain）与凭证来源，便于详情页展示。
+    site: str = ""
+    credential: str = ""
 
 
 # --------------------------------------------------------------------- 工具
@@ -195,6 +200,59 @@ def normalize_host(host: Optional[str]) -> str:
     parsed = urllib.parse.urlsplit(text)
     path = parsed.path.rstrip("/") or "/api"
     return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
+
+
+def derive_api_host(site_url: Optional[str], default: str = DEFAULT_API_HOST) -> str:
+    """由「站点管理」里的站点地址推导 M-Team API 基址（api.<注册域名>/api）。
+
+    例如 kp.m-team.cc / m-team.cc 都推导为 https://api.m-team.cc/api，
+    kp.m-team.io 推导为 https://api.m-team.io/api；无法解析时回退到默认值。
+    """
+    raw = str(site_url or "").strip()
+    if not raw:
+        return normalize_host(default)
+    parsed = urllib.parse.urlsplit(raw if "://" in raw else "//" + raw)
+    host = (parsed.netloc or parsed.path.split("/", 1)[0]).strip()
+    host = host.split(":")[0].strip(".")
+    if not host:
+        return normalize_host(default)
+    if host.startswith("api."):
+        return normalize_host("https://" + host)
+    labels = host.split(".")
+    registered = ".".join(labels[-2:]) if len(labels) >= 2 else host
+    return normalize_host("https://api." + registered)
+
+
+# 站点管理里可能用到的馒头站点识别关键字。
+MTEAM_SITE_KEYWORDS = ("m-team", "mteam", "馒头")
+
+
+def is_mteam_site(site: Mapping[str, Any]) -> bool:
+    """判断站点管理的某条记录是不是馒头（M-Team）：看域名 / 地址 / 名称。"""
+    if not isinstance(site, Mapping):
+        return False
+    haystack = " ".join(str(site.get(key) or "") for key in ("domain", "url", "name")).lower()
+    return any(word.lower() in haystack for word in MTEAM_SITE_KEYWORDS)
+
+
+def pick_mteam_site(sites: Sequence[Mapping[str, Any]],
+                    preferred: str = "") -> Optional[Mapping[str, Any]]:
+    """从站点管理列表里挑出馒头站点。
+
+    优先按配置里指定的 domain / id 精确匹配；其次按关键字（m-team / mteam / 馒头）
+    自动识别，取第一条命中的站点。
+    """
+    preferred = str(preferred or "").strip()
+    items = [site for site in (sites or []) if isinstance(site, Mapping)]
+    if preferred:
+        for site in items:
+            if str(site.get("domain") or "") == preferred \
+                    or str(site.get("id") or "") == preferred:
+                return site
+    for site in items:
+        if is_mteam_site(site):
+            return site
+    return None
 
 
 def _to_ms(value: Any) -> Optional[int]:
@@ -297,6 +355,8 @@ def hint_for(message: str) -> str:
     text = str(message or "").lower()
     if any(word.lower() in text for word in TURNSTILE_HINT_KEYWORDS):
         return "（站点要求 Cloudflare 人机验证，HTTP 直连无法自动完成；建议改填 API Key 后重试）"
+    if any(word.lower() in text for word in INVALID_API_KEY_KEYWORDS):
+        return "（站点管理里的 API Key 无效或已过期，请更新该站点的「存取令牌」）"
     if any(word.lower() in text for word in PROFILE_NOT_FOUND_KEYWORDS):
         return "（登录凭证已失效，请检查账号密码或重新获取 API Key）"
     return ""
@@ -481,13 +541,21 @@ class MTeamClient:
 
     def fetch_last_browse(self, username: str = "", password: str = "", api_key: str = "",
                           otp_secret: str = "", otp_code: str = "", email_code: str = "",
-                          tg_code: str = "") -> LoginReport:
+                          tg_code: str = "", site_label: str = "",
+                          credential: str = "") -> LoginReport:
         """登录（或直接用 API Key）+ 读取真实最近动向，返回结构化报表。"""
-        report = LoginReport(ran_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        report = LoginReport(ran_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                             site=site_label)
         if api_key:
             report.method = "api_key"
+            report.credential = credential or "API Key"
             report.username = username
-            report.last_browse = self.last_browse(api_key=api_key)
+            try:
+                report.last_browse = self.last_browse(api_key=api_key)
+            except MTeamError as error:
+                # 保留 site / credential，交给上层记录失败原因。
+                report.message = str(error)
+                return report
             report.ok = True
             report.code = 0
             report.message = "已通过 API Key 读取最近动向"
@@ -497,6 +565,7 @@ class MTeamClient:
             raise MTeamError("请先填写 M-Team 账号与密码，或填写 API Key")
 
         report.method = "password"
+        report.credential = credential or "账号密码"
         report.code = -1
         primary_otp = otp_code or (totp(otp_secret) if otp_secret else "")
         result = self.login(username, password, otp_code=primary_otp,

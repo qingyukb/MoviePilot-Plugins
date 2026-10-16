@@ -274,8 +274,21 @@ class LoginFlowTests(unittest.TestCase):
                 report = client.fetch_last_browse(api_key="APIKEY")
                 self.assertTrue(report.ok)
                 self.assertEqual(report.method, "api_key")
+                self.assertEqual(report.credential, "API Key")
                 paths = [item["path"] for item in recorded(opener)]
                 self.assertEqual(paths, ["/api/member/profile"])
+
+    def test_invalid_api_key_returns_failed_report(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                denied = 200, {}, {"code": 1, "message": "key無效", "data": None}
+                client, _opener = build_client(core, [denied])
+                report = client.fetch_last_browse(api_key="BOGUS", site_label="馒头",
+                                                  credential="API Key")
+                self.assertFalse(report.ok)
+                self.assertEqual(report.site, "馒头")
+                self.assertEqual(report.credential, "API Key")
+                self.assertIn("无效或已过期", report.message)
 
     def test_bad_credentials_return_message_without_raising(self):
         for core in CORES:
@@ -387,6 +400,62 @@ class HelperTests(unittest.TestCase):
                                if line.strip().startswith("UPDATE_LAST_BROWSE_PATH")]
                 self.assertEqual(definitions,
                                  ['UPDATE_LAST_BROWSE_PATH = "' + FORBIDDEN_PATH + '"'])
+
+
+class SiteManagementTests(unittest.TestCase):
+    """凭证来自 MoviePilot「站点管理」：API 基址推导 + 馒头站点识别。"""
+
+    def test_derive_api_host_from_site_url(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                self.assertEqual(core.derive_api_host("https://kp.m-team.cc/"),
+                                 "https://api.m-team.cc/api")
+                self.assertEqual(core.derive_api_host("m-team.cc"),
+                                 "https://api.m-team.cc/api")
+                self.assertEqual(core.derive_api_host("https://kp.m-team.io/"),
+                                 "https://api.m-team.io/api")
+                self.assertEqual(core.derive_api_host("api.m-team.cc"),
+                                 "https://api.m-team.cc/api")
+                self.assertEqual(core.derive_api_host(""), core.DEFAULT_API_HOST)
+                self.assertEqual(core.derive_api_host(None), core.DEFAULT_API_HOST)
+
+    def test_pick_mteam_site_prefers_configured_then_autodetect(self):
+        sites = [
+            {"id": 1, "name": "某站", "domain": "example.com", "url": "https://example.com"},
+            {"id": 2, "name": "馒头", "domain": "m-team.cc", "url": "https://kp.m-team.cc",
+             "apikey": "KEY"},
+            {"id": 3, "name": "Other", "domain": "other.net", "url": "https://other.net"},
+        ]
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                self.assertEqual(core.pick_mteam_site(sites)["id"], 2)
+                self.assertEqual(core.pick_mteam_site(sites, "other.net")["id"], 3)
+                self.assertEqual(core.pick_mteam_site(sites, "3")["id"], 3)
+                self.assertIsNone(core.pick_mteam_site([sites[0]]))
+                self.assertTrue(core.is_mteam_site({"name": "馒头"}))
+                self.assertFalse(core.is_mteam_site({"domain": "example.com"}))
+                self.assertIsNone(core.pick_mteam_site(None))
+
+    def test_report_carries_site_and_credential(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                client, _opener = build_client(core, [profile_ok(1792147191401)])
+                report = client.fetch_last_browse(api_key="KEY", site_label="m-team.cc",
+                                                  credential="站点管理 API Key")
+                self.assertTrue(report.ok)
+                self.assertEqual(report.site, "m-team.cc")
+                self.assertEqual(report.credential, "站点管理 API Key")
+
+    def test_plugin_reads_credentials_from_site_management(self):
+        for directory in PLUGIN_DIRS:
+            with self.subTest(directory=directory.name):
+                source = (directory / "__init__.py").read_text(encoding="utf-8")
+                # 必须从站点操作层读取站点列表，而不是只依赖手动填写
+                self.assertIn("SiteOper", source)
+                self.assertIn(".list()", source)
+                self.assertIn('config.get("site")', source)
+                # 站点缺失 / 缺 API Key 时给出指向站点管理的可操作提示
+                self.assertIn("站点管理", source)
 
 
 if __name__ == "__main__":
