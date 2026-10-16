@@ -32,6 +32,9 @@ CF_INTERSTITIAL_PATTERN = r"(just a moment|_cf_chl_opt|chl_page)"
 TURNSTILE_PATTERN = r"(cf-turnstile|turnstile/v0|turnstile\.min\.js|turnstile\.render)"
 # 页面内嵌 Cloudflare Turnstile 组件的隐藏 token 输入框（观众 Audiences 的签到页用它承载验证结果）
 TURNSTILE_TOKEN_SELECTOR = 'input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"]'
+# Turnstile 的真实 checkbox 位于跨域 iframe 中；BrowserQL 用 "< URL通配符 CSS" 深度选择器
+# 直接点击它。该点击是浏览器原生鼠标事件，等同于用户手动勾选。
+TURNSTILE_CHECKBOX_SELECTOR = "< *challenges.cloudflare.com* input[type='checkbox']"
 # 站点把签到页踢回登录页的特征（NexusPHP login.php?returnto=... / takelogin.php）
 LOGIN_PAGE_PATTERN = r"(takelogin\.php|login\.php\?returnto)"
 # 等待 Cloudflare 交互挑战自动放行的默认秒数，可用站点规则字段 cloudflare_wait 覆盖。
@@ -44,6 +47,8 @@ AUTO_SUBMIT_METHODS = {"auto", "turnstile_auto"}
 DEFAULT_AUTO_WAIT = 20000
 # 第一段 Cloudflare 挑战通过后，等待签到页内嵌 Turnstile 渲染的默认毫秒数。
 DEFAULT_SOLVE2_WAIT = 3000
+# Turnstile 复选框从外层 Cloudflare 放行到 iframe 渲染完成的最长等待时间。
+DEFAULT_TURNSTILE_WAIT = 45000
 # 图片验证码 / 人机校验特征（HTTP 直连拿不到结果，需改用 Browserless）
 CAPTCHA_PATTERN = (
     r"(captcha\.php|<img[^>]+captcha"
@@ -166,25 +171,23 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "path": "/attendance.php",
         "submit_selector": "form[action*='attendance.php'] input[type='submit']",
     },
-    # ---- 观众（Audiences）：签到由页面 JS 自动完成，必须走 Browserless ----
-    # 该站 /attendance.php 的 Cloudflare 托管挑战会等待后自动放行，签到同样由页面自己的
-    # JS 提交；页面没有提交按钮，也不需要点验证码。Browserless solve 会在这种不可解的
-    # 交互挑战上等待并报 “Captcha solving timed out”，所以预设改成只等待：
-    #   - submit_method=none：不点击、不注入自动提交，纯等页面自行签到
-    #   - cloudflare_wait=30 / wait=8000：给放行和签到 AJAX 足够时间
-    #   - solve_count=0：明确关闭 Browserless solve，避免 20 秒解题超时
+    # ---- 观众（Audiences）：签到页内嵌 Turnstile 复选框 ----
+    # 真实浏览器复现结果：页面不会因为“等一会儿”自动通过 Turnstile，必须点击一次
+    # 跨域 iframe 里的复选框。点击成功后站点的 cfCallback 会自动 POST attendance.php。
+    #   - submit_method=turnstile_click：用 BrowserQL 深度选择器原生点击真实 checkbox
+    #   - solve_count=0：不再调用 solve；此前实际结果是超时或拿不到 token
+    #   - turnstile_wait：等待外层 Cloudflare 放行、Turnstile iframe 渲染并可见
     #   - pending_keywords：仍停留在「验证中」时给出明确诊断
-    #   - 判定顺序：先看成功 / 已签到关键词，再判 pending，避免已签完的页面被 pending 文案误杀
     "audiences.me": {
         "engine": "browserless",
         "mode": "cloudflare",
         "path": "/attendance.php",
-        # 观众页的 Cloudflare 是“等待后自动放行”的托管挑战，不是需要 Browserless
-        # solve 的普通 Turnstile。solve 会等待验证码并可能直接 20 秒超时，反而阻止
-        # 页面自行完成挑战；这里禁用 solve，只让真实浏览器停留足够时间。
-        "submit_method": "none",
-        "cloudflare_wait": 30,
+        "submit_method": "turnstile_click",
+        "submit_selector": TURNSTILE_CHECKBOX_SELECTOR,
+        # 外层挑战通常数秒内完成；真正的渲染等待交给 waitForSelector(turnstile_wait)。
+        "cloudflare_wait": 5,
         "solve_count": 0,
+        "turnstile_wait": DEFAULT_TURNSTILE_WAIT,
         "wait": 8000,
         # 签到成功后页面可能跳回首页；同一浏览器会话重新打开 attendance.php 再确认一次，
         # 避免只看到首页就误报失败，也避免把未完成的验证当成成功。
@@ -305,6 +308,9 @@ def validate_rule(rule: Mapping[str, Any]) -> Dict[str, Any]:
     if mode in {"image", "trigger_image", "altcha"} and str(
             result.get("submit_method") or "").lower() in {"none", "skip"}:
         raise ValueError("图片验证码 / Altcha 站点必须指定提交按钮，不能用 submit_method=none")
+    if str(result.get("submit_method") or "").lower() == "turnstile_click" \
+            and not str(result.get("submit_selector") or "").strip():
+        raise ValueError("Turnstile 点击规则缺少 submit_selector")
     if mode == "altcha":
         for name in ("altcha_checkbox_selector", "altcha_payload_selector", "submit_selector"):
             if not str(result.get(name) or "").strip():
@@ -702,9 +708,10 @@ def _turnstile_auto_script(rule: Mapping[str, Any]) -> str:
 def build_query(rule: Mapping[str, Any], user_agent: Optional[str] = None) -> str:
     """构造一次签到的 BrowserQL mutation。
 
-    Cloudflare / Turnstile 默认使用 ``solve:solve``（不限制类型）以支持自动检测，
-    包括页面内嵌 iframe / shadow DOM 中的 Turnstile 复选框挑战；``solve_count=0``
-    时不调用 solve，适用于等待后自动放行、页面自行签到的观众（Audiences）类页面。
+    Cloudflare / Turnstile 默认使用 ``solve:solve``（不限制类型）以支持自动检测。
+    ``submit_method=turnstile_click`` 用于必须手动勾选复选框的页面：先用 BrowserQL
+    深度选择器等待 iframe 内 checkbox 可见，再用原生 click 点击；点击成功后站点回调
+    会自动提交表单。``solve_count=0`` 时不调用 solve。
     """
     image = rule["mode"] in {"image", "trigger_image"}
     triggered_image = rule["mode"] == "trigger_image"
@@ -713,7 +720,8 @@ def build_query(rule: Mapping[str, Any], user_agent: Optional[str] = None) -> st
     needs_solver = solver_enabled(rule)
     second_solve = secondary_solve_enabled(rule)
     submit_method = str(rule.get("submit_method") or "click")
-    native_click = submit_method == "click"
+    native_click = submit_method in {"click", "turnstile_click"}
+    turnstile_click = submit_method == "turnstile_click"
     # submit_method=auto：页面没有提交按钮、由验证回调自己提交（自定义规则）；solve 只
     # 生成 token 不触发回调，所以由插件补一刀显式提交。
     auto_submit = submit_method in AUTO_SUBMIT_METHODS
@@ -740,6 +748,8 @@ def build_query(rule: Mapping[str, Any], user_agent: Optional[str] = None) -> st
         variable_suffix += " $solve2Wait:Float!"
     if native_click:
         variable_suffix += " $selector:String!"
+        if turnstile_click:
+            variable_suffix += " $turnstileWait:Float!"
     elif auto_submit:
         variable_suffix += " $autoSubmit:String!"
     elif not skip_submit:
@@ -781,9 +791,11 @@ def build_query(rule: Mapping[str, Any], user_agent: Optional[str] = None) -> st
             "trigger:evaluate(content:$trigger){value}\n      waitForTrigger:waitForTimeout(time:$triggerWait){time}" if triggered_image else "",
             "altcha:click(selector:$altchaSelector){selector time}" if altcha else "",
             solve,
-            "submit:click(selector:$selector){selector time}" if native_click
-            else "submit:evaluate(content:$autoSubmit){value}" if auto_submit
-            else "" if skip_submit else "submit:evaluate(content:$submit){value}",
+            ("waitForTurnstile:waitForSelector(selector:$selector,timeout:$turnstileWait,visible:true){selector time}\n      "
+             if turnstile_click else "")
+            + ("submit:click(selector:$selector){selector time}" if native_click
+               else "submit:evaluate(content:$autoSubmit){value}" if auto_submit
+               else "" if skip_submit else "submit:evaluate(content:$submit){value}"),
             auto_diag,
             verify)
 
@@ -872,6 +884,15 @@ def solve2_wait_ms(rule: Mapping[str, Any]) -> int:
     except (TypeError, ValueError):
         milli = DEFAULT_SOLVE2_WAIT
     return max(1000, min(milli, 10000))
+
+
+def turnstile_wait_ms(rule: Mapping[str, Any]) -> int:
+    """等待 Turnstile iframe 内复选框出现的毫秒数（5~60 秒）。"""
+    try:
+        milli = int(float(rule.get("turnstile_wait") or DEFAULT_TURNSTILE_WAIT))
+    except (TypeError, ValueError):
+        milli = DEFAULT_TURNSTILE_WAIT
+    return max(5000, min(milli, 60000))
 
 
 def solver_enabled(rule: Mapping[str, Any]) -> bool:
@@ -1087,7 +1108,7 @@ class BrowserlessSigner:
         variables: Dict[str, Any] = {"cookies": cookies, "url": target,
                                      "beforeWait": page_wait,
                                      "wait": int(rule.get("wait") or 3500)}
-        if submit_method == "click":
+        if submit_method in {"click", "turnstile_click"}:
             variables["selector"] = rule["submit_selector"]
         elif submit_method in AUTO_SUBMIT_METHODS:
             # solve 只生成 Turnstile token、不触发站点回调：这里补一次显式提交
@@ -1100,6 +1121,8 @@ class BrowserlessSigner:
                                    else _submit_script(rule["submit_selector"], submit_method,
                                                        rule.get("captcha_input_selector"),
                                                        rule.get("submit_text")))
+        if submit_method == "turnstile_click":
+            variables["turnstileWait"] = turnstile_wait_ms(rule)
         if submit_method == "altcha_click":
             variables["altchaSelector"] = rule["altcha_checkbox_selector"]
         if rule["mode"] == "trigger_image":
@@ -1226,5 +1249,13 @@ class BrowserlessSigner:
                 message += f"（步骤：{error_path}）"
             if "waiting for page navigation" in message.lower():
                 return SignResult("failed", "Browserless 页面导航超时；请检查该站是否可由当前节点访问")
+            lower = message.lower()
+            if ("waitforselector" in lower or "waiting for selector" in lower
+                    or "timeout" in lower and "selector" in lower):
+                return SignResult("failed", "未等到 Cloudflare Turnstile 复选框；"
+                                   "请检查 cloudflare_wait / turnstile_wait 或站点页面结构")
+            if "not clickable" in lower or "not an htmlelement" in lower:
+                return SignResult("failed", "找到 Turnstile 复选框但无法原生点击；"
+                                   "当前 Browserless 节点可能被 Cloudflare 拦截")
             return SignResult("failed", "Browserless 执行失败：" + message)
         return value.get("data") or {}

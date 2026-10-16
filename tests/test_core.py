@@ -98,13 +98,15 @@ class CoreRegressionTests(unittest.TestCase):
                                       self.audiences)
         self.assertEqual(result.status, "already")
 
-    def test_audiences_preset_uses_browser_without_submit_button(self):
-        # 观众签到页由页面 JS 在 Turnstile 回调里自动提交，页面上没有可点的提交按钮：
-        # 既不能走 HTTP 直连，也不能沿用默认的 input[type=submit] 点击
+    def test_audiences_preset_clicks_turnstile_checkbox(self):
+        # 真实复现：只等待不会通过 Turnstile；必须原生点击跨域 iframe 内 checkbox，
+        # 点击后站点回调才会自动提交表单。页面本身没有可点的提交按钮。
         self.assertEqual(self.audiences["mode"], "cloudflare")
-        self.assertEqual(self.audiences["submit_method"], "none")
+        self.assertEqual(self.audiences["submit_method"], "turnstile_click")
         self.assertEqual(self.audiences["solve_count"], 0)
-        self.assertNotIn("submit_selector", self.audiences)
+        self.assertIn("challenges.cloudflare.com", self.audiences["submit_selector"])
+        self.assertIn("input[type='checkbox']", self.audiences["submit_selector"])
+        self.assertEqual(self.audiences["turnstile_wait"], 45000)
         self.assertIn("签到成功", self.audiences["success_keywords"])
         self.assertIn("已签到", self.audiences["already_keywords"])
         self.assertTrue(self.audiences["pending_keywords"])
@@ -307,7 +309,7 @@ class CoreRegressionTests(unittest.TestCase):
 
 
 class BrowserlessAudiencesTests(unittest.TestCase):
-    """观众（Audiences）浏览器引擎：不点按钮、等 Turnstile 自动过、按页面状态判定。"""
+    """观众（Audiences）浏览器引擎：原生点击 Turnstile checkbox，再按真实页面状态判定。"""
 
     def setUp(self):
         self.core = CORES[0]
@@ -319,8 +321,9 @@ class BrowserlessAudiencesTests(unittest.TestCase):
     def _signer(self, responses):
         return make_stub_signer(self.core, responses)
 
-    def test_query_waits_for_cloudflare_without_solver(self):
-        # 观众页的 Cloudflare 会自动放行；不要让 solve 在不可解的验证码上阻塞主流程
+    def test_query_waits_for_turnstile_then_native_clicks_it(self):
+        # 不使用 solve；等 Turnstile iframe 内 checkbox 可见后，用 BrowserQL 原生 click
+        # 触发真实鼠标事件。点击成功会调用站点 cfCallback 并自动提交表单。
         rule = self._rule()
         query = self.core.build_query(rule)
         self.assertNotIn("solve:solve", query)
@@ -328,7 +331,11 @@ class BrowserlessAudiencesTests(unittest.TestCase):
         self.assertNotIn("$solveTimeout", query)
         self.assertNotIn("$solve2Wait", query)
         self.assertNotIn("$autoSubmit", query)
-        self.assertNotIn("submit:click", query)
+        self.assertIn("waitForTurnstile:waitForSelector", query)
+        self.assertIn("selector:$selector", query)
+        self.assertIn("timeout:$turnstileWait", query)
+        self.assertIn("visible:true", query)
+        self.assertIn("submit:click(selector:$selector)", query)
         self.assertNotIn("$submit:", query)
         self.assertIn("verify:goto", query)
         self.assertIn("waitForVerify", query)
@@ -338,7 +345,7 @@ class BrowserlessAudiencesTests(unittest.TestCase):
         signer = self._signer([
             # 预检：页面还是「未签到 + 等人机验证」
             {"goto": {"status": 200}, "before": {"html": AUDIENCES_PENDING_HTML}},
-            # 主流程：等 Turnstile 自动放行；签到完成后站点跳回首页
+            # 主流程：等 checkbox，点击后站点自动提交并跳回首页
             {"goto": {"status": 200}, "solve": {"found": True, "solved": True},
              "solve2": {"found": True, "solved": True},
              "submit": {}, "response": {},
@@ -350,8 +357,11 @@ class BrowserlessAudiencesTests(unittest.TestCase):
         result = signer.sign(self.site, self._rule())
         self.assertEqual(result.status, "success")
         self.assertIn("22", result.message)
-        self.assertEqual(signer.calls[1][1]["beforeWait"], 30000)
+        self.assertEqual(signer.calls[1][1]["beforeWait"], 5000)
         self.assertNotIn("solve2Wait", signer.calls[1][1])
+        self.assertEqual(signer.calls[1][1]["selector"],
+                         self.core.TURNSTILE_CHECKBOX_SELECTOR)
+        self.assertEqual(signer.calls[1][1]["turnstileWait"], 45000)
         self.assertEqual(signer.calls[1][1]["wait"], 8000)
         self.assertEqual(signer.calls[1][1]["verifyWait"], 8000)
         self.assertEqual(signer.calls[1][1]["verifyUrl"],
@@ -481,6 +491,8 @@ class BrowserlessAudiencesTests(unittest.TestCase):
         self.assertEqual(self.core.solve_timeout_ms(rule), 20000)
         self.assertEqual(self.core.solve2_wait_ms({"solve2_wait": 1}), 1000)
         self.assertEqual(self.core.solve2_wait_ms({}), 3000)
+        self.assertEqual(self.core.turnstile_wait_ms({"turnstile_wait": 1}), 5000)
+        self.assertEqual(self.core.turnstile_wait_ms({}), 45000)
         self.assertTrue(self.core.secondary_solve_enabled(rule))
         self.assertFalse(self.core.solver_enabled(self._rule()))
         self.assertTrue(self.core.solver_enabled({"mode": "cloudflare"}))

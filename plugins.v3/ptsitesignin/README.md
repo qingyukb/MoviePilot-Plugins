@@ -43,7 +43,7 @@ ptsitesignin/
 
 | 站点 | path | 说明 |
 |---|---|---|
-| Audiences (`audiences.me`) | `/attendance.php` | Vue + Cloudflare 托管挑战签到页，**没有提交按钮**；实际验证只需真实浏览器等待 Cloudflare 自动放行，页面随后自动完成签到。预设走 Browserless（`submit_method=none`、`solve_count=0`），不调用 Browserless `solve`，避免不可解挑战出现 `Captcha solving timed out`；用 `cloudflare_wait=30` / `wait=8000` 留足放行与签到 AJAX 时间，再在同一会话重新打开 `/attendance.php` 等待 8 秒核验（`verify_success_path` / `verify_wait=8000`） |
+| Audiences (`audiences.me`) | `/attendance.php` | Vue + Cloudflare Turnstile 签到页，**没有提交按钮**；真实浏览器复现确认：Turnstile 复选框位于 `challenges.cloudflare.com` 跨域 iframe 内，必须**原生点击该复选框**才会生成 token 并触发站点 `cfCallback` 自动 POST 签到，单纯等待不会通过。预设走 Browserless（`submit_method=turnstile_click`、`solve_count=0`），用 BrowserQL 深度选择器 `< *challenges.cloudflare.com* input[type='checkbox']` + `waitForSelector(visible)` + `click` 完成打勾；`cloudflare_wait=5` 等外层挑战放行、`turnstile_wait=45000` 等复选框渲染、`wait=8000` 给自动 POST 留时间；随后在同一会话重新打开 `/attendance.php` 等待 8 秒核验（`verify_success_path` / `verify_wait=8000`） |
 
 ## 并发与失败重试
 
@@ -116,7 +116,7 @@ ptsitesignin/
 
 - Turnstile 需要执行 JS 并生成一次性 token，还要拿到 `cf_clearance` Cookie，纯 HTTP 无法伪造；
 - Browserless 使用 `solve:solve(...)`（**不限定类型**，由它自动识别挑战种类），官方支持 reCAPTCHA、hCaptcha、Cloudflare Turnstile，能点击 iframe / shadow DOM 内的复选框，并带拟人化点击、指纹规避；
-- 观众（Audiences）的签到页**没有提交按钮**，Cloudflare 托管挑战会在真实浏览器中等待后自动放行，页面 JS 随后自动完成签到。预设改为 `submit_method=none`、`solve_count=0`，**不再调用 Browserless `solve`**；这可以避免在不可解的挑战上等待并出现 `Captcha solving timed out`。`cloudflare_wait=30` / `wait=8000` 用于给放行和签到请求留足时间。
+- 观众（Audiences）的签到页**没有提交按钮**：真实浏览器复现（在本地 Edge 手动签到）确认，页面的 Turnstile 复选框位于 `challenges.cloudflare.com` 跨域 iframe 内，**必须原生点击该复选框**才会生成 token 并触发站点挂在 `data-callback` 上的 `cfCallback`，随后表单自动 POST `/attendance.php` 完成签到；单纯停留等待并不会通过。预设改为 `submit_method=turnstile_click`、`solve_count=0`，用 BrowserQL 深度选择器 `< *challenges.cloudflare.com* input[type='checkbox']` 先 `waitForSelector(visible:true)` 再原生 `click`，等价于手动勾选；这同时避免了 `solve:solve` 在该挑战上等待并报 `Captcha solving timed out`。`cloudflare_wait=5` 等外层挑战放行、`turnstile_wait=45000` 等复选框渲染、`wait=8000` 给自动 POST 留时间。
 - 签到完成后页面可能跳回首页，因此预置规则会在同一个 Browserless 会话中重新打开 `/attendance.php` 并等待 8 秒核验，只有看到签到成功 / 今日已签到才上报成功；若仍停留在人机验证页，会明确报告未确认签到，而不是把首页误判成成功。
 - Cookie 失效时 NexusPHP 会把 `/attendance.php` 302 到 `login.php?returnto=attendance.php`：插件直接提示「Cookie 无效或已过期，请重新登录后更新 Cookie」，不再让人机验证超时背锅。
 - 普通「点击打勾」页面若另有提交按钮，可写成 `{"engine":"browserless","mode":"cloudflare","path":"/attendance.php"}`，由插件按默认 `click` 提交。
@@ -143,7 +143,7 @@ ptsitesignin/
 | HTTP 引擎使用代理 | 复用 MoviePilot 全局代理 | 关 |
 | 遇验证码 / CF 自动用浏览器 | 内置预设或未声明引擎的站点 HTTP 撞上 CF / 验证码时自动换浏览器重试（手工写了 engine 的除外） | 开 |
 | Browserless 地址 / Token / 超时 | Browserless 连接参数 | 官方地址 / 空 / 100 秒 |
-| 自定义站点规则 | JSON；Cloudflare 交互挑战可用 `cloudflare_wait`（秒）覆盖默认 10 秒；等待后自动放行、页面自行签到的站点可设为 `submit_method: "none"` 且 `solve_count: 0`，避免 Browserless solve 超时；确需自动解题时再使用 `auto` / `solve_count` | 空 |
+| 自定义站点规则 | JSON；Cloudflare 交互挑战可用 `cloudflare_wait`（秒）覆盖默认 10 秒；签到页内嵌 Turnstile 复选框（如观众 Audiences）可设 `submit_method: "turnstile_click"` + `submit_selector: "< *challenges.cloudflare.com* input[type='checkbox']"` 并配 `solve_count: 0`，由插件等复选框可见后原生点击；确需自动解题时再使用 `auto` / `solve_count` | 空 |
 
 ## 自定义规则示例
 
@@ -156,7 +156,7 @@ HTTP 站点：
     "success": "(签到成功|state[\"']?\\s*:\\s*[\"']?success)",
     "already": "(已签到|今日已签)"
   },
-  "audiences.me": { "path": "/attendance.php", "cloudflare_wait": 30, "submit_method": "none", "solve_count": 0, "wait": 8000 },
+  "audiences.me": { "engine": "browserless", "path": "/attendance.php", "cloudflare_wait": 5, "submit_method": "turnstile_click", "submit_selector": "< *challenges.cloudflare.com* input[type='checkbox']", "turnstile_wait": 45000, "solve_count": 0, "wait": 8000 },
   "5": { "path": "/signin.php", "method": "POST" }
 }
 ```
@@ -182,10 +182,10 @@ Browserless 站点（键可用域名或站点 ID，`engine` 会覆盖全局默�
 |---|---|
 | `mode` | `http` / `open_page` / `cloudflare` / `image` / `trigger_image` / `altcha` |
 | `submit_selector` / `submit_text` | 提交按钮选择器或按钮文字 |
-| `submit_method` | `click`（原生点击）/ `ajax` / `dom_click` / `confirm_click` / `altcha_click` / `auto`（页面内嵌 Turnstile，先触发 `data-callback`，必要时按真实 action 补一次 POST）/ `none`（什么都不点，纯等页面自己签完） |
+| `submit_method` | `click`（原生点击）/ `turnstile_click`（先等跨域 iframe 内的 Turnstile 复选框可见再原生点击）/ `ajax` / `dom_click` / `confirm_click` / `altcha_click` / `auto`（页面内嵌 Turnstile，先触发 `data-callback`，必要时按真实 action 补一次 POST）/ `none`（什么都不点，纯等页面自己签完） |
 | `captcha_selector` / `captcha_input_selector` | 图片验证码图片与输入框 |
 | `trigger_selector` / `trigger_wait` | 弹窗触发按钮与等待毫秒 |
-| `preflight_path` / `wait` / `preflight_wait` / `cloudflare_wait` / `auto_wait` / `solve_timeout` / `solve_count` / `solve2_wait` | 页面预检、签到后等待、Cloudflare 自动放行、Turnstile token 与 solve 找验证码的等待时间；`solve_count=0` 明确禁用 solve，`solve_count=2` 时对两段挑战依次 solve，`solve2_wait` 控制两段之间的等待毫秒数 |
+| `preflight_path` / `wait` / `preflight_wait` / `cloudflare_wait` / `turnstile_wait` / `auto_wait` / `solve_timeout` / `solve_count` / `solve2_wait` | 页面预检、签到后等待、Cloudflare 自动放行、Turnstile 复选框渲染等待（毫秒，5–60 秒）、Turnstile token 与 solve 找验证码的等待时间；`solve_count=0` 明确禁用 solve，`solve_count=2` 时对两段挑战依次 solve，`solve2_wait` 控制两段之间的等待毫秒数 |
 | `success_keywords` / `already_keywords` / `pending_keywords` | 文本关键词判定；`pending_keywords` 用于诊断仍停留在人机验证中的页面 |
 | `success_json` | 形如 `{"field":"/state","values":["success"]}` 的 AJAX JSON 判定 |
 | `strict_status_keywords` | `true` 时只认 `success_keywords`，忽略通用词 |
