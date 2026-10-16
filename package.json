@@ -29,26 +29,5 @@
       "v1.0.1": "未声明引擎的站点在 HTTP 直连遇到 Cloudflare 验证页或图片验证码时，自动改用 Browserless 重试一次（新增配置开关，默认开启）；已显式声明 engine=http 的站点不受影响",
       "v1.0.0": "初始版本：attendance.php 标准签到、自定义规则 JSON、并发与失败重试、结果统计页"
     }
-  },
-  "MTeamLogin": {
-    "name": "馒头登录",
-    "description": "插件配置页手填馒头（M-Team）账号密码或 authorization，真实登录换取 authorization 并调用保活心跳 updateLastBrowse，再校验最近动向时间；API Key 只能读取、不能保活。",
-    "labels": "站点,登录",
-    "version": "1.4.0",
-    "icon": "https://raw.githubusercontent.com/qingyukb/MoviePilot-Plugins/main/icons/mteam.png",
-    "author": "qingyu",
-    "level": 2,
-    "v2": true,
-    "system_version": ">=2.0.0",
-        "history": {
-      "v1.4.0": "修复真实登录被站点当成「新设备」而强制邮箱两步验证的问题：实测 M-Team 把登录态 authorization 绑定到请求头 did（浏览器 localStorage.did），缺少 did 的登录会被判为不可信设备（返回 code=1001 要求邮箱验证码），换来的令牌也会很快失效。插件现在会自动生成一个固定 did，并在登录与保活心跳的每个请求上携带，登录与保活使用同一个 did，凭「账号 + 密码」即可直接真实登录（不必再填邮箱验证码），保活后「最近动向」稳定刷新为「刚刚」。配置页新增「设备标识 did（可选）」项：留空自动生成并保存，也可手填浏览器 localStorage.did。",
-      "v1.3.1": "修复默认 API 地址为 api.m-team.io（浏览器实测 api.m-team.cc 返回 401），并修复保活请求返回结构化 401 时不会继续回退尝试其它 API 域名的逻辑。真实登录遇到 code=1001 且 data 为 [\"email\"] 时，自动调用 /member/sendLoginEmailVerifyCode 把 6 位验证码发到账号注册邮箱，并识别 email/otp/tg 三种两步验证；登录成功后把响应头里的新 authorization 自动写回配置 token、清掉一次性验证码，下一轮直接复用新令牌保活，不再重复触发邮箱验证。",
-      "v1.3.0": "凭证改回插件配置页手填，不再读取 MoviePilot「站点管理」：推荐填账号+密码（支持 otp_secret/otp_code、email_code、tg_code）由插件调用 POST /api/login 真实登录，再用响应头 authorization 调 POST /api/member/updateLastBrowse 保活；也可直接填浏览器 authorization 或 Cookie。API Key 仍只读、不能保活。配置页新增全部凭证字段，并删除站点选择与站点管理读取逻辑。",
-      "v1.2.0": "改为「真实登录 + 保活」，并明确 API Key 调用不算活跃：实测用站点「API Key」(x-api-key) 调 POST /api/member/updateLastBrowse 一律返回 401 Full authentication is required，站点只认真实登录的 authorization(JWT) 心跳。保活现在只走三条真实登录链路——站点管理里的 Token(authorization)、Cookie 里解析出的 authorization、站点「备注(note)」里的账号密码 JSON（插件会 POST /api/login 真实登录换取新的 authorization）；Token 没填或已过期时自动回退到备注账号密码重新登录；保活失败时仍会读取并展示账号真实的旧「最近动向」，并给出站点管理修复建议。",
-      "v1.1.0": "改为真实登录 + 保活：删除全部手填凭证（用户名、密码、OTP 密钥/动态码、邮箱/Telegram 验证码、手动 API Key），凭证只从「站点管理」读取；每一轮先调用 POST /member/updateLastBrowse 保活心跳，再读 /member/profile 校验 memberStatus.lastBrowse，保活正常时最近动向应为「刚刚 / 1 分钟前」；详情页与通知新增保活状态，保活失败会直接给出站点管理修复建议。",
-      "v1.0.2": "接口地址改为多候选自动回退：优先用按「站点管理」站点地址推导的后端（api.<域名>/api），不可用时依次回退 api.m-team.cc → api.m-team.io → api2.m-team.cc；当接口返回「请求方法不支持」时自动改用 POST 重试。发送失败时会在日志附上实际请求地址（METHOD URL），方便前后端分离站点排查；仍严格只读 member/profile，绝不调用 updateLastBrowse。",
-      "v1.0.1": "凭证改为从 MoviePilot「站点管理」自动读取：自动识别馒头（M-Team）站点，直接使用其中的 API Key（实测 x-api-key 无需签名即可读取 /member/profile）、User-Agent、代理与超时，并按站点地址推导 API 基址；无需再手填账号密码，仍保留可选的账号密码登录与手动 API Key 覆盖。",
-      "v1.0.0": "初始版本：账号密码登录 M-Team（支持 OTP 密钥自动补动态码、邮箱 / Telegram 验证码、API Key 兜底），登录后只读 /member/profile 的 memberStatus.lastBrowse，得到账号真实的「最近动向」时间；插件详情页展示绝对时间与距今时长，保留最近 30 天记录，支持 Cron、保存后立即执行一次与三档通知模式。"
-    }
   }
 }

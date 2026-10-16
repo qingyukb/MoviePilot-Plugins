@@ -11,7 +11,6 @@ ROOT = Path(__file__).resolve().parents[1]
 # 插件目录名 -> 市场清单里的插件 key
 PLUGINS = {
     "ptsitesignin": "PTSiteSignIn",
-    "mteamlogin": "MTeamLogin",
 }
 MANIFESTS = ("package.json", "package.v2.json", "package.v3.json")
 

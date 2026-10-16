@@ -34,23 +34,6 @@
 - 插件详情页统计表（站点 / 方式 / 状态 / 时间 / 结果，含实际奖励如爆米花 / 魔力值）+ 通知模式三档（每次执行后 / 仅失败时 / 不通知）
 - Cookie 与 Token 不写入日志，签到结果按天留存（自动清理，仅保留最近 30 天）
 
-### [馒头登录 + 保活](plugins.v2/mteamlogin)
-
-在插件配置页手填馒头（M-Team）账号密码或 authorization，**真实登录该账号并保活**，再用站点返回的「最近动向」时间自检，支持 MoviePilot V2 与 V3。
-
-馒头是前后端分离的：前端 `kp.m-team.cc`，后端 API `api.m-team.io`（登录态绑定设备标识 `did`，插件会自动生成并固定）。前端每次登录 / 校验通过后会**立刻**调用 `POST /api/member/updateLastBrowse`（保活心跳），把「最近动向」刷成当前时间。旧版插件只读 `profile`、从不保活，所以拿到的永远是「上一次别处登录」留下的时间。
-
-- V2：[`plugins.v2/mteamlogin`](plugins.v2/mteamlogin)
-- V3：[`plugins.v3/mteamlogin`](plugins.v3/mteamlogin)
-
-主要功能：
-
-- 每轮先调用 `POST /api/member/updateLastBrowse` 做**保活心跳**，再读 `GET /api/member/profile` 的 `data.memberStatus.lastBrowse` 校验；保活正常时「最近动向」应为「刚刚 / 1 分钟前」
-- 凭证**只从「站点管理」读取**，插件已删除全部手填凭证（用户名 / 密码 / OTP 密钥与动态码 / 邮箱与 Telegram 验证码 / 手动 API Key）；按站点 Token → Cookie 里的令牌 → API Key → Cookie 逐个尝试
-- 前后端分离友好：按站点地址推导后端（`api.<域名>/api`），不可用时自动回退 `api.m-team.cc` / `api.m-team.io` / `api2.m-team.cc`；只读接口返回 405 时自动改用 POST，且除保活与只读接口外不碰任何其它写接口
-- 详情页同时展示「最近动向」与「保活心跳」状态，保活失败会直接给出指向「站点管理」的修复建议；保留最近 30 天历史
-- Cron 定时执行、保存后立即执行一次、三档通知模式；Token、API Key 与 Cookie 不写入日志
-
 ## 安装
 
 ### 通过插件市场（推荐）
@@ -93,14 +76,8 @@ cp -r /tmp/mp-plugins/plugins.v3/ptsitesignin /config/plugins/
 │   │   ├── signin.png
 │   │   └── tools/
 │   │       └── collect-rule-snippet.js   # 新站点规则采集脚本
-│   └── mteamlogin/
-│       ├── __init__.py        # 插件入口：配置页 / 详情页 / 调度 / 站点管理读取
-│       ├── core.py            # 签名、认证、保活心跳与最近动向查询（不依赖 MoviePilot）
-│       ├── README.md
-│       └── mteam.png
 └── plugins.v3/                # 兼容 MoviePilot V3 的插件
-    ├── ptsitesignin/
-    └── mteamlogin/
+    └── ptsitesignin/
 ```
 
 ## 添加新站点规则
