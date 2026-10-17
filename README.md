@@ -66,20 +66,28 @@ cp -r /tmp/mp-plugins/plugins.v3/ptsitesignin /config/plugins/
 
 ```
 .
+├── package.json               # 默认（历史）插件市场清单
 ├── package.v2.json            # V2 插件市场清单
 ├── package.v3.json            # V3 插件市场清单
-├── icons/                     # 插件图标
+├── icons/                     # 插件图标（市场卡片用）
 ├── plugins.v2/                # 兼容 MoviePilot V2 的插件
 │   ├── ptsitesignin/
 │   │   ├── __init__.py        # 插件入口：配置页 / 结果页 / 调度
 │   │   ├── core.py            # 双引擎核心逻辑（不依赖 MoviePilot）
 │   │   ├── README.md
-│   │   ├── signin.png
+│   │   ├── signin.png         # 已安装插件卡片图标（plugin_icon）
 │   │   └── tools/
 │   │       └── collect-rule-snippet.js   # 新站点规则采集脚本
-└── plugins.v3/                # 兼容 MoviePilot V3 的插件
-    └── ptsitesignin/
+├── plugins.v3/                # 兼容 MoviePilot V3 的插件
+│   └── ptsitesignin/          # 与 plugins.v2 保持一致
+└── tests/v3/ptsitesignin/     # 测试（按官方仓库 tests/v3/<plugin_id>/ 布局）
 ```
+
+仓库结构、索引字段（`name` / `description` / `labels` / `version` / `icon` / `author` /
+`level` / `release` / `system_version` / `history`）与版本门禁都对齐
+[官方插件仓库的提交规则](https://github.com/jxxghp/MoviePilot-Plugins)：
+目录名等于插件主类名的小写、`plugin_version` 与索引 `version` 及最新 `history` 一致、
+版本历史按语义版本降序排列。
 
 ## 添加新站点规则
 

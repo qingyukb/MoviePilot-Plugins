@@ -7,6 +7,7 @@
     "icon": "https://cdn.jsdelivr.net/gh/qingyukb/MoviePilot-Plugins@main/icons/ptsignin.png",
     "author": "qingyukb",
     "level": 2,
+    "release": true,
     "system_version": ">=3.0.0",
     "history": {
       "v1.5.11": "憨憨签完没有提示也能正确判定：点到签到按钮就算成功，奖励照常显示",

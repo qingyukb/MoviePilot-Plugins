@@ -12,7 +12,9 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = next((parent for parent in Path(__file__).resolve().parents
+              if (parent / "package.json").is_file() and (parent / "plugins.v2").is_dir()),
+             Path(__file__).resolve().parents[1])
 PLUGIN_DIRS = (
     ROOT / "plugins.v2" / "ptsitesignin",
     ROOT / "plugins.v3" / "ptsitesignin",
