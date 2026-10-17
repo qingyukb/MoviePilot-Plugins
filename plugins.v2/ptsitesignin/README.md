@@ -33,7 +33,7 @@ ptsitesignin/
 
 - 请求 `站点域名 + path`，默认 `/attendance.php`；**默认路径返回 404 / 405 时自动换签到入口**：① 先在首页里找**签到表单**——提交按钮文字含「签到 / 打卡」时按表单的 `action` / `method` 提交，并把按钮字段（如 `signin=每日签到`）一起发过去（学校 BTSCHOOL 就是这种「首页挂一个每日签到按钮」的站，没有独立签到页）；② 再找同站链接里文字含「签到 / 打卡」的；③ 然后依次试 `/signin.php`、`/sign_in.php`、`/checkin.php`、`/plugin_sign-in.php`、`/attendance.php?action=sign`。都找不到时失败原因会列出试过哪些路径，可直接在自定义规则里用 `path` 指定
 - 判定顺序：Cloudflare 验证页 → 登录页特征 → `success` 正则 → `already` 正则 → JSON `state` 字段 → 脚本 `state` 兜底
-- 奖励显示：成功 / 已签到时自动提取奖励文案（如「获得 22 粒爆米花」「魔力值 +30」）显示在结果与通知中；规则里的 `bonus` 正则可覆盖默认模板（捕获组内容即显示文本）
+- 奖励显示：成功 / 已签到时自动提取奖励文案（如「获得 22 粒爆米花」「获得 N 点魔力值」）写进详情页「结果」列；**数值是每次跑的时候从页面文本抓的**，不是写死的（今天 87、明天按站点显示的那个数），规则里的 `bonus` 正则可覆盖默认模板（捕获组内容即显示文本）
 - 遇 Cloudflare 人机验证或图片验证码时返回对应标记，未声明引擎的站点会自动改用浏览器重试（见下「自动回退到浏览器引擎」）
 - 判定只在去掉 `script/style` 的可见正文上进行；`success` 先于 `already` 判断，避免「签到成功 + 已连续签到 N 天」被误判为今日已签到（观众 Audiences 回归用例）
 - 正则默认：`success` 匹配 `state:success / 签到成功 / 簽到成功`，`already` 匹配 `今日已签 / 已连续签到 / already`
@@ -147,6 +147,7 @@ ptsitesignin/
 | YemaPT (`yemapt.org`) | `altcha` | Hash 路由 + Altcha 复选框 + 提交按钮 |
 | HDSky (`hdsky.me`) | `trigger_image` | 先点开签到弹窗再解图片验证码 |
 | AGSVPT (`agsvpt.com`) | HTTP `POST` | NexusPHP 签到页，页面上是「立即签到」提交按钮：GET 只渲染按钮不签到，预设用 `method: POST`；撞上验证码 / 盾时自动回退到浏览器并按「立即签到」按钮点击 |
+| BTSCHOOL (`btschool.club`，学校) | HTTP `POST` | 签到按钮直接挂在**首页**，没有独立签到页（实测 `/attendance.php`、`/signin.php`、`/checkin.php` 全是 404）：预设用 `POST /index.php`，判定沿用默认文案（今天已签到 / 签到成功）；奖励如「您获得 N 点魔力值」每次从页面抓取 |
 | `dstudio.me` / `mua.xloli.cc` / `share.ilolicon.com` | `cloudflare` | Cloudflare 托管挑战自动通过 |
 
 ### 关于 Cloudflare Turnstile

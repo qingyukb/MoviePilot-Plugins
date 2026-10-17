@@ -280,6 +280,27 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertFalse(self.core.navigation_ok("open_page", 403, real))
         self.assertFalse(self.core.navigation_ok("cloudflare", None, real))
 
+    def test_activity_text_unescapes_html_entities(self):
+        # 站点源码里常把 < 写成 &lt;：「2026-10-17 03:52:21 ( &lt; 1分前 )」
+        html = ("<html><body><div>最近动向：2026-10-17 03:52:21 "
+                "(&lt; 1分前)</div></body></html>")
+        found = self.core.extract_activity(html)
+        self.assertIn("2026-10-17 03:52:21", found["last_seen"])
+        self.assertNotIn("&lt;", found["last_seen"])
+        self.assertEqual(self.core.plain_text("&lt;1分前&gt; &amp; &quot;签到成功&quot;"),
+                         '<1分前> & "签到成功"')
+        self.assertEqual(self.core.page_text("<div>a &lt; b &amp; c</div>"), "a < b & c")
+
+    def test_btschool_preset_posts_homepage(self):
+        # 学校：签到按钮在首页，没有独立签到页 → 直接 POST /index.php
+        rule = self.core.resolve_rule({"url": "https://pt.btschool.club/", "cookie": "c=1"}, {})
+        self.assertEqual(rule["engine"], "http")
+        self.assertEqual(rule["method"], "POST")
+        self.assertEqual(rule["path"], "/index.php")
+        self.assertEqual(rule["submit_text"], "每日签到")
+        fallback = self.core.fallback_rule(rule, "cloudflare")
+        self.assertEqual(fallback["submit_text"], "每日签到")
+
     def test_summarize_records_separates_uncertain_and_missing(self):
         rows = [
             {"site": "A", "status": "success", "message": "签到成功"},

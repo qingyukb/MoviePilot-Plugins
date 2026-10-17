@@ -15,6 +15,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from html import unescape as _html_unescape
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 DEFAULT_HTTP_PATH = "/attendance.php"
@@ -195,6 +196,17 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "path": "/attendance.php",
         "submit_selector": "form[action*='attendance.php'] input[type='submit']",
     },
+    # ---- BTSCHOOL（btschool.club，学校）：签到按钮直接挂在首页，没有独立签到页 ----
+    # 实测 /attendance.php、/signin.php、/checkin.php 等全是 404，首页上是一个「每日签到」
+    # 提交按钮，所以直接 POST 首页即可；判定沿用默认正则（今天已签到 / 签到成功），
+    # 「您获得 N 点魔力值」这类奖励是每天不同的，由 extract_bonus 每次从页面文本抓取，不写死。
+    "btschool.club": {
+        "engine": "http",
+        "method": "POST",
+        "path": "/index.php",
+        "submit_selector": "input[type='submit'], button[type='submit'], button",
+        "submit_text": "每日签到",
+    },
     # ---- 观众（Audiences）：签到页内嵌 Turnstile，验证通过后由站点自行提交 ----
     # 该站 Turnstile 渲染在 closed shadow DOM 里（本地 Edge 复现），页面 JS 读不到
     # cf-turnstile-response，DOM 上也没有可调的 data-callback；而 Browserless 的 solve 只
@@ -283,14 +295,27 @@ def parse_rules(raw: Any) -> Dict[str, Dict[str, Any]]:
     return result
 
 
+def preset_for_host(host: str) -> Optional[Dict[str, Any]]:
+    """按域名取内置预设：先精确匹配，再按「以 .<预设域名> 结尾」兜底。
+
+    站点常用 `pt.` / `www.` / `bbs.` 前缀（例如学校是 `pt.btschool.club`，预设键写的是
+    `btschool.club`），这样不必为每个子域各写一条；`open.cd` 的子域也一并覆盖。
+    """
+    preset = DEFAULT_RULES.get(host)
+    if preset is not None:
+        return preset
+    for key, value in DEFAULT_RULES.items():
+        if host.endswith("." + key):
+            return value
+    return None
+
+
 def resolve_rule(site: Mapping[str, Any], custom_rules: Mapping[str, Mapping[str, Any]],
                  default_engine: str = "http") -> Dict[str, Any]:
     host = normalize_host(str(site.get("url") or ""))
     custom = (custom_rules.get(str(site.get("id"))) or custom_rules.get(host)
               or custom_rules.get("www." + host) or {})
-    preset = DEFAULT_RULES.get(host)
-    if preset is None and host.endswith(".open.cd"):
-        preset = DEFAULT_RULES["open.cd"]
+    preset = preset_for_host(host)
     rule = dict(preset or {})
     rule.update(custom)
     # 只有用户在自定义规则里显式声明 engine 才算「手工指定」；内置预设声明的 http
@@ -570,11 +595,16 @@ def http_sign_auto(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: in
 
 
 def plain_text(content: str) -> str:
-    """去掉注释、script/style 与 HTML 标签并压缩空白，便于按文案匹配。"""
+    """去掉注释、script/style 与 HTML 标签并压缩空白，便于按文案匹配。
+
+    最后再解一次 HTML 实体：站点源码里常把 `<` 写成 `&lt;`（例如「2026-10-17 03:52:21
+    ( &lt; 1分前 )」），不解码的话结果里会原样带出 `&lt;`。
+    """
     text = re.sub(r"<!--.*?-->", " ", content, flags=re.DOTALL)
     text = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", text, flags=re.IGNORECASE | re.DOTALL)
     # 标签名必须以字母开头，避免把站点相对时间里的 <（如 " < 1分前"）当成标签吞掉
     text = re.sub(r"</?[a-zA-Z][^>]*>", " ", text)
+    text = _html_unescape(text)
     return re.sub(r"\s+", " ", text).strip()
 
 
@@ -1676,7 +1706,9 @@ def build_preflight_query(user_agent: Optional[str] = None, wait: int = 2000) ->
 def page_text(html: str) -> str:
     visible = re.sub(r"<(script|style)\b[^>]*>.*?</\1\s*>", " ", html or "",
                      flags=re.IGNORECASE | re.DOTALL)
-    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", visible)).strip()
+    # 同 plain_text：解 HTML 实体，避免结果里带出 `&lt;` / `&amp;` 这类源码写法
+    visible = _html_unescape(re.sub(r"<[^>]+>", " ", visible))
+    return re.sub(r"\s+", " ", visible).strip()
 
 
 def first_keyword(text: str, keywords: Any) -> str:

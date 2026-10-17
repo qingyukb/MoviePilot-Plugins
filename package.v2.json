@@ -3,13 +3,13 @@
     "name": "PT站点签到",
     "description": "双引擎 PT 签到，可选真实登录刷新 Cookie 并读取站点「最近动向」：HTTP 直连签到接口，或经 Browserless 完成图片验证码 / Cloudflare / Turnstile 挑战。",
     "labels": "站点,签到",
-    "version": "1.4.8",
+    "version": "1.4.9",
     "icon": "https://raw.githubusercontent.com/qingyukb/MoviePilot-Plugins/main/icons/ptsignin.png",
     "author": "qingyu",
     "level": 2,
     "system_version": ">=2.0.0,<3.0.0",
     "history": {
-      "v1.4.8": "修复「签到就在首页」的站点（学校 BTSCHOOL：首页挂一个「每日签到」提交按钮，没有 attendance.php，实测 /attendance.php、/signin.php、/checkin.php 等全是 404）：HTTP 引擎在默认路径 404 时，现在会先在首页里找**签到表单**——提交按钮文字含「签到 / 打卡」就按表单的 action / method 提交，并把按钮字段（如 signin=每日签到）一起发过去（http_sign 新增 data 支持）；找不到表单再找同站签到链接，最后才依次试常见路径。撞 Cloudflare / 验证码需要改用浏览器时，也会先用这个入口修正 path，避免浏览器去打开 404 地址。"
+      "v1.4.9": "两处修复：① 页面里的 HTML 实体不再原样带出——以前「最近动向」会显示成 `2026-10-17 03:52:21 ( &lt; 1分前 )`，现在会解码成 `( < 1分前 )`（plain_text / page_text 都处理）；② 新增 BTSCHOOL（btschool.club，学校）内置预设：该站签到按钮直接挂在首页、没有独立签到页，预设用 POST /index.php，奖励如「您获得 N 点魔力值」每次从页面抓取、不写死。同时内置预设改为「精确匹配 + 以 .预设域名 结尾」匹配，`pt.btschool.club` 这类子域也能命中预设。"
     }
   }
 }
