@@ -211,6 +211,8 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "submit_selector": "button, a[role='button'], div[role='button'], input[type='submit']",
         "submit_text": "签到",
         "success_keywords": ["签到成功", "簽到成功", "领取成功", "簽到完成", "签到完成"],
+        # 这站点完没有任何提示，按钮直接变「已领取」：点到了就算成功
+        "success_on_click": True,
         # 点完按钮才做判定，页面上「本次签到获得…」就代表今天已经领到了
         "already_keywords": ["今日已签到", "今日已经签到", "今天已签到", "今日已領取",
                               "本次签到获得", "已连续签到"],
@@ -2176,6 +2178,20 @@ def classify(html: str, rule: Mapping[str, Any]) -> SignResult:
     return SignResult("failed", "未识别到签到成功结果；" + page_hint(html))
 
 
+def judge_after_click(rule: Mapping[str, Any], submitted: Any,
+                      after_html: str) -> Optional[SignResult]:
+    """按钮点击式的站点（憨憨 hhanclub 这种）：点完页面没有任何提示，只有按钮变成「已领取」。
+
+    开 `success_on_click` 时，只要真的点到了签到按钮就算签到成功；没点到（按钮早就是
+    「已领取」）返回 None，交给后面的文案判定走「今日已签到」。
+    """
+    if not rule.get("success_on_click"):
+        return None
+    if submitted in (None, False, "false"):
+        return None
+    return SignResult("success", _bonus_message("签到成功", page_text(after_html), rule))
+
+
 def classify_ajax_response(value: Any, rule: Mapping[str, Any]) -> Optional[SignResult]:
     if not value or value == "null":
         return None
@@ -2499,6 +2515,9 @@ class BrowserlessSigner:
                 "签到后二次核验未显示签到成功状态；" + page_hint(verify_html), auto_hint))
         if ajax_result:
             return ajax_result
+        clicked = judge_after_click(rule, submitted, after_html)
+        if clicked:
+            return clicked
         result = classify(after_html, rule)
         if result.status == "failed":
             before = classify(str((data.get("before") or {}).get("html") or ""), rule)

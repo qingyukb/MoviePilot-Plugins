@@ -149,7 +149,7 @@ ptsitesignin/
 | HDSky (`hdsky.me`) | `trigger_image` | 先点开签到弹窗再解图片验证码 |
 | AGSVPT (`agsvpt.com`) | HTTP `POST` | NexusPHP 签到页，页面上是「立即签到」提交按钮：GET 只渲染按钮不签到，预设用 `method: POST`；撞上验证码 / 盾时自动回退到浏览器并按「立即签到」按钮点击 |
 | BTSCHOOL (`btschool.club`，学校) | HTTP `POST` | 签到按钮直接挂在**首页**，没有独立签到页（实测 `/attendance.php`、`/signin.php`、`/checkin.php` 全是 404）：预设用 `POST /index.php`。这站签到成功**不给任何提示**、只是把「每日签到」入口拿掉，所以用 `absent_keywords: ["每日签到"]` 判定「入口消失＝已完成」；奖励如「获得 N 点魔力值」每次从页面原文抓取（数值每天不同） |
-| 憨憨 (`hhanclub.net`) | Browserless | 日历式签到页：点当天格子的「签到」按钮，签完变「已领取」；奖励取页面上的「本次签到获得 N 个憨豆」 |
+| 憨憨 (`hhanclub.net`) | Browserless | 日历式签到页：点当天格子的「签到」按钮，签完变「已领取」（页面不给任何提示，所以「点到了就算成功」）；奖励取「本次签到获得 N 个憨豆」 |
 | `dstudio.me` / `mua.xloli.cc` / `share.ilolicon.com` | `cloudflare` | Cloudflare 托管挑战自动通过 |
 
 ### 关于 Cloudflare Turnstile
