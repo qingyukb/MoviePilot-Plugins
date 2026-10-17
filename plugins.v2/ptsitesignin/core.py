@@ -771,11 +771,14 @@ LOGIN_FAILURE_PATTERN = (r"(用户名或密码错误|用户名或密碼錯誤|�
                          r"|登录失败|登入失敗|invalid (?:username|password)|incorrect password)")
 # 登录页要求人机校验时的特征
 LOGIN_CAPTCHA_PATTERN = r"(captcha|imagestring|验证码|驗證碼|turnstile)"
-# 用户页里「最近动向」相关关键词（含繁体）
-ACTIVITY_KEYWORDS = ("最近动向", "最近動向", "最近活动", "最近活動", "最近访问", "最近訪問",
-                     "上次访问", "上次訪問", "上次签到", "上次簽到", "上次活动", "上次活動",
-                     "最后访问", "最後訪問", "最后活动", "最後活動", "最后上线", "最後上線",
-                     "最后活跃", "最後活躍", "上次登录", "上次登入")
+# 用户页里「最近动向」相关关键词（含繁体、各站的不同叫法）
+ACTIVITY_KEYWORDS = ("最近动向", "最近動向", "最新动向", "最新動向", "最近活动", "最近活動",
+                     "最近访问", "最近訪問", "上次访问", "上次訪問", "本次访问", "上次签到",
+                     "上次簽到", "上次活动", "上次活動", "上次登入", "上次登录", "上次造访",
+                     "上次造訪", "最后访问", "最後訪問", "最后活动", "最後活動", "最后上线",
+                     "最後上線", "最后活跃", "最後活躍", "最后造访", "最後造訪", "最近登入",
+                     "最近登錄", "最近上线", "最近上線", "最近活跃", "最近活躍", "最后在线",
+                     "最後在線")
 # 站点常见的时间格式（NexusPHP 多为 YYYY-MM-DD HH:MM:SS）
 DATETIME_PATTERN = r"(\d{4}[-/.]\d{1,2}[-/.]\d{1,2}(?:[ T]\d{1,2}:\d{2}(?::\d{2})?)?)"
 # 没有关键词命中时用的严格时间格式：必须带时分。裸日期（2026-09-18）在种子列表、
@@ -1129,6 +1132,9 @@ def read_activity(site: Mapping[str, Any], cookie: str, timeout: int = 30,
     uid = cookie_uid(cookie) or (match.group(1) if match else "")
     if uid:
         candidates.append(f"{DEFAULT_USERDETAILS_PATH}?id={uid}")
+    # NexusPHP 的 userdetails.php 不带 id 时显示当前登录用户自己的资料——uid 解不出来
+    # （自定义主题、Cookie 里没有 c_secure_uid）时靠这条兜底
+    candidates.append(DEFAULT_USERDETAILS_PATH)
     candidates.append(DEFAULT_INDEX_PATH)
     seen: set = set()
     for candidate in candidates:
@@ -1151,7 +1157,8 @@ def read_activity(site: Mapping[str, Any], cookie: str, timeout: int = 30,
                                   last_seen=found.get("last_seen", ""),
                                   snippet=found.get("snippet", ""),
                                   source=str(candidate))
-    return ActivityResult("failed", "未在站点页面找到「最近动向」")
+    return ActivityResult("failed",
+                          f"未在站点页面找到「最近动向」（已试 {'、'.join(candidates)}）")
 
 
 # ---------------------------------------------------- 结果记录汇总（插件详情页用）

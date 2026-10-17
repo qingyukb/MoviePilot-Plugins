@@ -108,7 +108,7 @@ class PTSiteSignIn(_PluginBase):
     plugin_desc = ("双引擎 PT 签到，可选真实登录刷新 Cookie 并读取站点「最近动向」：HTTP 直连签到接口，"
                    "或经 Browserless 完成验证码 / Cloudflare / Turnstile 挑战。")
     plugin_icon = "signin.png"
-    plugin_version = "1.5.6"
+    plugin_version = "1.5.7"
     plugin_author = "qingyu"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "ptsignin_"
@@ -567,7 +567,7 @@ class PTSiteSignIn(_PluginBase):
             # 登录失败 / 没读到最近动向时，把原因写出来比只留一句提示更有用
             if str(self._login_view(row).get("status") or "") == "login_failed":
                 return str(row.get("login") or row.get("message") or "").strip() or "登录失败"
-            return self._activity_hint()
+            return self._activity_hint(str(row.get("activity_source") or ""))
         bonus = decode_entities(row.get("bonus")).strip()
         if bonus:
             return bonus
@@ -603,7 +603,11 @@ class PTSiteSignIn(_PluginBase):
         return [str(sites[sid].name) for sid in ids if sid in sites]
 
     @staticmethod
-    def _activity_hint() -> str:
+    def _activity_hint(reason: str = "") -> str:
+        """没读到最近动向时的提示；reason 里是读取出错的说明（含试过的页面）。"""
+        detail = str(reason or "").strip()
+        if detail:
+            return f"未读取到：{detail}"
         return "未读取到（可确认「读取最近动向」开关，或用站点规则 activity_path 指定页面）"
 
     @staticmethod
@@ -706,11 +710,13 @@ class PTSiteSignIn(_PluginBase):
             logger.info("PT站点签到：%s %s", site_name, outcome.message)
         else:
             logger.warning("PT站点签到：%s 失败 - %s", site_name, outcome.message)
-        activity_text = self._read_site_activity(info, rule) if self._read_activity else ""
+        activity_text, activity_source = (self._read_site_activity(info, rule)
+                                          if self._read_activity else ("", ""))
         return {"site": site_name, "site_id": str(info.get("id") or ""),
                 "state_key": site_state_key(info), "engine": engine,
                 "status": outcome.status, "message": outcome.message,
-                "login": login_text, "activity": activity_text, "ran_at": self._now(),
+                "login": login_text, "activity": activity_text,
+                "activity_source": activity_source, "ran_at": self._now(),
                 "bonus": message_bonus(outcome.message),
                 "dual": dual,
                 # dual 站点在「登录状态」里要显示登录结论，而不是签到结论
@@ -743,12 +749,13 @@ class PTSiteSignIn(_PluginBase):
             login_ok = True
         else:
             login_text = "未配置账号密码或 Cookie"
-        activity_text = self._read_site_activity(info) if (login_ok and self._read_activity) else ""
+        activity_text, activity_source = (self._read_site_activity(info)
+                                          if (login_ok and self._read_activity) else ("", ""))
         return {"site": site_name, "site_id": str(info.get("id") or ""),
                 "state_key": site_state_key(info), "engine": "http",
                 "status": "login" if login_ok else "login_failed",
                 "message": login_text, "login": "", "activity": activity_text,
-                "ran_at": self._now()}
+                "activity_source": activity_source, "ran_at": self._now()}
 
     def _run_login_batch(self, infos: List[Dict[str, Any]]) -> List[Dict[str, str]]:
         if not infos:
@@ -760,13 +767,18 @@ class PTSiteSignIn(_PluginBase):
             return list(executor.map(self._login_one, infos))
 
     def _read_site_activity(self, info: Dict[str, Any],
-                            rule: Optional[Dict[str, Any]] = None) -> str:
-        """用登录态 Cookie 打开站点页面，返回站点展示的「最近动向」原文。"""
+                            rule: Optional[Dict[str, Any]] = None) -> Tuple[str, str]:
+        """用登录态 Cookie 打开站点页面，返回（「最近动向」原文, 来源页面）。
+
+        来源页面写进记录与日志；读不到时把原因（含试过的页面）也带回去，
+        方便按站点用 activity_path 指定真正的动向页面。
+        """
         cookie = str(info.get("cookie") or "").strip()
         if not cookie:
-            return ""
+            return "", ""
         account = account_from_site(info)
         rule = rule or {}
+        site_name = str(info.get("name") or info.get("url") or "未知站点")
         # 站点常把「最近动向」放在签到页 / 校验页（例如观众 attendance.php），一并作为候选
         paths = [str(rule.get("path") or ""), str(rule.get("verify_success_path") or "")]
         try:
@@ -776,10 +788,13 @@ class PTSiteSignIn(_PluginBase):
                                      paths=paths)
         except Exception:
             logger.exception("PT站点签到：读取最近动向失败")
-            return ""
+            return "", ""
         if activity.status != "success":
-            return ""
-        return activity.last_seen or activity.snippet or "已读取"
+            logger.info("PT站点签到：%s 未读到最近动向（%s）", site_name, activity.message)
+            return "", activity.message
+        value = activity.last_seen or activity.snippet or "已读取"
+        logger.info("PT站点签到：%s 最近动向 ← %s：%s", site_name, activity.source, value)
+        return value, activity.source
 
     def _maybe_fallback(self, info: Dict[str, Any], rule: Dict[str, Any], outcome: SignResult,
                         signer: Optional[BrowserlessSigner]) -> Tuple[SignResult, str]:
