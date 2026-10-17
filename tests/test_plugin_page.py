@@ -9,6 +9,7 @@ import importlib.util
 import sys
 import types
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -368,6 +369,38 @@ class PagePluginTests(unittest.TestCase):
         self.assertEqual(self.plugin_module.mask_proxy("http://user:pw@127.0.0.1:7890"),
                          "http://***@127.0.0.1:7890")
 
+    def test_skip_already_signed_sites_by_default(self):
+        # 今天已签到成功的站点一律不再跑（Cron 与手动「保存后立即执行一次」同样规则）
+        stamp = datetime.now().strftime("%Y-%m-%d")
+        key = "history_" + datetime.now().strftime("%Y%m%d")
+        data = {key: [{"site": "观众", "status": "already", "ran_at": f"{stamp} 09:00:00"},
+                      {"site": "红豆饭", "status": "failed", "ran_at": f"{stamp} 09:00:00"}]}
+        plugin = self._make(data)
+        plugin.get_data = lambda key_: data.get(key_)
+        keep, skipped = plugin._sites_to_run(
+            [{"name": "观众"}, {"name": "红豆饭"}, {"name": "学校"}])
+        self.assertEqual([item["name"] for item in keep], ["红豆饭", "学校"])   # 失败/未跑照常跑
+        self.assertEqual([row["site"] for row in skipped], ["观众"])
+
+    def test_clear_today_cache_removes_today_records(self):
+        stamp = datetime.now().strftime("%Y-%m-%d")
+        key = "history_" + datetime.now().strftime("%Y%m%d")
+        data = {
+            "latest": [{"site": "观众", "ran_at": f"{stamp} 09:00:00"},
+                       {"site": "红豆饭", "ran_at": "2026-10-16 09:00:00"}],
+            key: [{"site": "观众", "ran_at": f"{stamp} 09:00:00"}],
+            "history_index": [key, "history_20261016"],
+        }
+        saved = {}
+        plugin = self._make(data)
+        plugin.get_data = lambda key_: data.get(key_)
+        plugin.save_data = lambda key_, value: saved.__setitem__(key_, value)
+        plugin._delete_data = lambda key_: saved.__setitem__(key_, None)
+        plugin._clear_today_cache()
+        self.assertEqual([row["site"] for row in saved["latest"]], ["红豆饭"])
+        self.assertIsNone(saved[key])                        # 今天的记录已经删掉
+        self.assertEqual(saved["history_index"], ["history_20261016"])
+
     def test_proxy_host_falls_back_to_env(self):
         import os
         from unittest import mock
@@ -395,8 +428,9 @@ class PagePluginTests(unittest.TestCase):
         # 顶部是开关行，然后是两列字段，没有分区大标题（参考 MP 官方插件的扁平布局）
         switches = [node.get("props") or {} for node in nodes(form, "VSwitch")]
         models = {props.get("model") for props in switches}
-        for expected in ("enabled", "notify", "run_once", "read_activity"):
+        for expected in ("enabled", "notify", "run_once", "clear_today", "read_activity"):
             self.assertIn(expected, models)
+        self.assertNotIn("skip_signed_today", models)      # 跳过今天已签到是默认行为，不给开关
         self.assertNotIn("fallback_browserless", models)   # 自动回退恒为开启，不再给开关
         self.assertNotIn("proxy", models)      # 代理改成跟随站点管理里的「使用代理访问」
         select_models = {node.get("props", {}).get("model") for node in nodes(form, "VSelect")}

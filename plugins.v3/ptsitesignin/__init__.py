@@ -108,7 +108,7 @@ class PTSiteSignIn(_PluginBase):
     plugin_desc = ("双引擎 PT 签到，可选真实登录刷新 Cookie 并读取站点「最近动向」：HTTP 直连签到接口，"
                    "或经 Browserless 完成验证码 / Cloudflare / Turnstile 挑战。")
     plugin_icon = "signin.png"
-    plugin_version = "1.5.4"
+    plugin_version = "1.5.5"
     plugin_author = "qingyu"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "ptsignin_"
@@ -117,6 +117,7 @@ class PTSiteSignIn(_PluginBase):
 
     _enabled = False
     _notify_enabled = True
+    _clear_today = False
     _cron = "25 8 * * *"
     _site_ids: List[int] = []
     _login_site_ids: List[int] = []
@@ -151,6 +152,11 @@ class PTSiteSignIn(_PluginBase):
         config = config or {}
         self._enabled = bool(config.get("enabled", False))
         self._notify_enabled = self._parse_notify_switch(config)
+        self._clear_today = bool(config.get("clear_today", False))
+        if self._clear_today:
+            # 一次性动作：清空今天的记录，下一轮（含本次的「立即执行」）会重新签一遍
+            self._clear_today = False
+            self._clear_today_cache()
         self._cron = str(config.get("cron") or "25 8 * * *")
         self._site_ids, self._all_sites = self._parse_site_ids(config.get("site_ids"))
         self._login_site_ids, self._all_login_sites = self._parse_site_ids(
@@ -191,7 +197,7 @@ class PTSiteSignIn(_PluginBase):
         logger.info("PT站点签到：保存后立即执行一次，将在 3 秒后于后台开始")
 
     def _run_once_task(self) -> None:
-        """后台任务：只跑一遍签到，跳过失败重试。"""
+        """后台任务：只跑一遍签到（跳过失败重试），同样跳过今天已签到的站点。"""
         try:
             self.run_sign_in(allow_retry=False)
         except Exception:
@@ -215,6 +221,7 @@ class PTSiteSignIn(_PluginBase):
         return {
             "enabled": self._enabled,
             "notify": self._notify_enabled,
+            "clear_today": self._clear_today,
             "cron": self._cron,
             "site_ids": self._site_ids + ([ALL_SITES] if self._all_sites else []),
             "login_site_ids": self._login_site_ids + ([ALL_SITES] if self._all_login_sites else []),
@@ -229,6 +236,44 @@ class PTSiteSignIn(_PluginBase):
             "read_activity": self._read_activity,
             "run_once": self._run_once,
         }
+
+    def _clear_today_cache(self) -> None:
+        """清空「今天」的签到记录：latest 里今天的行 + 当天的 history 一起删。
+
+        用于手动刷新每日记录：清完之后下一轮不会因为「今天已签到」而跳过。
+        """
+        stamp = datetime.now().strftime("%Y-%m-%d")
+        key = "history_" + datetime.now().strftime("%Y%m%d")
+        latest = [row for row in self._records_of("latest")
+                  if not str(row.get("ran_at") or "").startswith(stamp)]
+        self.save_data("latest", latest)
+        self._delete_data(key)
+        index = [str(item) for item in (self.get_data("history_index") or [])
+                 if isinstance(item, str)]
+        self.save_data("history_index", [item for item in index if item != key])
+        logger.info("PT站点签到：已清理本日缓存（%s 的记录），下一轮会重新签到", stamp)
+
+    def _sites_to_run(self, infos: List[Dict[str, Any]]
+                      ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """过滤掉今天已经签到成功的站点，返回（要跑的, 跳过的今天记录）。
+
+        恒为开启、两种入口一致：今天签到成功的站点本轮不再请求，省时间也省额度；
+        纯登录站点、失败站点照常跑。想强行重跑，先打开一次「清理本日缓存」。
+        """
+        if not infos:
+            return list(infos), []
+        today = {str(row.get("site") or ""): row for row in self._today_records(
+            self._records_of("latest"))}
+        keep: List[Dict[str, Any]] = []
+        skipped: List[Dict[str, Any]] = []
+        for info in infos:
+            name = str(info.get("name") or info.get("url") or "未知站点")
+            row = today.get(name)
+            if row is not None and str(row.get("status") or "") in {"success", "already"}:
+                skipped.append(row)
+            else:
+                keep.append(info)
+        return keep, skipped
 
     @staticmethod
     def _parse_notify_switch(config: Dict[str, Any]) -> bool:
@@ -281,11 +326,22 @@ class PTSiteSignIn(_PluginBase):
                  "content": [{"component": "VSwitch", "props": {"model": "enabled", "label": "启用插件"}}]},
                 {"component": "VCol", "props": {"cols": 12, "md": 4},
                  "content": [{"component": "VSwitch", "props": {"model": "notify", "label": "发送通知",
-                             "hint": "只报成功 / 失败数量，有失败才附上失败原因", "persistent-hint": True}}]},
+                             "hint": "签到成功 / 登录成功 / 失败三项计数，有失败才附原因", "persistent-hint": True}}]},
                 {"component": "VCol", "props": {"cols": 12, "md": 4},
                  "content": [{"component": "VSwitch", "props": {"model": "run_once",
                              "label": "保存后立即执行一次",
-                             "hint": "保存配置后延后 3 秒在后台跑一轮", "persistent-hint": True}}]},
+                             "hint": "保存后延后 3 秒在后台跑一轮，同样跳过今天已签到的站点",
+                             "persistent-hint": True}}]},
+                {"component": "VCol", "props": {"cols": 12, "md": 4},
+                 "content": [{"component": "VSwitch", "props": {"model": "clear_today",
+                             "label": "清理本日缓存",
+                             "hint": "打开并保存后清空今天的签到记录（一次性动作，会自动关闭），下一轮会重新签一遍",
+                             "persistent-hint": True}}]},
+                {"component": "VCol", "props": {"cols": 12, "md": 4},
+                 "content": [{"component": "VSwitch", "props": {"model": "clear_today",
+                             "label": "清理本日缓存",
+                             "hint": "打开并保存后清空今天的签到记录（一次性动作，会自动关闭），下一轮会重新签一遍",
+                             "persistent-hint": True}}]},
             ]},
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12, "md": 6},
@@ -819,7 +875,8 @@ class PTSiteSignIn(_PluginBase):
 
         Cron 与「保存后立即执行一次」可能同时触发，用进程级互斥锁保证同一时间
         只有一轮在跑；失败重试交给后台 Timer，等待期间不再占用执行线程。
-        allow_retry=False 时跳过失败重试（保存后立即执行用）。
+        allow_retry=False 时跳过失败重试（保存后立即执行用）。两种入口用同一套规则：
+        今天已签到成功的站点一律跳过，要重跑先打开一次「清理本日缓存」。
         """
         if not PTSiteSignIn._run_lock.acquire(blocking=False):
             logger.warning("PT站点签到：上一轮仍在执行，本次跳过，避免重复签到")
@@ -859,6 +916,14 @@ class PTSiteSignIn(_PluginBase):
             return
         infos = [dict(self._site_dict(site), dual=sid in dual_ids)
                  for site, sid in zip(selected, signin_order)]
+        infos, skipped_rows = self._sites_to_run(infos)
+        if skipped_rows:
+            logger.info("PT站点签到：跳过今天已签到的 %s 个站点（%s）",
+                        len(skipped_rows),
+                        "、".join(str(row.get("site") or "") for row in skipped_rows))
+        if not infos and not login_selected:
+            logger.info("PT站点签到：今天的站点都已签到，本轮跳过（要重跑请打开一次「清理本日缓存」）")
+            return
         login_infos = [self._site_dict(site) for site in login_selected]
         signer: Optional[BrowserlessSigner] = None
         if self._should_init_signer(infos, rules):
@@ -875,7 +940,9 @@ class PTSiteSignIn(_PluginBase):
 
         results = self._run_batch(infos, rules, signer)
         login_results = self._run_login_batch(login_infos)
-        result_by_key = {r.get("state_key") or r.get("site"): r for r in results + login_results}
+        # 跳过的站点把今天的记录原样带上，避免落盘时把它们的记录冲掉
+        result_by_key = {r.get("state_key") or r.get("site"): r
+                         for r in results + login_results + skipped_rows}
         retry_times = self._retry_count if allow_retry else 0
         failed_infos = [info for info, result in zip(infos, results)
                         if result.get("status") == "failed"]
