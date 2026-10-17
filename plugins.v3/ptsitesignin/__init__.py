@@ -105,8 +105,7 @@ PAGE_STYLE = (
 
 class PTSiteSignIn(_PluginBase):
     plugin_name = "PT站点签到"
-    plugin_desc = ("双引擎 PT 签到，可选真实登录刷新 Cookie 并读取站点「最近动向」：HTTP 直连签到接口，"
-                   "或经 Browserless 完成验证码 / Cloudflare / Turnstile 挑战。")
+    plugin_desc = ("PT 站点自动签到，可登录刷新 Cookie 并读取最近动向；遇到验证码或 Cloudflare 会自动改用浏览器。")
     plugin_icon = "signin.png"
     plugin_version = "1.5.9"
     plugin_author = "qingyu"
