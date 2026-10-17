@@ -1206,6 +1206,15 @@ def group_records_by_site(records: Sequence[Mapping[str, Any]]
     return grouped
 
 
+def decode_entities(text: Any) -> str:
+    """把文本里残留的 HTML 实体解码。
+
+    用于展示层兜底：修复前存进历史的记录里是 `2026-10-17 03:52:21 ( &lt; 1分前 )`，
+    显示时解码一次就能立刻变正常，不必等下一轮重新抓取。
+    """
+    return _html_unescape(str(text or ""))
+
+
 def site_record_counts(records: Sequence[Mapping[str, Any]]) -> Dict[str, int]:
     """每个站点的记录条数（详情页的「N 条记录」）。"""
     counts: Dict[str, int] = {}

@@ -287,6 +287,18 @@ class PagePluginTests(unittest.TestCase):
         self.assertEqual(captured["rule"]["path"], "/signin.php")
         self.assertEqual(outcome.status, "success")
 
+    def test_activity_entities_decoded_on_display(self):
+        # 修复前存进历史的记录里是 `&lt;`，显示时要解码（不用等下一轮重抓）
+        latest = [{"site": "观众", "status": "already", "ran_at": "2026-10-17 03:52:21",
+                   "message": "今日已经签到（获得 20 粒爆米花）", "bonus": "获得 20 粒爆米花",
+                   "login": "复用站点管理 Cookie",
+                   "activity": "2026-10-17 03:52:21 ( &lt; 1分前 )",
+                   "dual": True, "login_status": "login"}]
+        page, _ = self._page(latest, history=latest)
+        pairs = row_pairs(page)
+        self.assertIn(("观众", "登录成功", "2026-10-17 03:52:21 ( < 1分前 )"), pairs)
+        self.assertNotIn("&lt;", str(page))
+
     def test_notify_switch_and_message(self):
         plugin = self._make({}, _notify_enabled=True)
         sent = []

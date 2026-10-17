@@ -51,6 +51,7 @@ from .core import (
     account_ready,
     fallback_rule,
     DEFAULT_INDEX_PATH,
+    decode_entities,
     discover_signin_target,
     fetch_page,
     http_sign_auto,
@@ -97,7 +98,7 @@ class PTSiteSignIn(_PluginBase):
     plugin_desc = ("双引擎 PT 签到，可选真实登录刷新 Cookie 并读取站点「最近动向」：HTTP 直连签到接口，"
                    "或经 Browserless 完成验证码 / Cloudflare / Turnstile 挑战。")
     plugin_icon = "signin.png"
-    plugin_version = "1.4.9"
+    plugin_version = "1.5.0"
     plugin_author = "qingyu"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "ptsignin_"
@@ -498,17 +499,18 @@ class PTSiteSignIn(_PluginBase):
     def _result_text(self, row: Dict[str, Any], login_view: bool) -> str:
         """结果列：登录看「最近动向」，签到看实际到手的东西（魔力值 / 爆米花 / 奖励）。"""
         if login_view:
-            activity = str(row.get("activity") or "").strip()
+            activity = decode_entities(row.get("activity")).strip()
             if activity:
                 return activity
             # 登录失败 / 没读到最近动向时，把原因写出来比只留一句提示更有用
             if str(self._login_view(row).get("status") or "") == "login_failed":
                 return str(row.get("login") or row.get("message") or "").strip() or "登录失败"
             return self._activity_hint()
-        bonus = str(row.get("bonus") or "").strip()
+        bonus = decode_entities(row.get("bonus")).strip()
         if bonus:
             return bonus
-        return message_bonus(row.get("message")) or str(row.get("message") or "-").strip()
+        return decode_entities(message_bonus(row.get("message"))
+                               or str(row.get("message") or "-")).strip()
 
     @staticmethod
     def _login_view(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -1024,7 +1026,7 @@ class PTSiteSignIn(_PluginBase):
         detail = str(item.get("message") or "").strip() or str(item.get("login") or "").strip()
         if len(detail) > NOTIFY_REASON_LIMIT:
             detail = detail[:NOTIFY_REASON_LIMIT].rstrip() + "…"
-        return f"{site}：{detail}" if detail else site
+        return decode_entities(f"{site}：{detail}") if detail else site
 
     def stop_service(self) -> None:
         """插件停用 / 重载时停止重试，并清理自有的「立即执行」调度器。"""
