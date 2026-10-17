@@ -207,11 +207,22 @@ class PagePluginTests(unittest.TestCase):
         wrappers = [node for node in nodes(page, "div")
                     if "ptsignin-table-wrap" in str(node.get("props", {}).get("class"))]
         self.assertEqual(len(wrappers), 2)               # 每块都用一个方框包起来
+        tables = [node.get("props") or {} for node in nodes(page, "VTable")]
+        self.assertEqual(len(tables), 2)
+        for props in tables:
+            self.assertEqual(props.get("class"), "ptsignin-table")   # 两张表共用固定列宽
         pairs = row_pairs(page)
         self.assertIn(("观众", "签到成功", "获得 20 粒爆米花"), pairs)
         self.assertIn(("学校", "登录成功", "2026-10-17 07:12:03 ( < 1分前 )"), pairs)
         self.assertIn(("学校", "未记录", "—"), pairs)      # 纯登录站点不进签到状态
         self.assertIn(("红豆饭", "未记录", "—"), pairs)    # 今天没记录 → 未记录
+
+    def test_table_columns_are_aligned_by_css(self):
+        # 固定列宽保证上下两张表的「站点 / 状态 / 结果」逐列对齐，行高也一致
+        style = self.plugin_module.PAGE_STYLE
+        self.assertIn(".ptsignin-table{width:100%;table-layout:fixed}", style)
+        self.assertIn(".ptsignin-table th:nth-child(1),.ptsignin-table td:nth-child(1){width:30%}", style)
+        self.assertIn("-webkit-line-clamp:3", style)
 
     def test_signin_result_prefers_bonus_field(self):
         latest = [{"site": "AGSVPT", "status": "success", "message": "签到成功（65,）",

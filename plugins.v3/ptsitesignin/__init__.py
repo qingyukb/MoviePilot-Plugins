@@ -87,9 +87,19 @@ PAGE_STYLE = (
     ".ptsignin-section{display:flex;align-items:center;margin:14px 0 6px}"
     ".ptsignin-table-wrap{border:1px solid rgba(var(--v-theme-on-surface),.12);border-radius:8px;"
     "overflow:hidden}"
-    ".ptsignin-site{font-weight:600;line-height:1.2}"
+    # 两张表用同一套固定列宽：上下表格的「站点 / 状态 / 结果」逐列对齐，行高也一致，
+    # 不会出现「一张表很松、另一张挤成一团」
+    ".ptsignin-table{width:100%;table-layout:fixed}"
+    ".ptsignin-table th:nth-child(1),.ptsignin-table td:nth-child(1){width:30%}"
+    ".ptsignin-table th:nth-child(2),.ptsignin-table td:nth-child(2){width:16%}"
+    ".ptsignin-table th:nth-child(3),.ptsignin-table td:nth-child(3){width:54%}"
+    ".ptsignin-table td{vertical-align:middle}"
+    ".ptsignin-table td:nth-child(2){white-space:nowrap}"
+    ".ptsignin-site{font-weight:600;line-height:1.25}"
     ".ptsignin-caption{font-size:.75rem;color:rgba(var(--v-theme-on-surface),.6);margin-top:2px}"
-    ".ptsignin-result{font-size:.84rem;word-break:break-word}"
+    # 结果列：超长的诊断最多占 3 行，多出来的省略，行高保持整齐（完整内容仍在日志 / 通知里）
+    ".ptsignin-result{font-size:.84rem;line-height:1.45;word-break:break-word;"
+    "display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}"
 )
 
 
@@ -98,7 +108,7 @@ class PTSiteSignIn(_PluginBase):
     plugin_desc = ("双引擎 PT 签到，可选真实登录刷新 Cookie 并读取站点「最近动向」：HTTP 直连签到接口，"
                    "或经 Browserless 完成验证码 / Cloudflare / Turnstile 挑战。")
     plugin_icon = "signin.png"
-    plugin_version = "1.5.1"
+    plugin_version = "1.5.2"
     plugin_author = "qingyu"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "ptsignin_"
@@ -458,7 +468,8 @@ class PTSiteSignIn(_PluginBase):
             ]})
         return [header, {"component": "div", "props": {"class": "ptsignin-table-wrap"},
                          "content": [{"component": "VTable",
-                                      "props": {"density": "comfortable", "hover": True},
+                                      "props": {"density": "comfortable", "hover": True,
+                                                "class": "ptsignin-table"},
                                       "content": [
                                           {"component": "thead", "content": [
                                               {"component": "tr", "content": [
