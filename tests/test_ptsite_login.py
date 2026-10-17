@@ -240,6 +240,25 @@ class LoginCoreTests(unittest.TestCase):
                 self.assertEqual(result.status, "failed")
                 self.assertIn("Cloudflare", result.message)
 
+    def test_read_activity_prefers_cookie_uid_over_index_links(self):
+        # 首页里的 userdetails.php?id= 链接可能指向别人（论坛作者 / 最新注册用户），
+        # 必须优先用 Cookie 里的 c_secure_uid 打开「自己」的资料页
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                session = FakeSession({
+                    "index.php": lambda s, u: FakeResponse(
+                        u, '<html><body><a href="userdetails.php?id=999">别人</a>'
+                           '<a href="torrents.php">种子</a></body></html>'),
+                    "userdetails.php?id=12345": lambda s, u: FakeResponse(u, DETAIL_HTML),
+                })
+                with mock.patch.dict(sys.modules, {"requests": fake_requests(session)}):
+                    result = core.read_activity({"url": "https://open.cd/"},
+                                                "c_secure_uid=MTIzNDU%3D; c_secure_pass=x", timeout=5)
+                self.assertEqual(result.status, "success")
+                self.assertEqual(result.last_seen, "2026-10-16 08:12:03")
+                self.assertIn("userdetails.php?id=12345", result.source)
+                self.assertNotIn("id=999", result.source)
+
     def test_read_activity_falls_back_to_cookie_uid(self):
         # 自定义主题的站点首页不挂 userdetails 链接时，用 Cookie 里的 c_secure_uid 兜底
         for core in CORES:

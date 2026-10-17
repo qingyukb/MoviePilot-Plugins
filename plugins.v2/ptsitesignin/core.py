@@ -1118,9 +1118,11 @@ def read_activity(site: Mapping[str, Any], cookie: str, timeout: int = 30,
         if value:
             candidates.append(value)
     match = _UID_RE.search(index_html)
-    uid = match.group(1) if match else cookie_uid(cookie)
+    # 优先用 Cookie 里的 c_secure_uid：那才是「你自己」；首页里的 userdetails.php?id= 链接
+    # 常常指向**别人**（论坛帖作者、最新注册用户、版主），拿它去开资料页会读到别人的「最近动向」
+    # （皇后那条 2026-05-06 00:00:00 就是这么来的）。Cookie 里解不出 uid 时才退回首页链接。
+    uid = cookie_uid(cookie) or (match.group(1) if match else "")
     if uid:
-        # 自定义主题的首页不给 userdetails 链接时，用 Cookie 里的 uid 兜底，否则只能翻首页
         candidates.append(f"{DEFAULT_USERDETAILS_PATH}?id={uid}")
     candidates.append(DEFAULT_INDEX_PATH)
     seen: set = set()

@@ -3,13 +3,13 @@
     "name": "PT站点签到",
     "description": "双引擎 PT 签到，可选真实登录刷新 Cookie 并读取站点「最近动向」：HTTP 直连签到接口，或经 Browserless 完成图片验证码 / Cloudflare / Turnstile 挑战。",
     "labels": "站点,签到",
-    "version": "1.5.2",
+    "version": "1.5.3",
     "icon": "https://raw.githubusercontent.com/qingyukb/MoviePilot-Plugins/main/icons/ptsignin.png",
     "author": "qingyu",
     "level": 2,
     "system_version": ">=3.0.0",
     "history": {
-      "v1.5.2": "详情页表格布局整理：两张表（签到状态 / 登录状态）改用同一套固定列宽——站点 30% / 状态 16% / 结果 54%，上下两张表的列逐列对齐，单元格垂直居中、状态列不换行；「结果」列超过 3 行自动省略（完整内容仍在日志与通知里），行高不再一张表很松、另一张挤成一团。"
+      "v1.5.3": "修复「最近动向」读到别人资料页的问题（皇后显示 2026-05-06 00:00:00）：之前优先用首页里第一个 userdetails.php?id= 链接当 uid，而首页上这种链接常常指向别人（论坛作者、最新注册用户、版主），于是打开了别人的资料页、读回别人的最近动向。现在优先用 Cookie 里的 c_secure_uid（那是你自己的 uid），解不出来才退回首页链接。"
     }
   }
 }
