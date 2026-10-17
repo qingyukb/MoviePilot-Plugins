@@ -1070,23 +1070,36 @@ def extract_activity(html: str) -> Dict[str, str]:
 
 
 def cookie_uid(cookie: str) -> str:
-    """从 NexusPHP 的 Cookie 里解出用户 ID：``c_secure_uid`` 是 base64 过的 uid。
+    """从 Cookie 里解出自己的用户 ID（NexusPHP 惯例：``c_secure_uid`` 是 base64 过的 uid）。
 
     自定义主题的站点首页常常不挂 ``userdetails.php?id=`` 链接，这时插件拿不到 uid、也就打不开
-    用户页，「最近动向」自然读不到——用 Cookie 里这份 uid 兜底即可。
+    用户页（「最近动向」自然读不到）——所以优先用 Cookie 里这份 uid。
+    Cookie 名不全统一，``c_secure_uid`` 之外还认 ``uid`` / ``c_uid`` / ``user_id`` 等；
+    值可能是 base64（带或不带 ``=``、可能被 URL 编码一到两次），也可能直接是数字。
     """
-    match = re.search(r"(?:^|;\s*)c_secure_uid=([^;]+)", str(cookie or ""), re.IGNORECASE)
-    if not match:
-        return ""
-    value = urllib.parse.unquote(match.group(1).strip())
-    if not value:
-        return ""
-    try:
-        decoded = base64.b64decode(value + "=" * (-len(value) % 4)).decode("utf-8", "ignore")
-    except Exception:
-        return ""
-    decoded = decoded.strip()
-    return decoded if decoded.isdigit() else ""
+    text = str(cookie or "")
+    for name in ("c_secure_uid", "uid", "c_uid", "userid", "user_id"):
+        match = re.search(rf"(?:^|;\s*){name}=([^;]+)", text, re.IGNORECASE)
+        if not match:
+            continue
+        value = match.group(1).strip()
+        # 可能被 URL 编码一到两次（%3D / %253D）
+        for _ in range(3):
+            unquoted = urllib.parse.unquote(value)
+            if unquoted == value:
+                break
+            value = unquoted
+        if value.isdigit():
+            return value
+        for decoder in (base64.b64decode, base64.urlsafe_b64decode):
+            try:
+                decoded = decoder(value + "=" * (-len(value) % 4)).decode("utf-8", "ignore")
+            except Exception:
+                continue
+            decoded = decoded.strip()
+            if decoded.isdigit():
+                return decoded
+    return ""
 
 
 def read_activity(site: Mapping[str, Any], cookie: str, timeout: int = 30,
@@ -1131,7 +1144,8 @@ def read_activity(site: Mapping[str, Any], cookie: str, timeout: int = 30,
     # 优先用 Cookie 里的 c_secure_uid：那才是「你自己」；首页里的 userdetails.php?id= 链接
     # 常常指向**别人**（论坛帖作者、最新注册用户、版主），拿它去开资料页会读到别人的「最近动向」
     # （皇后那条 2026-05-06 00:00:00 就是这么来的）。Cookie 里解不出 uid 时才退回首页链接。
-    uid = cookie_uid(cookie) or (match.group(1) if match else "")
+    own_uid = cookie_uid(cookie)
+    uid = own_uid or (match.group(1) if match else "")
     if uid:
         candidates.append(f"{DEFAULT_USERDETAILS_PATH}?id={uid}")
     # NexusPHP 的 userdetails.php 不带 id 时显示当前登录用户自己的资料——uid 解不出来
@@ -1168,7 +1182,11 @@ def read_activity(site: Mapping[str, Any], cookie: str, timeout: int = 30,
                                   snippet=found.get("snippet", ""),
                                   source=str(candidate))
         notes.append(f"{candidate}：{len(plain_text(body))} 字，没有「最近动向」")
-    return ActivityResult("failed", "未在站点页面找到「最近动向」（" + "；".join(notes) + "）")
+    origin = (f"自己的 uid={own_uid}（取自 Cookie）" if own_uid
+              else f"uid={uid}（取自首页链接）" if uid
+              else "Cookie 里没解析到 uid 也没有首页链接")
+    return ActivityResult("failed",
+                          f"未在站点页面找到「最近动向」，{origin}（" + "；".join(notes) + "）")
 
 
 # ---------------------------------------------------- 结果记录汇总（插件详情页用）

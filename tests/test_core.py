@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import importlib.util
 import json
 import sys
@@ -444,6 +445,19 @@ class CoreRegressionTests(unittest.TestCase):
         # 侧栏统计不是奖励
         self.assertEqual(self.core.extract_reward_sentence(
             "魔力值 [使用]: 242,141.0 上传量: 1.049 TB"), "")
+
+    def test_cookie_uid_handles_common_variants(self):
+        # id= 后面必须是自己：NexusPHP 惯例是 c_secure_uid（base64），也有站用明文 / 别的名字
+        uid = "84656"
+        encoded = base64.b64encode(uid.encode()).decode()
+        for cookie in (f"c_secure_uid={encoded}; c_secure_pass=x",
+                       "c_secure_uid=ODQ2NTY%3D; c_secure_pass=x",
+                       "c_secure_uid=ODQ2NTY%253D",
+                       "uid=84656",
+                       "c_uid=84656",
+                       "user_id=" + encoded):
+            self.assertEqual(self.core.cookie_uid(cookie), uid, cookie)
+        self.assertEqual(self.core.cookie_uid("c_secure_pass=x; c_secure_site=1"), "")
 
     def test_activity_allows_wide_label_gap(self):
         # 有的主题把「最近动向」和值隔开（图标 / 说明文字），60 字窗口会漏

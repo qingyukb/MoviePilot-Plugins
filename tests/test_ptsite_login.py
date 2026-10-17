@@ -194,7 +194,9 @@ class LoginCoreTests(unittest.TestCase):
                 session = FakeSession({"index.php": lambda s, u: FakeResponse(u, INDEX_HTML),
                                        "userdetails.php?id=123": lambda s, u: FakeResponse(u, DETAIL_HTML)})
                 with mock.patch.dict(sys.modules, {"requests": fake_requests(session)}):
-                    result = core.read_activity({"url": "https://audiences.me/"}, "c_secure_uid=1", timeout=5)
+                    # c_secure_uid 是 base64(123)，和首页链接指向同一个用户
+                    result = core.read_activity({"url": "https://audiences.me/"},
+                                                "c_secure_uid=MTIz", timeout=5)
                 self.assertEqual(result.status, "success")
                 self.assertEqual(result.last_seen, "2026-10-16 08:12:03")
                 self.assertTrue(session.calls[0][1].endswith("/index.php"))
@@ -221,7 +223,7 @@ class LoginCoreTests(unittest.TestCase):
                     "userdetails.php?id=123": lambda s, u: FakeResponse(u, DETAIL_HTML),
                 })
                 with mock.patch.dict(sys.modules, {"requests": fake_requests(session)}):
-                    result = core.read_activity({"url": "https://audiences.me/"}, "c_secure_uid=1",
+                    result = core.read_activity({"url": "https://audiences.me/"}, "c_secure_uid=MTIz",
                                                 timeout=5, paths=["/attendance.php"])
                 self.assertEqual(result.status, "success")
                 # 挑战页里的「最近动向」是假的，必须跳过并换下一个候选页
@@ -255,6 +257,7 @@ class LoginCoreTests(unittest.TestCase):
                                                 "c_secure_pass=x", timeout=5)
                 self.assertEqual(result.status, "failed")
                 self.assertIn("userdetails.php：被要求登录", result.message)
+                self.assertIn("Cookie 里没解析到 uid", result.message)
                 self.assertIn("index.php", result.message)
 
     def test_read_activity_prefers_cookie_uid_over_index_links(self):
@@ -414,7 +417,7 @@ class LoginCoreTests(unittest.TestCase):
                 session = FakeSession({"index.php": lambda s, u: FakeResponse(u, INDEX_HTML),
                                        "/attendance.php": lambda s, u: FakeResponse(u, attendance)})
                 with mock.patch.dict(sys.modules, {"requests": fake_requests(session)}):
-                    result = core.read_activity({"url": "https://audiences.me/"}, "c_secure_uid=1",
+                    result = core.read_activity({"url": "https://audiences.me/"}, "c_secure_uid=MTIz",
                                                 timeout=5, paths=["/attendance.php"])
                 self.assertEqual(result.status, "success")
                 self.assertEqual(result.last_seen, "2026-10-16 23:44:21 ( < 1分前 )")
