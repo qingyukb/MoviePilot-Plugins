@@ -3,13 +3,13 @@
     "name": "PT站点签到",
     "description": "双引擎 PT 签到，可选真实登录刷新 Cookie 并读取站点「最近动向」：HTTP 直连签到接口，或经 Browserless 完成图片验证码 / Cloudflare / Turnstile 挑战。",
     "labels": "站点,签到",
-    "version": "1.5.0",
+    "version": "1.5.1",
     "icon": "https://raw.githubusercontent.com/qingyukb/MoviePilot-Plugins/main/icons/ptsignin.png",
     "author": "qingyu",
     "level": 2,
     "system_version": ">=2.0.0,<3.0.0",
     "history": {
-      "v1.5.0": "显示层再补一刀：修复前已经存进历史的记录里是 &lt;，现在展示时也做一次 HTML 实体解码，不用等下一轮重新抓取；「结果」列与通知里的失败原因都会解码。"
+      "v1.5.1": "修复学校（BTSCHOOL）签到成功却被判失败：实测该站签到成功后**不给任何成功提示**，只是把首页的「每日签到」入口拿掉，所以「未匹配到签到成功标志」。新增规则字段 absent_keywords / absent_status：返回页面里这些文字全都消失时视为已完成（默认 already）；BTSCHOOL 预设用 absent_keywords=[\"每日签到\"]。判定要看原始 HTML（签到入口是 <input value=\"每日签到\">，去标签后的正文里本来就没有这个词，用可见文本判断会把「入口还在」误判成「已消失」），登录页 / 挑战页会被排除；奖励改用「获得 N 点魔力值」这类明确句子抓取，避免把侧栏的「魔力值 242,141.0」统计当成奖励。"
     }
   }
 }

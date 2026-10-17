@@ -420,6 +420,31 @@ class CoreRegressionTests(unittest.TestCase):
                  '<input type="submit" value="登录"></form></body></html>')
         self.assertEqual(self.core.discover_signin_target(home4, "https://pt.example/"), {})
 
+    def test_btschool_silent_success_is_already(self):
+        # 学校：签到成功后站点不给任何提示，只是把「每日签到」入口拿掉
+        rule = self.core.resolve_rule({"url": "https://pt.btschool.club/", "cookie": "c=1"}, {})
+        signed = ('<html><head><title>BTSCHOOL 比特校园PT小乐园 - Powered by NexusPHP</title></head>'
+                  '<body>首页 论坛 种子 控制面板 排行榜 魔力值 [使用]: 242,141.0'
+                  "<script>alert('今天已签到，您获得87点魔力值')</script></body></html>")
+        result = self.core.judge_http(signed, rule)
+        self.assertEqual(result.status, "already")
+        self.assertIn("获得87点魔力值", result.message)
+        # 入口还在 → 没签到，不能误报成功
+        pending = ('<html><body>首页 论坛 <form method="post">'
+                   '<input type="submit" value="每日签到"></form></body></html>')
+        self.assertEqual(self.core.judge_http(pending, rule).status, "failed")
+        # 登录页里当然也没有这个入口，不能当成已签到
+        login = ('<html><body>用户登录 <a href="login.php">登录</a>'
+                 '<form action="takelogin.php"><input name="username"></form></body></html>')
+        self.assertEqual(self.core.judge_http(login, rule).status, "failed")
+
+    def test_extract_reward_sentence_ignores_sidebar_stats(self):
+        self.assertEqual(self.core.extract_reward_sentence(
+            "今日已签到，您获得 24 点魔力值"), "获得 24 点魔力值")
+        # 侧栏统计不是奖励
+        self.assertEqual(self.core.extract_reward_sentence(
+            "魔力值 [使用]: 242,141.0 上传量: 1.049 TB"), "")
+
     def test_fallback_rule_carries_cloudflare_wait(self):
         fallback = self.core.fallback_rule(
             {"engine": "http", "path": "/attendance.php", "cloudflare_wait": 25}, "cloudflare")

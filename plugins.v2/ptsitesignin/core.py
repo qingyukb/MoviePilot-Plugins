@@ -206,6 +206,10 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "path": "/index.php",
         "submit_selector": "input[type='submit'], button[type='submit'], button",
         "submit_text": "每日签到",
+        # 这站签到成功时**不给任何提示**，只是把「每日签到」入口拿掉（实测），所以用
+        # 「入口消失」作为完成依据；奖励（如「获得 N 点魔力值」）仍按页面原文抓。
+        "absent_keywords": ["每日签到"],
+        "absent_status": "already",
     },
     # ---- 观众（Audiences）：签到页内嵌 Turnstile，验证通过后由站点自行提交 ----
     # 该站 Turnstile 渲染在 closed shadow DOM 里（本地 Edge 复现），页面 JS 读不到
@@ -608,6 +612,18 @@ def plain_text(content: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def extract_reward_sentence(content: str) -> str:
+    """只认「获得 X 点魔力值」这种明确的奖励句子。
+
+    静默成功的站点（返回的是首页）侧栏也有「魔力值 [使用]: 242,141.0」这类统计数字，
+    用宽泛的 extract_bonus 会把它们当成奖励，所以这里只匹配带「获得 / 签到已得」的说法。
+    """
+    match = re.search(REWARD_SENTENCE_PATTERN, str(content or ""), re.IGNORECASE)
+    if not match:
+        return ""
+    return re.sub(r"\s+", " ", match.group(1)).strip()
+
+
 def extract_bonus(content: str, rule: Mapping[str, Any]) -> str:
     """提取签到奖励描述（如「获得 22 粒爆米花」）。规则里的 bonus 字段可覆盖默认模板。"""
     custom = str(rule.get("bonus") or "").strip()
@@ -716,6 +732,19 @@ def judge_http(content: str, rule: Mapping[str, Any]) -> SignResult:
         return SignResult("success", f"签到成功（{bonus}）" if bonus else "签到成功")
     if re.search(CAPTCHA_PATTERN, text, re.IGNORECASE):
         return SignResult("failed", "页面要求填写验证码", challenge="captcha")
+    # 静默成功：有的站点签到完不给任何提示，只是把「每日签到」入口拿掉（BTSCHOOL/学校 就是这种）。
+    # 规则里写了 absent_keywords 时，返回页面里这些文字全都不见了 → 视为已完成；奖励仍从整页
+    # 原始 HTML 里抓（站点可能把它塞在 JS alert / 隐藏节点里，plain_text 看不到）。
+    # 注意要在**原始 HTML** 里找这些文字：签到入口是 `<input value="每日签到">`，去标签后的
+    # 可见正文里本来就没有这个词，用 visible 判断会把「入口还在」误当成「入口已消失」。
+    absent = [str(item).strip() for item in (rule.get("absent_keywords") or [])
+              if str(item).strip()]
+    if absent and not login_page(content) and not cloudflare_pending(content) \
+            and not any(word in content or word in visible for word in absent):
+        status = "success" if str(rule.get("absent_status") or "").lower() == "success" else "already"
+        prefix = "签到成功" if status == "success" else "今日已签到"
+        bonus = extract_reward_sentence(text)
+        return SignResult(status, f"{prefix}（{bonus}）" if bonus else prefix)
     return SignResult("failed", f"未匹配到签到成功标志；{page_hint(text)}")
 
 
@@ -760,6 +789,9 @@ _FORM_BLOCK_RE = re.compile(r"<form\b([^>]*)>(.*?)</form>", re.IGNORECASE | re.D
 _INPUT_RE = re.compile(r"<input\b[^>]*>", re.IGNORECASE)
 _ATTR_RE = re.compile(r"([a-zA-Z_:][-a-zA-Z0-9_:.]*)\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)")
 _UID_RE = re.compile(r"userdetails\.php\?id=(\d+)", re.IGNORECASE)
+# 「获得 87 点魔力值」这类明确的奖励句子（静默成功时只用它，避免误抓侧栏统计数字）
+REWARD_SENTENCE_PATTERN = (r"((?:获得|獲得|獲取|签到已得|簽到已得)\s*[\d,]+(?:\.\d+)?"
+                           r"\s*(?:个|粒|枚|点|個|顆)?\s*(?:魔力值|爆米花|积分|做种积分|金币|奖励))")
 
 
 @dataclass(frozen=True)

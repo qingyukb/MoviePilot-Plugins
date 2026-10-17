@@ -147,7 +147,7 @@ ptsitesignin/
 | YemaPT (`yemapt.org`) | `altcha` | Hash 路由 + Altcha 复选框 + 提交按钮 |
 | HDSky (`hdsky.me`) | `trigger_image` | 先点开签到弹窗再解图片验证码 |
 | AGSVPT (`agsvpt.com`) | HTTP `POST` | NexusPHP 签到页，页面上是「立即签到」提交按钮：GET 只渲染按钮不签到，预设用 `method: POST`；撞上验证码 / 盾时自动回退到浏览器并按「立即签到」按钮点击 |
-| BTSCHOOL (`btschool.club`，学校) | HTTP `POST` | 签到按钮直接挂在**首页**，没有独立签到页（实测 `/attendance.php`、`/signin.php`、`/checkin.php` 全是 404）：预设用 `POST /index.php`，判定沿用默认文案（今天已签到 / 签到成功）；奖励如「您获得 N 点魔力值」每次从页面抓取 |
+| BTSCHOOL (`btschool.club`，学校) | HTTP `POST` | 签到按钮直接挂在**首页**，没有独立签到页（实测 `/attendance.php`、`/signin.php`、`/checkin.php` 全是 404）：预设用 `POST /index.php`。这站签到成功**不给任何提示**、只是把「每日签到」入口拿掉，所以用 `absent_keywords: ["每日签到"]` 判定「入口消失＝已完成」；奖励如「获得 N 点魔力值」每次从页面原文抓取（数值每天不同） |
 | `dstudio.me` / `mua.xloli.cc` / `share.ilolicon.com` | `cloudflare` | Cloudflare 托管挑战自动通过 |
 
 ### 关于 Cloudflare Turnstile
@@ -233,6 +233,7 @@ Browserless 站点（键可用域名或站点 ID，`engine` 会覆盖全局默�
 | `trigger_selector` / `trigger_wait` | 弹窗触发按钮与等待毫秒 |
 | `preflight_path` / `wait` / `preflight_wait` / `cloudflare_wait` / `turnstile_wait` / `auto_wait` / `reconnect_wait` / `solve_timeout` / `solve_count` / `solve2_wait` / `solve2_timeout` | 页面预检、签到后等待、Cloudflare 自动放行、Turnstile 复选框渲染等待（毫秒，5–60 秒）、Turnstile token 出现的等待时间、会话复用的空闲保留时间（毫秒，10–300 秒，默认 60 秒；`auto` 站点靠它把 solve 的会话留给第二段注入）、solve 找验证码的等待时间；`solve_count=0` 明确禁用 solve，`solve_count=1` 只解进站挑战，`solve_count=2` 时对两段挑战依次 solve，`solve2_wait` / `solve2_timeout` 分别控制两段之间的等待与第二段的解题目预算（缺省继承 `solve_timeout`） |
 | `success_keywords` / `already_keywords` / `pending_keywords` | 文本关键词判定；`pending_keywords` 用于诊断仍停留在人机验证中的页面 |
+| `absent_keywords` / `absent_status` | **静默成功**判定：返回页面里这些文字全都消失时，视为已完成（`absent_status` 可选 `success` / `already`，默认 `already`）。适用于「签到成功后不提示、只是把入口拿掉」的站点（如学校 BTSCHOOL 的「每日签到」按钮） |
 | `success_json` | 形如 `{"field":"/state","values":["success"]}` 的 AJAX JSON 判定 |
 | `strict_status_keywords` | `true` 时只认 `success_keywords`，忽略通用词 |
 
