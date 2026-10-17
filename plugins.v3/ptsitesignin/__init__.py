@@ -108,7 +108,7 @@ class PTSiteSignIn(_PluginBase):
     plugin_desc = ("双引擎 PT 签到，可选真实登录刷新 Cookie 并读取站点「最近动向」：HTTP 直连签到接口，"
                    "或经 Browserless 完成验证码 / Cloudflare / Turnstile 挑战。")
     plugin_icon = "signin.png"
-    plugin_version = "1.5.5"
+    plugin_version = "1.5.6"
     plugin_author = "qingyu"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "ptsignin_"
@@ -331,11 +331,6 @@ class PTSiteSignIn(_PluginBase):
                  "content": [{"component": "VSwitch", "props": {"model": "run_once",
                              "label": "保存后立即执行一次",
                              "hint": "保存后延后 3 秒在后台跑一轮，同样跳过今天已签到的站点",
-                             "persistent-hint": True}}]},
-                {"component": "VCol", "props": {"cols": 12, "md": 4},
-                 "content": [{"component": "VSwitch", "props": {"model": "clear_today",
-                             "label": "清理本日缓存",
-                             "hint": "打开并保存后清空今天的签到记录（一次性动作，会自动关闭），下一轮会重新签一遍",
                              "persistent-hint": True}}]},
                 {"component": "VCol", "props": {"cols": 12, "md": 4},
                  "content": [{"component": "VSwitch", "props": {"model": "clear_today",

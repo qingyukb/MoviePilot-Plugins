@@ -130,7 +130,7 @@ ptsitesignin/
 要点：
 
 - 免费额度 1000 units/月，一次签到通常消耗几十 units；可在面板查看已用量与剩余额度。
-- 官方区域端点：美西 `production-sfo.browserless.io`（默认）、欧洲 `production-ams.browserless.io`，按目标站点就近选择成功率更高。
+- 官方区域端点实测（本机直连、每端点 6 次取中位）：美西 `production-sfo.browserless.io`（**默认**，TCP+TLS ≈400ms、API ≈720ms，最快）、伦敦 `production-lon.browserless.io`（≈520ms / ≈1160ms）、阿姆斯特丹 `production-ams.browserless.io`（≈505ms / ≈1230ms）；换区域直接改地址即可。
 - 自建 Browserless（Docker）时：地址填你的服务根地址（如 `http://192.168.1.10:3000`），Token 填启动时 `-e TOKEN=xxx` 设置的值。
 - Token 只保存在 MoviePilot 插件配置里，不会写入日志与签到结果。
 
@@ -169,10 +169,10 @@ ptsitesignin/
 注意事项：
 
 1. **IP 信誉决定成功率。** 云节点（含 Browserless 免费额度节点）更容易被 Cloudflare 反复挑战；自建 Browserless + 住宅代理成功率显著更高。
-2. 默认走 `https://production-sfo.browserless.io` + `/stealth/bql`，自建服务填根地址或完整 `/stealth/bql` 地址即可（会自动补全路径并带上 `?token=`）。
+2. 默认走 `https://production-sfo.browserless.io` + `/stealth/bql`（可换成 `production-lon` / `production-ams` 或自建地址），自建服务填根地址或完整 `/stealth/bql` 地址即可（会自动补全路径并带上 `?token=`）。
 3. 免费额度 1000 units/月，一次签到通常几十 units，建议并发设为 1–2。
 4. 若日志出现「找到验证码但未能完成验证」「solve 超时」或「未拿到 Turnstile token」，多半是当前节点的 IP 被 Cloudflare 判定为可疑（观众站的 Turnstile 属托管挑战，机房 IP 常被判为必须人工交互）：换节点或改用住宅代理成功率最高。插件已把 solve 的 found/solved/time、token 来源与长度、站点回调是否被调用、兜底 POST 的 HTTP 状态码、widget 是否在 closed shadow DOM 里、页面是否仍停在人机验证一起写进失败原因，照着这几项即可判断是「没解出 token」「token 注入后站点没提交」还是「站点拒了 token」。
-5. 出现「Browserless 请求超时（…秒内未收到响应）」通常是插件 / 服务器到 Browserless 的跨境链路抖动，或节点执行过慢。插件会自动把 HTTP 读超时抬到不低于「页面内等待预算 + 45 秒余量」，避免读超时比 BQL 内部等待还短而自己掐断连接；仍超时请调大「Browserless 超时」或换成更近的区域（如 `production-ams.browserless.io`）。主流程响应丢失时插件会自动只读回查一次，已签到不会被报成失败。
+5. 出现「Browserless 请求超时（…秒内未收到响应）」通常是插件 / 服务器到 Browserless 的跨境链路抖动，或节点执行过慢。插件会自动把 HTTP 读超时抬到不低于「页面内等待预算 + 45 秒余量」，避免读超时比 BQL 内部等待还短而自己掐断连接；仍超时请调大「Browserless 超时」或换一个区域节点（`production-sfo` / `production-lon` / `production-ams`）。主流程响应丢失时插件会自动只读回查一次，已签到不会被报成失败。
 
 ## 配置项
 

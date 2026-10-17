@@ -84,6 +84,11 @@ SUCCESS_WORDS = ("签到成功", "簽到成功", "成功签到", "打卡成功")
 ALREADY_WORDS = ("已签到", "已经签到", "今日已签", "今天已签", "已打卡", "already")
 LOGIN_WORDS = ("用户登录", "會員登入", "login")
 
+# Browserless 官方区域端点。实测（本机直连、每端点 6 次取中位，2026-10-17）：
+#   sfo 美西  TCP+TLS ~400ms / API ~720ms   ← 最快
+#   lon 伦敦  TCP+TLS ~520ms / API ~1160ms
+#   ams 阿姆斯特丹 TCP+TLS ~505ms / API ~1230ms
+# 所以默认用 sfo；换区域直接在设置里改地址即可（fra 等端点并不存在）。
 DEFAULT_BROWSERLESS_URL = "https://production-sfo.browserless.io"
 
 # ---------------------------------------------------------------- 内置站点规则
