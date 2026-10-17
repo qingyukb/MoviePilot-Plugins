@@ -421,6 +421,18 @@ class CoreRegressionTests(unittest.TestCase):
                  '<input type="submit" value="登录"></form></body></html>')
         self.assertEqual(self.core.discover_signin_target(home4, "https://pt.example/"), {})
 
+    def test_hhanclub_calendar_preset(self):
+        # 憨憨：日历式签到，点「签到」后当天按钮变「已领取」，奖励是「本次签到获得 N 个憨豆」
+        rule = self.core.resolve_rule({"url": "https://hhanclub.net/", "cookie": "c=1"}, {})
+        self.assertEqual(rule["engine"], "browserless")
+        self.assertEqual(rule["path"], "/attendance.php")
+        self.assertEqual(rule["submit_text"], "签到")
+        page = ("<html><body><div>这是您的第80次签到，已连续签到80天，本次签到获得405个憨豆。</div>"
+                "<button>已领取</button><button>签到</button></body></html>")
+        result = self.core.classify(page, rule)
+        self.assertEqual(result.status, "already")
+        self.assertIn("获得405个憨豆", result.message)
+
     def test_btschool_silent_success_is_already(self):
         # 学校：签到成功后站点不给任何提示，只是把「每日签到」入口拿掉
         rule = self.core.resolve_rule({"url": "https://pt.btschool.club/", "cookie": "c=1"}, {})
