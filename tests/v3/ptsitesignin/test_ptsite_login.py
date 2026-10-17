@@ -13,10 +13,11 @@ from unittest import mock
 ROOT = next((parent for parent in Path(__file__).resolve().parents
               if (parent / "package.json").is_file() and (parent / "plugins.v2").is_dir()),
              Path(__file__).resolve().parents[1])
-PLUGIN_DIRS = (
+# 本仓库 V2/V3 两份都有；提交官方仓库时只有 plugins.v3，所以按实际存在的目录取
+PLUGIN_DIRS = tuple(directory for directory in (
     ROOT / "plugins.v2" / "ptsitesignin",
     ROOT / "plugins.v3" / "ptsitesignin",
-)
+) if directory.is_dir())
 
 
 def load_core(directory: Path, name: str):

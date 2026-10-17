@@ -27,6 +27,9 @@ class RepoConsistencyTests(unittest.TestCase):
         for name in PLUGINS:
             v2 = ROOT / "plugins.v2" / name
             v3 = ROOT / "plugins.v3" / name
+            if not (v2.is_dir() and v3.is_dir()):
+                # 官方仓库只放 plugins.v3 一份，没有 V2 副本时跳过对比
+                continue
             with self.subTest(plugin=name):
                 v2_files = plugin_files(v2)
                 self.assertEqual(v2_files, plugin_files(v3), name)
@@ -39,11 +42,14 @@ class RepoConsistencyTests(unittest.TestCase):
             versions = []
             for init_file in (ROOT / "plugins.v2" / name / "__init__.py",
                               ROOT / "plugins.v3" / name / "__init__.py"):
+                if not init_file.is_file():
+                    continue
                 match = re.search(r'plugin_version\s*=\s*"([^"]+)"',
                                   init_file.read_text(encoding="utf-8"))
                 self.assertIsNotNone(match, str(init_file))
                 versions.append(match.group(1))
-            self.assertEqual(versions[0], versions[1], name)
+            if len(versions) > 1:
+                self.assertEqual(len(set(versions)), 1, name)
             version = versions[0]
             for manifest in MANIFESTS:
                 data = json.loads((ROOT / manifest).read_text(encoding="utf-8"))
@@ -56,8 +62,8 @@ class RepoConsistencyTests(unittest.TestCase):
                            if path.is_dir()):
             self.assertIn(name, PLUGINS, f"plugins.v2/{name} 未登记到 PLUGINS")
         for name, key in PLUGINS.items():
-            self.assertTrue((ROOT / "plugins.v2" / name).is_dir(), name)
-            self.assertTrue((ROOT / "plugins.v3" / name).is_dir(), name)
+            self.assertTrue((ROOT / "plugins.v2" / name).is_dir()
+                            or (ROOT / "plugins.v3" / name).is_dir(), name)
             for manifest in MANIFESTS:
                 data = json.loads((ROOT / manifest).read_text(encoding="utf-8"))
                 self.assertIn(key, data, f"{key} 未写入 {manifest}")
