@@ -445,6 +445,19 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertEqual(self.core.extract_reward_sentence(
             "魔力值 [使用]: 242,141.0 上传量: 1.049 TB"), "")
 
+    def test_activity_allows_wide_label_gap(self):
+        # 有的主题把「最近动向」和值隔开（图标 / 说明文字），60 字窗口会漏
+        html = ("<html><body>最近动向" + "&nbsp;图标说明" * 12
+                + " 2026-10-17 11:20:33 ( < 1分钟前 )</body></html>")
+        self.assertIn("2026-10-17 11:20:33", self.core.extract_activity(html)["last_seen"])
+
+    def test_activity_prefers_nearest_keyword_over_neighbour_field(self):
+        # 窗口放宽后仍取「离时间最近」的关键词，不会把加入日期的时间当成本站动向
+        html = ("<html><body>加入日期 2025-10-01 23:57:35 "
+                "最近动向 2026-10-17 11:20:33 ( 9分钟前 )</body></html>")
+        self.assertEqual(self.core.extract_activity(html)["last_seen"],
+                         "2026-10-17 11:20:33 ( 9分钟前 )")
+
     def test_fallback_rule_carries_cloudflare_wait(self):
         fallback = self.core.fallback_rule(
             {"engine": "http", "path": "/attendance.php", "cloudflare_wait": 25}, "cloudflare")

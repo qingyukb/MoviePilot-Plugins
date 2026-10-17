@@ -784,9 +784,11 @@ DATETIME_PATTERN = r"(\d{4}[-/.]\d{1,2}[-/.]\d{1,2}(?:[ T]\d{1,2}:\d{2}(?::\d{2}
 # 没有关键词命中时用的严格时间格式：必须带时分。裸日期（2026-09-18）在种子列表、
 # 公告、排行榜里到处都是，拿它当「最近动向」只会给出一个看起来很旧的假值。
 ACTIVITY_TIME_PATTERN = r"(\d{4}[-/.]\d{1,2}[-/.]\d{1,2}[ T]\d{1,2}:\d{2}(?::\d{2})?)"
-# 关键词后面允许多长的间隔才算「紧跟着时间」：站点写法都是「上次访问：2026-…」这种，
-# 窗口开太大就会把旁边字段（注册日期之类）的时间算成这个关键词的值。
-ACTIVITY_WINDOW = 60
+# 关键词后面允许多长的间隔才算「紧跟着时间」：多数站点写成「上次访问：2026-…」，
+# 但有的主题把标签和值分在两行、中间夹着图标 / 说明文字，60 字会漏掉，放宽到 160。
+# 多个关键词都命中时只取「离时间最近」的那个，所以放宽窗口不会把旁边字段（加入日期之类）
+# 的时间算成这个关键词的值。
+ACTIVITY_WINDOW = 160
 # 站点常常在时间后面再补一段相对时间，例如「最近动向：2026-10-16 23:44:21 ( < 1分前 )」
 RELATIVE_TIME_PATTERN = r"\s*([（(]\s*[^（()）]{0,16}?前\s*[)）])"
 _DATETIME_RE = re.compile(DATETIME_PATTERN)
@@ -1137,6 +1139,7 @@ def read_activity(site: Mapping[str, Any], cookie: str, timeout: int = 30,
     candidates.append(DEFAULT_USERDETAILS_PATH)
     candidates.append(DEFAULT_INDEX_PATH)
     seen: set = set()
+    notes: List[str] = []
     for candidate in candidates:
         if candidate in seen:
             continue
@@ -1144,21 +1147,28 @@ def read_activity(site: Mapping[str, Any], cookie: str, timeout: int = 30,
         try:
             page = session.get(target_url(base_url, candidate),
                                timeout=timeout, allow_redirects=True, proxies=proxies)
-        except Exception:
+        except Exception as error:
+            notes.append(f"{candidate}：请求失败（{type(error).__name__}）")
             continue
+        body = page.text or ""
         if page.status_code >= 400:
+            notes.append(f"{candidate}：HTTP {page.status_code}")
             continue
-        if cloudflare_pending(page.text or ""):
+        if cloudflare_pending(body):
             # 撞盾时页面正文是挑战页，从中提取的「最近动向」是假的：直接换下一个候选页
+            notes.append(f"{candidate}：Cloudflare 挑战页")
             continue
-        found = extract_activity(page.text or "")
+        if login_page(body):
+            notes.append(f"{candidate}：被要求登录（Cookie 可能失效）")
+            continue
+        found = extract_activity(body)
         if found:
             return ActivityResult("success", f"已读取最近动向（{candidate}）",
                                   last_seen=found.get("last_seen", ""),
                                   snippet=found.get("snippet", ""),
                                   source=str(candidate))
-    return ActivityResult("failed",
-                          f"未在站点页面找到「最近动向」（已试 {'、'.join(candidates)}）")
+        notes.append(f"{candidate}：{len(plain_text(body))} 字，没有「最近动向」")
+    return ActivityResult("failed", "未在站点页面找到「最近动向」（" + "；".join(notes) + "）")
 
 
 # ---------------------------------------------------- 结果记录汇总（插件详情页用）

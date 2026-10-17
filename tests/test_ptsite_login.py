@@ -240,6 +240,23 @@ class LoginCoreTests(unittest.TestCase):
                 self.assertEqual(result.status, "failed")
                 self.assertIn("Cloudflare", result.message)
 
+    def test_read_activity_reports_each_candidate(self):
+        # 读不到时把每个候选页的真实情况写进提示，方便按站点配 activity_path
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                session = FakeSession({
+                    "index.php": lambda s, u: FakeResponse(u, "<html><body>首页 公告</body></html>"),
+                    "userdetails.php": lambda s, u: FakeResponse(
+                        u, '<html><body>用户登录<form action="takelogin.php">'
+                           '<input type="password" name="password"></form></body></html>'),
+                })
+                with mock.patch.dict(sys.modules, {"requests": fake_requests(session)}):
+                    result = core.read_activity({"url": "https://pt.example/"},
+                                                "c_secure_pass=x", timeout=5)
+                self.assertEqual(result.status, "failed")
+                self.assertIn("userdetails.php：被要求登录", result.message)
+                self.assertIn("index.php", result.message)
+
     def test_read_activity_prefers_cookie_uid_over_index_links(self):
         # 首页里的 userdetails.php?id= 链接可能指向别人（论坛作者 / 最新注册用户），
         # 必须优先用 Cookie 里的 c_secure_uid 打开「自己」的资料页
