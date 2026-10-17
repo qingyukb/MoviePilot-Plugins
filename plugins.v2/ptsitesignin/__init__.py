@@ -108,7 +108,7 @@ class PTSiteSignIn(_PluginBase):
     plugin_desc = ("双引擎 PT 签到，可选真实登录刷新 Cookie 并读取站点「最近动向」：HTTP 直连签到接口，"
                    "或经 Browserless 完成验证码 / Cloudflare / Turnstile 挑战。")
     plugin_icon = "signin.png"
-    plugin_version = "1.5.3"
+    plugin_version = "1.5.4"
     plugin_author = "qingyu"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "ptsignin_"
@@ -964,7 +964,7 @@ class PTSiteSignIn(_PluginBase):
         failed = len(results) - signed - already - login_ok
         logger.info("PT站点签到：完成，新签到 %s，今日已签到 %s，仅登录 %s，失败 %s",
                     signed, already, login_ok, failed)
-        self._notify(results, failed)
+        self._notify(results)
 
     def _save_results(self, results: List[Dict[str, str]]) -> List[Dict[str, str]]:
         """保存最新结果与当天历史（重试期间先落盘，最终结果会覆盖同一天）。"""
@@ -1007,20 +1007,23 @@ class PTSiteSignIn(_PluginBase):
                 logger.warning("PT站点签到：删除历史数据 %s 失败，将改为清空", key)
         self.save_data(key, None)
 
-    def _notify(self, results: List[Dict[str, str]], failed: int) -> None:
+    def _notify(self, results: List[Dict[str, str]]) -> None:
         """推送结果（由「发送通知」开关控制）。
 
-        消息保持简短：一行「成功几个 / 失败几个」，只有失败时才附上失败原因（每个站点一行）。
+        就四行以内：一行「签到成功 N｜登录成功 N｜失败 N」，有失败才在下面逐条列「站点：原因」。
+        双选站点两边都做成功时，会计入两个数字（签到成功 +1、登录成功 +1），这是预期行为。
         """
         if not self._notify_enabled or not results:
             return
-        success = max(0, len(results) - failed)
-        lines = [f"站点 {len(results)} 个｜成功 {success}｜失败 {failed}"]
-        reasons = [self._failure_reason(item) for item in results if self._is_failed(item)]
-        if reasons:
+        signed = sum(1 for item in results
+                     if str(item.get("status") or "") in {"success", "already"})
+        login_ok = sum(1 for item in results
+                       if str(self._login_view(item).get("status") or "") == "login")
+        failures = [item for item in results if self._is_failed(item)]
+        lines = [f"签到成功 {signed}｜登录成功 {login_ok}｜失败 {len(failures)}"]
+        if failures:
             lines.append("")
-            lines.append("失败原因：")
-            lines.extend("· " + reason for reason in reasons)
+            lines.extend("· " + self._failure_reason(item) for item in failures)
         self.post_message(mtype=NotificationType.SiteMessage,
                           title="PT站点签到",
                           text="\n".join(lines))
