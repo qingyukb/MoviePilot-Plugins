@@ -108,7 +108,7 @@ class PTSiteSignIn(_PluginBase):
     plugin_desc = ("PT 站点自动签到，可登录刷新 Cookie 并读取最近动向；遇到验证码或 Cloudflare 会自动改用浏览器。")
     plugin_icon = "signin.png"
     plugin_version = "1.5.9"
-    plugin_author = "qingyu"
+    plugin_author = "qingyukb"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "ptsignin_"
     plugin_order = 29

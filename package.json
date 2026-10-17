@@ -5,7 +5,7 @@
     "labels": "站点,签到",
     "version": "1.5.9",
     "icon": "https://cdn.jsdelivr.net/gh/qingyukb/MoviePilot-Plugins@main/icons/ptsignin.png",
-    "author": "qingyu",
+    "author": "qingyukb",
     "level": 2,
     "v2": true,
     "system_version": ">=2.0.0",
