@@ -254,8 +254,12 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "engine": "browserless",
         "mode": "open_page",
         "path": "/",
+        # 签到项要点开头像才渲染出来，先点头像再点「立即签到」
+        "pre_click_selector": ("[class*=avatar], [class*=Avatar], header img, .user-avatar, "
+                               ".header-avatar, .el-dropdown, [class*=dropdown-toggle]"),
         "submit_selector": "[role='menuitem'], li, a, button, span, div",
         "submit_text": "立即签到",
+        "wait": 5000,
         "success_on_click": True,
         "success_keywords": ["签到成功", "簽到成功", "今日已签到"],
         "already_keywords": ["已签到", "今日已签到", "签到成功", "已簽到"],
@@ -481,7 +485,8 @@ def fallback_rule(rule: Mapping[str, Any], challenge: str) -> Dict[str, Any]:
         fallback["route_fragment"] = rule["route_fragment"]
     # 让用户在 HTTP 规则里写的等待参数（如 cloudflare_wait）与点击目标（submit_selector /
     # submit_text，例如 AGSVPT 的「立即签到」）对自动回退同样生效
-    for name in ("cloudflare_wait", "wait", "preflight_wait", "submit_selector", "submit_text"):
+    for name in ("cloudflare_wait", "wait", "preflight_wait", "submit_selector", "submit_text",
+                 "pre_click_selector", "pre_click_text"):
         if rule.get(name) is not None:
             fallback[name] = rule[name]
     return validate_rule(fallback)
@@ -1458,11 +1463,48 @@ def session_endpoint(address: str, token: str) -> str:
                                     urllib.parse.urlencode(query), ""))
 
 
+def pre_click_script(selector: str = "", text: str = "", wait_ms: int = 800) -> str:
+    """生成「先点一下某个元素」的 JS：用于点头像展开菜单这类两步操作。
+
+    传文字时按「文字最短的匹配元素」点（同 submit 的找法），只传选择器就直接点第一个。
+    返回空串表示没配置。
+    """
+    wanted = str(text or "").strip()
+    target = str(selector or "").strip()
+    if not wanted and not target:
+        return ""
+    wanted_json = json.dumps(wanted, ensure_ascii=False)
+    selector_json = json.dumps(target, ensure_ascii=False)
+    return """(async () => {
+      const wanted = %s;
+      let node = null;
+      if (wanted) {
+        const nodes = [...document.querySelectorAll(
+          "a, button, input, [role='button'], [role='menuitem'], li, span, div, img")];
+        const hits = nodes
+          .map((item) => ({
+            node: item,
+            text: ((item.value || item.textContent || '') + '').replace(/\s+/g, ' ').trim(),
+          }))
+          .filter((item) => item.text && item.text.includes(wanted) && item.text.length <= 40);
+        if (hits.length) {
+          hits.sort((left, right) => left.text.length - right.text.length);
+          node = hits[0].node;
+        }
+      }
+      if (!node && %s) node = document.querySelector(%s);
+      if (!node) return false;
+      node.click();
+      await new Promise((resolve) => setTimeout(resolve, %d));
+      return true;
+    })()""" % (wanted_json, selector_json, selector_json, max(0, int(wait_ms)))
+
+
 def _submit_script(selector: str, method: str, captcha_input: Optional[str] = None,
-                   submit_text: Optional[str] = None) -> str:
+                   submit_text: Optional[str] = None, pre_click: str = "") -> str:
     selector_json = json.dumps(selector)
     input_json = json.dumps(captcha_input or "")
-    text_json = json.dumps(submit_text or "")
+    text_json = json.dumps(submit_text or "", ensure_ascii=False)
     target_script = """(() => { const wanted = %s.trim();
       if (wanted) {
         // 头像菜单、下拉项这类元素常是 div / li / span，而且默认是隐藏的；
@@ -1488,10 +1530,14 @@ def _submit_script(selector: str, method: str, captcha_input: Optional[str] = No
           const confirm = [...document.querySelectorAll('.layui-layer-btn0, .layui-layer-btn a')]
             .find((node) => node.offsetParent !== null && /确定|确认/.test((node.textContent || '').trim()));
           if (!confirm) return false; confirm.click();"""
+        pre = ""
+        if pre_click:
+            pre = """
+          await %s;""" % pre_click
         return """(async () => { const input = %s ? document.querySelector(%s) : null;
-          if (input && !input.value.trim()) return false;
+          if (input && !input.value.trim()) return false;%s
           const button = %s; if (!button) return false; button.click(); %s return true;
-        })()""" % (input_json, input_json, target_script, confirm)
+        })()""" % (input_json, input_json, pre, target_script, confirm)
     return """(async () => {
       const input = %s ? document.querySelector(%s) : null; if (input && !input.value.trim()) return false;
       const target = %s; const form = target && (target.form || target);
@@ -2517,6 +2563,8 @@ class BrowserlessSigner:
             # 页面在人机验证通过后自己提交签到，不需要点任何按钮
             pass
         else:
+            pre_click = pre_click_script(str(rule.get("pre_click_selector") or ""),
+                                        str(rule.get("pre_click_text") or ""))
             variables["submit"] = (_altcha_submit_script(rule) if submit_method == "altcha_click"
                                    else _submit_script(rule["submit_selector"], submit_method,
                                                        rule.get("captcha_input_selector"),

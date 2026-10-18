@@ -468,12 +468,22 @@ class CoreRegressionTests(unittest.TestCase):
             self.assertEqual(hdk["submit_text"], "签到")
             self.assertEqual(hdk["wait"], 12000)
 
+    def test_two_step_click_for_menu_items(self):
+        # 菜单项要先点头像才渲染出来：pre_click 生成前置点击脚本，submit 里会带上
+        self.assertEqual(self.core.pre_click_script('', '', 800), '')
+        pre = self.core.pre_click_script('[class*=avatar]', '', 800)
+        self.assertIn('avatar', pre)
+        submit = self.core._submit_script('a', 'dom_click', submit_text='立即签到', pre_click=pre)
+        self.assertIn('avatar', submit)
+        self.assertIn('立即签到', submit)
+
     def test_sunnypt_menu_preset(self):
         # SUNNYPT：头像菜单里的「立即签到」，点完只有 toast，点到就算成功
         rule = self.core.resolve_rule({"url": "https://sunnypt.top/", "cookie": "c=1"}, {})
         self.assertEqual(rule["engine"], "browserless")
         self.assertEqual(rule["path"], "/")
         self.assertEqual(rule["submit_text"], "立即签到")
+        self.assertIn("avatar", rule.get("pre_click_selector"))   # 先点头像展开菜单
         self.assertTrue(rule.get("success_on_click"))
         clicked = self.core.judge_after_click(
             rule, True, "<html><body>签到成功，获得 50 金贝</body></html>")
