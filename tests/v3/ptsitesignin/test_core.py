@@ -436,6 +436,13 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertEqual(result.status, "already")
         self.assertIn("获得405个憨豆", result.message)
 
+    def test_piggo_preset(self):
+        # Piggo 整站在 Cloudflare 后面，按 NexusPHP 通用签到页处理
+        rule = self.core.resolve_rule({"url": "https://piggo.me/", "cookie": "c=1"}, {})
+        self.assertEqual(rule["engine"], "browserless")
+        self.assertEqual(rule["path"], "/attendance.php")
+        self.assertEqual(rule["submit_text"], "立即签到")
+
     def test_ttg_and_hdkyl_presets(self):
         # TTG 没有 attendance.php，签到入口在站点页面上；HDKylin 是 NexusPHP，签到在 /attendance.php
         ttg = self.core.resolve_rule({"url": "https://totheglory.im/", "cookie": "c=1"}, {})

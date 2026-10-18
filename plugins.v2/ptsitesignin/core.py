@@ -226,6 +226,18 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "success_keywords": ["签到成功", "簽到成功", "签到完成", "已签到"],
         "already_keywords": ["今日已签到", "今天已签到", "已签到", "已簽到", "已领取"],
     },
+    # ---- Piggo（piggo.me）：整站在 Cloudflare 后面，按 NexusPHP 通用签到页处理 ----
+    # 探测：所有路径对访客都返回 403「Just a moment...」，探不到真实路径，
+    # 先按 /attendance.php + 「立即签到」配，若日志显示卡在挑战页或找不到按钮再调。
+    "piggo.me": {
+        "engine": "browserless",
+        "mode": "open_page",
+        "path": "/attendance.php",
+        "submit_selector": "input[type='submit'], button, [role='button'], a",
+        "submit_text": "立即签到",
+        "success_keywords": ["签到成功", "簽到成功", "签到完成", "已签到", "本次签到"],
+        "already_keywords": ["今日已签到", "今天已签到", "已签到", "已簽到", "已领取"],
+    },
     # ---- SUNNYPT（sunnypt.top）：头像菜单里的「立即签到」，签完右下角弹提示 ----
     # 页面是 Vue 单页，签到项在头像下拉菜单里（默认隐藏，JS 点也能触发）；
     # 点完只有 toast，页面本身不留成功文案，所以按「点到了就算成功」处理。

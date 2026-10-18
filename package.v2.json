@@ -3,7 +3,7 @@
     "name": "PT站点签到",
     "description": "PT 站点自动签到，可登录刷新 Cookie 并读取最近动向；遇到验证码或 Cloudflare 会自动改用浏览器。",
     "labels": "站点,签到",
-    "version": "1.6.3",
+    "version": "1.6.4",
     "icon": "https://cdn.jsdelivr.net/gh/qingyukb/MoviePilot-Plugins@main/icons/ptsignin.png",
     "author": "qingyukb",
     "level": 2,
@@ -12,6 +12,7 @@
     "v2": true,
     "system_version": ">=2.0.0,<3.0.0",
     "history": {
+      "v1.6.4": "新增 Piggo（piggo.me）预设，整站在 Cloudflare 后面，走浏览器签到",
       "v1.6.3": "新增 TTG（totheglory.im）与 HDKylin（hdkyl.in）预设，两个站都在 Cloudflare 后面，走浏览器签到",
       "v1.6.2": "支持 SUNNYPT（头像菜单「立即签到」，点到即算成功）；奖励新增「金贝」单位；点击能落到菜单项等深层元素",
       "v1.6.1": "修正入口判定：脚本 / 隐藏模板里的「每日签到」字样不再让插件以为没签上（学校签到成功却报失败）",
