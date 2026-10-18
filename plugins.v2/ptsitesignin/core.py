@@ -1286,18 +1286,24 @@ def extract_activity(html: str) -> Dict[str, str]:
     text = plain_text(html or "")
     best: Any = None
     for order, keyword in enumerate(ACTIVITY_KEYWORDS):
-        index = text.find(keyword)
-        if index < 0:
-            continue
-        match = _DATETIME_RE.search(text, index, index + ACTIVITY_WINDOW)
-        if match is None:
-            # 这个关键词后面没有紧跟着时间（多半是别处的同名文字），换下一个关键词
-            continue
-        candidate = (match.start() - (index + len(keyword)), order, index, keyword, match)
-        if best is None or candidate[:2] < best[:2]:
-            best = candidate
+        # 同一个关键词可能出现在多处（导航、图例、说明里也会有），逐处检查
+        start = 0
+        while True:
+            index = text.find(keyword, start)
+            if index < 0:
+                break
+            start = index + 1
+            match = _DATETIME_RE.search(text, index, index + ACTIVITY_WINDOW)
+            if match is None:
+                continue
+            # 站点自己写的「(40分钟前)」最可信：新闻、公告里的裸日期没有这个后缀
+            has_suffix = 0 if relative_suffix(text, match.end()) else 1
+            gap = match.start() - (index + len(keyword))
+            candidate = (has_suffix, gap, order, index, keyword, match)
+            if best is None or candidate[:3] < best[:3]:
+                best = candidate
     if best is not None:
-        _, _, index, keyword, match = best
+        _, _, _, index, keyword, match = best
         snippet = text[max(0, index - 12):index + 140].strip()
         return {"keyword": keyword, "snippet": snippet,
                 "last_seen": activity_value(text, match)}

@@ -373,6 +373,19 @@ class CoreRegressionTests(unittest.TestCase):
             "<html><body>种子 2026-09-18 某电影 2026-09-17 另一部</body></html>"), {})
         self.assertEqual(self.core.extract_activity("<html><body>2026-09-18</body></html>"), {})
 
+    def test_extract_activity_prefers_relative_suffix(self):
+        # 皇后的用户页：加入日期在前、最近动向在后，两个时间都在附近，必须取后面的那个
+        html = ("<table><tr><td>加入日期</td><td>2025-10-01 23:57:35 (1年0月前,54周)</td></tr>"
+                "<tr><td>最近动向</td><td>2026-10-18 21:19:12 (40分钟前)</td></tr>"
+                "<tr><td>目前IP</td><td>5.180.78.12</td></tr></table>")
+        info = self.core.extract_activity(html)
+        self.assertTrue(info["last_seen"].startswith("2026-10-18 21:19:12"), info)
+        # 页面里另有一处「最近动向」跟着旧日期（公告/说明），也要取带「(x分钟前)」的那个
+        noisy = ("<div>最近动向说明：2026-05-06 00:00:00</div>"
+                 "<div>最近动向</div><div>2026-10-18 21:19:12 (40分钟前)</div>")
+        info = self.core.extract_activity(noisy)
+        self.assertTrue(info["last_seen"].startswith("2026-10-18 21:19:12"), info)
+
     def test_extract_activity_picks_nearest_keyword_time(self):
         # 关键词后面没时间就换下一个关键词，并取距离最近的那个
         found = self.core.extract_activity(
