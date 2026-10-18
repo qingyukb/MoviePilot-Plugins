@@ -263,8 +263,13 @@ class PagePluginTests(unittest.TestCase):
                   {"site": "学校", "status": "failed",
                    "message": "签到后二次核验未显示签到成功状态"}]
         page, _ = self._page(latest)
-        counters = [node.get("text") for node in nodes(page, "VChip")]
-        self.assertEqual(counters[:5], ["站点 2", "成功 1", "失败 0", "未确认 1", "未记录 1"])
+        # 顶部统计是卡片：数值与说明分开渲染
+        numbers = [node.get("text") for node in nodes(page, "div")
+                   if "ptsignin-stat-num" in str(node.get("props", {}).get("class"))]
+        labels = [node.get("text") for node in nodes(page, "div")
+                  if "ptsignin-stat-label" in str(node.get("props", {}).get("class"))]
+        self.assertEqual(numbers, ["2", "1", "0", "1", "1"])
+        self.assertEqual(labels, ["站点", "成功", "失败", "未确认", "未记录"])
         alerts = [node.get("text") for node in nodes(page, "VAlert")
                   if "本轮没有记录的站点" in str(node.get("text"))]
         self.assertTrue(alerts)

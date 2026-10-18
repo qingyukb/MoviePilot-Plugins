@@ -83,23 +83,39 @@ HISTORY_SHOW = 10
 NOTIFY_REASON_LIMIT = 180
 # 详情页样式（MoviePilot 插件页支持内联 style 组件）。
 PAGE_STYLE = (
-    ".ptsignin-summary{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-bottom:6px}"
-    ".ptsignin-section{display:flex;align-items:center;margin:14px 0 6px}"
-    ".ptsignin-table-wrap{border:1px solid rgba(var(--v-theme-on-surface),.12);border-radius:8px;"
-    "overflow:hidden}"
-    # 两张表用同一套固定列宽：上下表格的「站点 / 状态 / 结果」逐列对齐，行高也一致，
-    # 不会出现「一张表很松、另一张挤成一团」
+    # 顶部统计：一行小卡片，数值 + 说明，0 值自动变灰
+    ".ptsignin-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(104px,1fr));"
+    "gap:8px;margin:2px 0 10px}"
+    ".ptsignin-stat{display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:10px;"
+    "border:1px solid rgba(var(--v-theme-on-surface),.10);background:rgba(var(--v-theme-on-surface),.03)}"
+    ".ptsignin-stat-num{font-size:1.12rem;font-weight:700;line-height:1.1;font-variant-numeric:tabular-nums}"
+    ".ptsignin-stat-label{font-size:.72rem;line-height:1.2;color:rgba(var(--v-theme-on-surface),.62)}"
+    ".ptsignin-updated{display:flex;align-items:center;gap:6px;margin-bottom:8px;font-size:.75rem;"
+    "color:rgba(var(--v-theme-on-surface),.55)}"
+    # 区块标题：小圆角图标 + 标题 + 数量
+    ".ptsignin-section{display:flex;align-items:center;gap:8px;margin:18px 0 8px}"
+    ".ptsignin-section-icon{display:inline-flex;align-items:center;justify-content:center;width:24px;"
+    "height:24px;border-radius:8px;background:rgba(var(--v-theme-primary),.12);"
+    "color:rgb(var(--v-theme-primary))}"
+    # 表格：圆角 + 轻阴影 + 斑马纹 + 悬停高亮，两张表列宽一致、逐列对齐
+    ".ptsignin-table-wrap{border:1px solid rgba(var(--v-theme-on-surface),.10);border-radius:12px;"
+    "overflow:hidden;box-shadow:0 1px 2px rgba(0,0,0,.05)}"
     ".ptsignin-table{width:100%;table-layout:fixed}"
     ".ptsignin-table th:nth-child(1),.ptsignin-table td:nth-child(1){width:30%}"
-    ".ptsignin-table th:nth-child(2),.ptsignin-table td:nth-child(2){width:16%}"
-    ".ptsignin-table th:nth-child(3),.ptsignin-table td:nth-child(3){width:54%}"
-    ".ptsignin-table td{vertical-align:middle}"
+    ".ptsignin-table th:nth-child(2),.ptsignin-table td:nth-child(2){width:17%}"
+    ".ptsignin-table th:nth-child(3),.ptsignin-table td:nth-child(3){width:53%}"
+    ".ptsignin-table thead th{background:rgba(var(--v-theme-on-surface),.04);font-size:.78rem;"
+    "color:rgba(var(--v-theme-on-surface),.7);white-space:nowrap}"
+    ".ptsignin-table tbody tr:nth-child(even){background:rgba(var(--v-theme-on-surface),.02)}"
+    ".ptsignin-table tbody tr:hover{background:rgba(var(--v-theme-primary),.06)}"
+    ".ptsignin-table td{vertical-align:middle;padding:10px 14px}"
     ".ptsignin-table td:nth-child(2){white-space:nowrap}"
     ".ptsignin-site{font-weight:600;line-height:1.25}"
-    ".ptsignin-caption{font-size:.75rem;color:rgba(var(--v-theme-on-surface),.6);margin-top:2px}"
-    # 结果列：超长的诊断最多占 3 行，多出来的省略，行高保持整齐（完整内容仍在日志 / 通知里）
+    ".ptsignin-caption{font-size:.72rem;color:rgba(var(--v-theme-on-surface),.55);margin-top:2px}"
+    # 结果列：时间用等宽数字，超长诊断最多 3 行
     ".ptsignin-result{font-size:.84rem;line-height:1.45;word-break:break-word;"
-    "display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}"
+    "font-variant-numeric:tabular-nums;display:-webkit-box;-webkit-line-clamp:3;"
+    "-webkit-box-orient:vertical;overflow:hidden}"
 )
 
 
@@ -311,6 +327,7 @@ class PTSiteSignIn(_PluginBase):
                  "func": self.run_sign_in, "kwargs": {}}]
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
+        """配置页：开关一行 + 参数两列 + 站点多选 + Browserless + 自定义规则。"""
         try:
             sites = SiteOper().list_order_by_pri()
         except Exception:
@@ -319,111 +336,86 @@ class PTSiteSignIn(_PluginBase):
         options: List[Dict[str, Any]] = [{"title": "全部站点（含后续新增）", "value": ALL_SITES}]
         options += [{"title": site.name, "value": site.id}
                     for site in sites if getattr(site, "cookie", None)]
-        return [{"component": "VForm", "content": [
-            {"component": "VRow", "content": [
-                {"component": "VCol", "props": {"cols": 12, "md": 4},
-                 "content": [{"component": "VSwitch", "props": {"model": "enabled", "label": "启用插件"}}]},
-                {"component": "VCol", "props": {"cols": 12, "md": 4},
-                 "content": [{"component": "VSwitch", "props": {"model": "notify", "label": "发送通知",
-                             "hint": "签到成功 / 登录成功 / 失败三项计数，有失败才附原因", "persistent-hint": True}}]},
-                {"component": "VCol", "props": {"cols": 12, "md": 4},
-                 "content": [{"component": "VSwitch", "props": {"model": "run_once",
-                             "label": "保存后立即执行一次",
-                             "hint": "保存后延后 3 秒在后台跑一轮，同样跳过今天已签到的站点",
-                             "persistent-hint": True}}]},
-                {"component": "VCol", "props": {"cols": 12, "md": 4},
-                 "content": [{"component": "VSwitch", "props": {"model": "clear_today",
-                             "label": "清理本日缓存",
-                             "hint": "打开并保存后清空今天的签到记录（一次性动作，会自动关闭），下一轮会重新签一遍",
-                             "persistent-hint": True}}]},
-            ]},
-            {"component": "VRow", "content": [
-                {"component": "VCol", "props": {"cols": 12, "md": 6},
-                 "content": [{"component": "VCronField", "props": {"model": "cron", "label": "执行周期",
-                             "placeholder": "5 位 Cron；例如 25 8 * * *"}}]},
-                {"component": "VCol", "props": {"cols": 12, "md": 6},
-                 "content": [{"component": "VTextField", "props": {"model": "concurrency", "label": "并发数",
-                             "type": "number", "min": 1, "max": 5,
-                             "hint": "Browserless 按额度计费，建议 1–2", "persistent-hint": True}}]},
-            ]},
-            {"component": "VRow", "content": [
-                {"component": "VCol", "props": {"cols": 12, "md": 6},
-                 "content": [{"component": "VTextField", "props": {"model": "retry_count",
-                             "label": "失败重试次数", "type": "number", "min": 0, "max": 5,
-                             "hint": "0 为关闭，默认 1 次", "persistent-hint": True}}]},
-                {"component": "VCol", "props": {"cols": 12, "md": 6},
-                 "content": [{"component": "VTextField", "props": {"model": "retry_delay_minutes",
-                             "label": "失败后等待分钟数", "type": "number", "min": 1, "max": 1440,
-                             "hint": "仅失败站点重试前等待；默认 10 分钟", "persistent-hint": True}}]},
-            ]},
-            {"component": "VRow", "content": [
-                {"component": "VCol", "props": {"cols": 12, "md": 6},
-                 "content": [{"component": "VTextField", "props": {"model": "timeout",
-                             "label": "HTTP 超时（秒）", "type": "number", "min": 5, "max": 120}}]},
-                {"component": "VCol", "props": {"cols": 12, "md": 6},
-                 "content": [{"component": "VSwitch", "props": {"model": "read_activity",
-                             "label": "读取「最近动向」",
-                             "hint": "用站点 Cookie（配置了账号时会真实登录换回新 Cookie）打开用户页 / 签到页，"
-                                     "抓取「最近动向」写入详情页的登录状态表", "persistent-hint": True}}]},
-            ]},
-            {"component": "VRow", "content": [
-                {"component": "VCol", "props": {"cols": 12},
-                 "content": [{"component": "VSelect", "props": {"model": "site_ids", "label": "签到站点",
-                             "items": options, "multiple": True, "chips": True, "clearable": True,
-                             "hint": "选择全部后自动包含后续新增站点",
-                             "persistent-hint": True}}]},
-            ]},
-            {"component": "VRow", "content": [
-                {"component": "VCol", "props": {"cols": 12},
-                 "content": [{"component": "VSelect", "props": {"model": "login_site_ids", "label": "登录站点",
-                             "items": options, "multiple": True, "chips": True, "clearable": True,
-                             "hint": "选择全部后自动包含后续新增站点；与签到站点同时选中时两件事都执行"
-                                     "（一轮完成真实登录 + 签到 + 读最近动向，不会重复登录）",
-                             "persistent-hint": True}}]},
-            ]},
-            {"component": "VRow", "content": [
-                {"component": "VCol", "props": {"cols": 12, "md": 4},
-                 "content": [{"component": "VTextField", "props": {"model": "browserless_url",
-                             "label": "Browserless 地址", "placeholder": DEFAULT_BROWSERLESS_URL,
-                             "hint": "根地址或完整 /stealth/bql 地址", "persistent-hint": True}}]},
-                {"component": "VCol", "props": {"cols": 12, "md": 4},
-                 "content": [{"component": "VTextField", "props": {"model": "browserless_token",
-                             "label": "Browserless Token", "type": "password",
-                             "hint": "仅 Browserless 引擎需要，不会写入日志", "persistent-hint": True}}]},
-                {"component": "VCol", "props": {"cols": 12, "md": 4},
-                 "content": [{"component": "VTextField", "props": {"model": "browserless_timeout",
-                             "label": "Browserless 超时（秒）", "type": "number", "min": 15, "max": 300,
-                             "hint": "自动不低于页面内等待预算，建议 120–180", "persistent-hint": True}}]},
-            ]},
-            {"component": "VRow", "content": [
-                {"component": "VCol", "props": {"cols": 12},
-                 "content": [{"component": "VAlert", "props": {"type": "info", "variant": "tonal",
-                             "density": "compact", "class": "mb-2"},
-                             "content": [{"component": "span", "text": "需要图片验证码 / Cloudflare / Turnstile 的站点（内置预设已声明）自动走 Browserless，其余站点走 HTTP 直连不消耗额度。没有 Token 请先 "},
-                                         {"component": "a", "props": {
-                                             "href": "https://www.browserless.io/signup/email?plan=free",
-                                             "target": "_blank", "rel": "noopener noreferrer"},
-                                          "text": "注册 Browserless"},
-                                         {"component": "span", "text": "，再在 "},
-                                         {"component": "a", "props": {"href": "https://browserless.io/account/",
-                                                                      "target": "_blank",
-                                                                      "rel": "noopener noreferrer"},
-                                          "text": "账户控制台"},
-                                         {"component": "span", "text": " 复制 API Key。"}]}]},
-            ]},
-            {"component": "VRow", "content": [
-                {"component": "VCol", "props": {"cols": 12},
-                 "content": [{"component": "VTextarea", "props": {"model": "site_rules",
-                             "label": "自定义站点规则 JSON（可留空）", "rows": 6,
-                             "hint": '键为域名或站点 ID。HTTP：{"path":"/attendance.php","success":"正则","already":"正则"}；'
-                                     'Browserless：{"engine":"browserless","mode":"cloudflare|image|trigger_image|altcha|open_page", ...}；'
-                                     '页面内嵌 Turnstile、验证通过后由站点自己提交的站点（如观众）用 {"submit_method":"auto","solve_count":1}；'
-                                     'Cloudflare「Just a moment...」交互挑战默认等 10 秒自动放行，可用 {"cloudflare_wait": 20} 调大；'
-                                     '「最近动向」读不到时可加 {"activity_path":"/userdetails.php?id=1"}',
-                             "persistent-hint": True}}]},
-            ]},
-        ]}], self._config()
 
+        def field(kind: str, model: str, label: str, md: int = 6,
+                  **props: Any) -> Dict[str, Any]:
+            """一列表单控件。"""
+            return {"component": "VCol", "props": {"cols": 12, "md": md},
+                    "content": [{"component": kind,
+                                 "props": {"model": model, "label": label, **props}}]}
+
+        def hint_field(kind: str, model: str, label: str, hint: str, md: int = 6,
+                       **props: Any) -> Dict[str, Any]:
+            """带常驻提示的控件。"""
+            return field(kind, model, label, md, hint=hint, **{"persistent-hint": True, **props})
+
+        def row(*cols: Dict[str, Any]) -> Dict[str, Any]:
+            return {"component": "VRow", "content": list(cols)}
+
+        browserless_alert = {
+            "component": "VAlert",
+            "props": {"type": "info", "variant": "tonal", "density": "compact", "class": "mb-2"},
+            "content": [
+                {"component": "span", "text": "需要图片验证码 / Cloudflare / Turnstile 的站点（内置预设已声明）"
+                                              "自动走 Browserless，其余站点走 HTTP 直连、不消耗额度。没有 Token 请先 "},
+                {"component": "a", "props": {"href": "https://www.browserless.io/signup/email?plan=free",
+                                             "target": "_blank", "rel": "noopener noreferrer"},
+                 "text": "注册 Browserless"},
+                {"component": "span", "text": "，再到 "},
+                {"component": "a", "props": {"href": "https://browserless.io/account/",
+                                             "target": "_blank", "rel": "noopener noreferrer"},
+                 "text": "账户控制台"},
+                {"component": "span", "text": " 复制 API Key。"},
+            ]}
+
+        rules_hint = ('键为域名或站点 ID。HTTP：{"path":"/attendance.php","success":"正则","already":"正则"}；'
+                      'Browserless：{"engine":"browserless","mode":"cloudflare|image|trigger_image|altcha|open_page", ...}；'
+                      '页面内嵌 Turnstile、验证通过后由站点自己提交（如观众）用 {"submit_method":"auto"}；'
+                      '点签到后跳 WAF / Cloudflare 检测页时用 {"wait": 12000} 等它放行；'
+                      '「最近动向」读不到时可加 {"activity_path":"/userdetails.php?id=1"}')
+
+        return [{"component": "VForm", "content": [
+            row(field("VSwitch", "enabled", "启用插件", 4),
+                hint_field("VSwitch", "notify", "发送通知",
+                           "签到成功 / 登录成功 / 失败三项计数，有失败才附原因", 4),
+                hint_field("VSwitch", "run_once", "保存后立即执行一次",
+                           "保存后延后 3 秒在后台跑一轮，同样跳过今天已签到的站点", 4),
+                hint_field("VSwitch", "clear_today", "清理本日缓存",
+                           "打开并保存后清空今天的签到记录（一次性动作，会自动关闭），下一轮重新签", 4)),
+            row(field("VCronField", "cron", "执行周期",
+                      placeholder="5 位 Cron；例如 25 8 * * *"),
+                hint_field("VTextField", "concurrency", "并发数", "Browserless 按额度计费，建议 1–2",
+                           type="number", min=1, max=5)),
+            row(hint_field("VTextField", "retry_count", "失败重试次数", "0 为关闭，默认 1 次",
+                           type="number", min=0, max=5),
+                hint_field("VTextField", "retry_delay_minutes", "失败后等待分钟数",
+                           "仅失败站点重试前等待，默认 10 分钟", type="number", min=1, max=1440)),
+            row(field("VTextField", "timeout", "HTTP 超时（秒）", type="number", min=5, max=120),
+                hint_field("VSwitch", "read_activity", "读取「最近动向」",
+                           "用站点 Cookie（配置了账号时会真实登录换回新 Cookie）打开用户页 / 签到页，"
+                           "把「最近动向」写进登录状态表")),
+            row(field("VSelect", "site_ids", "签到站点", 12, items=options, multiple=True,
+                      chips=True, clearable=True, hint="选择全部后自动包含后续新增站点",
+                      **{"persistent-hint": True})),
+            row(field("VSelect", "login_site_ids", "登录站点", 12, items=options, multiple=True,
+                      chips=True, clearable=True,
+                      hint="选择全部后自动包含后续新增站点；与签到站点同时选中时一轮做完"
+                           "（真实登录 + 签到 + 读最近动向，不会重复登录）",
+                      **{"persistent-hint": True})),
+            row(field("VTextField", "browserless_url", "Browserless 地址", 4,
+                      placeholder=DEFAULT_BROWSERLESS_URL, hint="根地址或完整 /stealth/bql 地址",
+                      **{"persistent-hint": True}),
+                field("VTextField", "browserless_token", "Browserless Token", 4, type="password",
+                      hint="仅 Browserless 引擎需要，不会写入日志", **{"persistent-hint": True}),
+                field("VTextField", "browserless_timeout", "Browserless 超时（秒）", 4,
+                      type="number", min=15, max=300,
+                      hint="自动不低于页面内等待预算，建议 120–180", **{"persistent-hint": True})),
+            row({"component": "VCol", "props": {"cols": 12}, "content": [browserless_alert]}),
+            row({"component": "VCol", "props": {"cols": 12}, "content": [
+                {"component": "VTextarea",
+                 "props": {"model": "site_rules", "label": "自定义站点规则 JSON（可留空）",
+                           "rows": 6, "hint": rules_hint, "persistent-hint": True}}]}),
+        ]}], self._config()
 
     def get_page(self) -> List[dict]:
         """插件详情页：一行统计 + 「签到状态」「登录状态」两张方框表格（站点 / 今日 / 结果）。"""
@@ -434,16 +426,21 @@ class PTSiteSignIn(_PluginBase):
                      "text": "暂无签到记录；保存配置后点「保存后立即执行一次」，或等 Cron 触发。"}}]
         today = self._today_records(latest)
         summary = summarize_records(latest, self._selected_site_names())
+        last_run = max((str(row.get("ran_at") or "") for row in latest), default="")[5:16]
         page: List[dict] = [
             {"component": "style", "text": PAGE_STYLE},
-            {"component": "div", "props": {"class": "ptsignin-summary"}, "content": [
-                self._counter("站点", summary["total"], "info"),
-                self._counter("成功", summary["success"], "success"),
-                self._counter("失败", summary["failed"], "error"),
-                self._counter("未确认", summary["uncertain"], "warning"),
-                self._counter("未记录", summary["missing"], "warning"),
+            {"component": "div", "props": {"class": "ptsignin-stats"}, "content": [
+                self._stat("站点", summary["total"], "mdi-forum-outline", "info"),
+                self._stat("成功", summary["success"], "mdi-check-circle-outline", "success"),
+                self._stat("失败", summary["failed"], "mdi-alert-circle-outline", "error"),
+                self._stat("未确认", summary["uncertain"], "mdi-help-circle-outline", "warning"),
+                self._stat("未记录", summary["missing"], "mdi-minus-circle-outline", "grey"),
             ]},
         ]
+        if last_run:
+            page.append({"component": "div", "props": {"class": "ptsignin-updated"}, "content": [
+                {"component": "VIcon", "props": {"icon": "mdi-clock-outline", "size": "14"}},
+                {"component": "span", "text": f"上次执行 {last_run}"}]})
         page += self._status_table("签到状态", "mdi-calendar-check",
                                    self._section_site_names(False, history, latest),
                                    history, today, login_view=False)
@@ -461,12 +458,15 @@ class PTSiteSignIn(_PluginBase):
         return page
 
     @staticmethod
-    def _counter(label: str, value: int, color: str) -> Dict[str, Any]:
-        """一行统计里的小胶囊：数值为 0 时用灰色，别整页都在抢眼。"""
-        return {"component": "VChip",
-                "props": {"size": "small", "variant": "tonal", "label": True,
-                          "color": color if value else "grey"},
-                "text": f"{label} {value}"}
+    def _stat(label: str, value: int, icon: str, color: str) -> Dict[str, Any]:
+        """顶部统计卡片：数值为 0 时整块变灰，不抢眼。"""
+        return {"component": "div", "props": {"class": "ptsignin-stat"}, "content": [
+            {"component": "VIcon", "props": {"icon": icon, "size": "20",
+                                             "color": color if value else "grey"}},
+            {"component": "div", "content": [
+                {"component": "div", "props": {"class": "ptsignin-stat-num"}, "text": str(value)},
+                {"component": "div", "props": {"class": "ptsignin-stat-label"}, "text": label}]},
+        ]}
 
     def _status_table(self, title: str, icon: str, names: List[str],
                       history: List[Dict[str, Any]], today: List[Dict[str, Any]],
@@ -483,9 +483,11 @@ class PTSiteSignIn(_PluginBase):
             if belongs(row):
                 current.setdefault(str(row.get("site") or "未知站点"), row)
         header = {"component": "div", "props": {"class": "ptsignin-section"}, "content": [
-            {"component": "VIcon", "props": {"icon": icon, "size": "18", "class": "mr-1"}},
-            {"component": "span", "props": {"class": "text-subtitle-1 font-weight-bold"},
-             "text": f"{title}（{len(names)}）"},
+            {"component": "span", "props": {"class": "ptsignin-section-icon"},
+             "content": [{"component": "VIcon", "props": {"icon": icon, "size": "16"}}]},
+            {"component": "span", "props": {"class": "text-subtitle-1 font-weight-bold"}, "text": title},
+            {"component": "VChip", "props": {"size": "x-small", "variant": "tonal", "color": "grey"},
+             "text": str(len(names))},
         ]}
         if not names:
             return [header, {"component": "VAlert",

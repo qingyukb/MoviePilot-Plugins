@@ -74,13 +74,17 @@ CAPTCHA_PATTERN = (
     r"|name\s*=\s*[\"']?(?:imagestring|imagehash|verifycode|imagecode|answer|captcha)[\"']?"
     r"|验证码|驗證碼)"
 )
-# 签到奖励提取：按「获得 22 粒爆米花」「魔力值 +30」「签到已得 22」等常见文案取第一个命中（含繁体）
+# 签到奖励：单位 / 数量 / 动词抽成常量共用，新增币种只改 BONUS_UNITS 一处
+BONUS_UNITS = "魔力值|爆米花|积分|做种积分|金币|憨豆|金贝|奖励"
+BONUS_AMOUNT = r"[\d,]+(?:\.\d+)?"
+BONUS_COUNTERS = "个|粒|枚|点|個|顆"
+BONUS_VERBS = "获得|獲得|獲取"
 BONUS_PATTERNS = (
-    r"((?:获得|獲得|獲取)\s*[\d,]+(?:\.\d+)?\s*(?:个|粒|枚|点|個|顆)?\s*(?:魔力值|爆米花|积分|做种积分|金币|憨豆|金贝|奖励))",
-    r"([\d,]+(?:\.\d+)?\s*(?:个|粒|枚|点|個|顆)\s*(?:魔力值|爆米花|积分|做种积分|金币|憨豆|金贝))",
-    r"((?:魔力值|爆米花|积分|做种积分|金币|憨豆|金贝)\s*[:：]?\s*\+?\s*[\d,]+(?:\.\d+)?)",
-    r"\+([\d,]+(?:\.\d+)?)\s*(?:魔力值|爆米花|积分|做种积分|金币|憨豆|金贝)",
-    r"(?:签到已得|簽到已得)\s*([\d,]+)",
+    rf"((?:{BONUS_VERBS})\s*{BONUS_AMOUNT}\s*(?:{BONUS_COUNTERS})?\s*(?:{BONUS_UNITS}))",
+    rf"({BONUS_AMOUNT}\s*(?:{BONUS_COUNTERS})\s*(?:{BONUS_UNITS}))",
+    rf"((?:{BONUS_UNITS})\s*[:：]?\s*\+?\s*{BONUS_AMOUNT})",
+    rf"\+({BONUS_AMOUNT})\s*(?:{BONUS_UNITS})",
+    rf"(?:签到已得|簽到已得)\s*({BONUS_AMOUNT})",
 )
 DEFAULT_USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                       "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
@@ -846,7 +850,7 @@ def judge_http(content: str, rule: Mapping[str, Any]) -> SignResult:
     # 兜底：主正则没命中，但页面出现了「已领取 / 本次签到 / 签到获得」这类签到后的状态字样，
     # 且页面上已经没有「立即签到」之类的按钮，就按已签到处理，别让正常签到报失败。
     if not login_page(content) and not cloudflare_pending(content) \
-            and not re.search(VSIGNIN_ACTION_PATTERN, visible):
+            and not re.search(SIGNIN_ACTION_PATTERN, visible):
         for match in re.finditer(STATE_HINT_PATTERN, visible, re.IGNORECASE):
             window = visible[max(0, match.start() - 50):match.start()]
             if re.search(RULE_CONTEXT_PATTERN, window):
@@ -892,7 +896,7 @@ STATE_HINT_PATTERN = (r"(已签到|已簽到|今日已签|今天已签|已领取
                       r"不要重复签到|无需重复签到|already|signed in)")
 RULE_CONTEXT_PATTERN = r"(规则|規則|說明|说明|首次|连续签到第|若|如果|条件|條件|奖励说明|奖励规则)"
 # 页面上还留着「立即签到」这类按钮，说明这次没签上，不能按已签到处理
-VSIGNIN_ACTION_PATTERN = r"(立即签到|点击签到|點擊簽到|去签到|前往签到|马上签到|开始签到)"
+SIGNIN_ACTION_PATTERN = r"(立即签到|点击签到|點擊簽到|去签到|前往签到|马上签到|开始签到)"
 
 # 站点常见的时间格式（NexusPHP 多为 YYYY-MM-DD HH:MM:SS）
 DATETIME_PATTERN = r"(\d{4}[-/.]\d{1,2}[-/.]\d{1,2}(?:[ T]\d{1,2}:\d{2}(?::\d{2})?)?)"
@@ -915,8 +919,8 @@ _INPUT_RE = re.compile(r"<input\b[^>]*>", re.IGNORECASE)
 _ATTR_RE = re.compile(r"([a-zA-Z_:][-a-zA-Z0-9_:.]*)\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)")
 _UID_RE = re.compile(r"userdetails\.php\?id=(\d+)", re.IGNORECASE)
 # 「获得 87 点魔力值」这类明确的奖励句子（静默成功时只用它，避免误抓侧栏统计数字）
-REWARD_SENTENCE_PATTERN = (r"((?:获得|獲得|獲取|签到已得|簽到已得)\s*[\d,]+(?:\.\d+)?"
-                           r"\s*(?:个|粒|枚|点|個|顆)?\s*(?:魔力值|爆米花|积分|做种积分|金币|憨豆|金贝|奖励))")
+REWARD_SENTENCE_PATTERN = (rf"((?:{BONUS_VERBS}|签到已得|簽到已得)\s*{BONUS_AMOUNT}"
+                           rf"\s*(?:{BONUS_COUNTERS})?\s*(?:{BONUS_UNITS}))")
 
 
 @dataclass(frozen=True)
