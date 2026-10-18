@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 DEFAULT_HTTP_PATH = "/attendance.php"
 DEFAULT_SUCCESS_PATTERN = (r"(state['\"]?\s*[:=]\s*['\"]?success|签到成功|簽到成功|签到 成功|"
                           r"成功签到|签到完成|簽到完成|领取成功|領取成功|签到已成功)")
-DEFAULT_ALREADY_PATTERN = (r"(今日已签|今天已签|已连续签到|连续签到|已经签到|已签到过|已签到|已簽到|"
+DEFAULT_ALREADY_PATTERN = (r"(今日已签|今天已签|已连续签到|已经签到|已签到过|已签到|已簽到|"
                            r"不要重复签到|无需重复签到|already|signed in today)")
 COOKIE_INVALID_PATTERN = r"(用户登录|會員登入|请先登录|请登录|login\.php)"
 # Cloudflare 挑战页特征（出现即说明请求未穿透盾，需改用 Browserless）
