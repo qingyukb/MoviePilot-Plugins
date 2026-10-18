@@ -437,12 +437,15 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertIn("获得405个憨豆", result.message)
 
     def test_piggo_preset(self):
-        # Piggo 整站在 Cloudflare 后面，按 NexusPHP 通用签到页处理
+        # Piggo 开站先过 Cloudflare 勾选验证，点签到后还有雷池检测；按钮按文字点击
         rule = self.core.resolve_rule({"url": "https://piggo.me/", "cookie": "c=1"}, {})
         self.assertEqual(rule["engine"], "browserless")
+        self.assertEqual(rule["mode"], "cloudflare")
+        self.assertEqual(rule["cloudflare_wait"], 25)
         self.assertEqual(rule["path"], "/index.php")
         self.assertEqual(rule["submit_text"], "签到")
-        self.assertEqual(rule["wait"], 12000)
+        self.assertEqual(rule["submit_method"], "dom_click")
+        self.assertEqual(rule["wait"], 15000)
 
     def test_waf_page_is_treated_as_challenge(self):
         # 雷池（SafeLine）WAF 安全检测页：按挑战处理，交给浏览器重试

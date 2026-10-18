@@ -93,11 +93,14 @@ PAGE_STYLE = (
     ".ptsignin-stat-label{font-size:.72rem;line-height:1.2;color:rgba(var(--v-theme-on-surface),.62)}"
     ".ptsignin-updated{display:flex;align-items:center;gap:6px;margin-bottom:8px;font-size:.75rem;"
     "color:rgba(var(--v-theme-on-surface),.55)}"
-    # 区块标题：小圆角图标 + 标题 + 数量
+    # 区块标题：一个带图标的胶囊
     ".ptsignin-section{display:flex;align-items:center;gap:8px;margin:18px 0 8px}"
-    ".ptsignin-section-icon{display:inline-flex;align-items:center;justify-content:center;width:24px;"
-    "height:24px;border-radius:8px;background:rgba(var(--v-theme-primary),.12);"
-    "color:rgb(var(--v-theme-primary))}"
+    # 统计数字配色（插件页里独立 VIcon 不渲染，颜色靠文字自己带）
+    ".ptsignin-num-info{color:rgb(var(--v-theme-info,33,150,243))}"
+    ".ptsignin-num-success{color:#4caf50}"
+    ".ptsignin-num-error{color:#ef5350}"
+    ".ptsignin-num-warning{color:#fb8c00}"
+    ".ptsignin-num-grey{color:rgba(var(--v-theme-on-surface),.38)}"
     # 表格：圆角 + 轻阴影 + 斑马纹 + 悬停高亮，两张表列宽一致、逐列对齐
     ".ptsignin-table-wrap{border:1px solid rgba(var(--v-theme-on-surface),.10);border-radius:12px;"
     "overflow:hidden;box-shadow:0 1px 2px rgba(0,0,0,.05)}"
@@ -147,7 +150,7 @@ class PTSiteSignIn(_PluginBase):
     plugin_name = "PT站点签到"
     plugin_desc = ("PT 站点自动签到，可登录刷新 Cookie 并读取最近动向；遇到验证码或 Cloudflare 会自动改用浏览器。")
     plugin_icon = "signin.png"
-    plugin_version = "1.6.4"
+    plugin_version = "1.6.5"
     plugin_author = "qingyukb"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "ptsignin_"
@@ -454,17 +457,16 @@ class PTSiteSignIn(_PluginBase):
         page: List[dict] = [
             {"component": "style", "text": PAGE_STYLE},
             {"component": "div", "props": {"class": "ptsignin-stats"}, "content": [
-                self._stat("站点", summary["total"], "mdi-forum-outline", "info"),
-                self._stat("成功", summary["success"], "mdi-check-circle-outline", "success"),
-                self._stat("失败", summary["failed"], "mdi-alert-circle-outline", "error"),
-                self._stat("未确认", summary["uncertain"], "mdi-help-circle-outline", "warning"),
-                self._stat("未记录", summary["missing"], "mdi-minus-circle-outline", "grey"),
+                self._stat("站点", summary["total"], "info"),
+                self._stat("成功", summary["success"], "success"),
+                self._stat("失败", summary["failed"], "error"),
+                self._stat("未确认", summary["uncertain"], "warning"),
+                self._stat("未记录", summary["missing"], "grey"),
             ]},
         ]
         if last_run:
-            page.append({"component": "div", "props": {"class": "ptsignin-updated"}, "content": [
-                {"component": "VIcon", "props": {"icon": "mdi-clock-outline", "size": "14"}},
-                {"component": "span", "text": f"上次执行 {last_run}"}]})
+            page.append({"component": "div", "props": {"class": "ptsignin-updated"},
+                         "text": f"上次执行 {last_run}"})
         page += self._status_table("签到状态", "mdi-calendar-check",
                                    self._section_site_names(False, history, latest),
                                    history, today, login_view=False)
@@ -482,13 +484,13 @@ class PTSiteSignIn(_PluginBase):
         return page
 
     @staticmethod
-    def _stat(label: str, value: int, icon: str, color: str) -> Dict[str, Any]:
-        """顶部统计卡片：数值为 0 时整块变灰，不抢眼。"""
+    def _stat(label: str, value: int, color: str) -> Dict[str, Any]:
+        """顶部统计卡片：数字按状态着色，0 时变灰；插件页里独立图标不渲染，所以只留数字与说明。"""
+        tone = color if value else "grey"
         return {"component": "div", "props": {"class": "ptsignin-stat"}, "content": [
-            {"component": "VIcon", "props": {"icon": icon, "size": "20",
-                                             "color": color if value else "grey"}},
             {"component": "div", "content": [
-                {"component": "div", "props": {"class": "ptsignin-stat-num"}, "text": str(value)},
+                {"component": "div", "props": {"class": f"ptsignin-stat-num ptsignin-num-{tone}"},
+                 "text": str(value)},
                 {"component": "div", "props": {"class": "ptsignin-stat-label"}, "text": label}]},
         ]}
 
@@ -507,12 +509,11 @@ class PTSiteSignIn(_PluginBase):
         for row in today:
             if belongs(row):
                 current.setdefault(str(row.get("site") or "未知站点"), row)
+        # 独立 VIcon 在插件页里不渲染，图标改用 chip 自带的 prepend-icon
         header = {"component": "div", "props": {"class": "ptsignin-section"}, "content": [
-            {"component": "span", "props": {"class": "ptsignin-section-icon"},
-             "content": [{"component": "VIcon", "props": {"icon": icon, "size": "16"}}]},
-            {"component": "span", "props": {"class": "text-subtitle-1 font-weight-bold"}, "text": title},
-            {"component": "VChip", "props": {"size": "x-small", "variant": "tonal", "color": "grey"},
-             "text": str(len(names))},
+            {"component": "VChip", "props": {"size": "small", "variant": "tonal", "color": "primary",
+                                             "prepend-icon": icon},
+             "text": f"{title}（{len(names)}）"},
         ]}
         if not names:
             return [header, {"component": "VAlert",
