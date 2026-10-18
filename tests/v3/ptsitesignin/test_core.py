@@ -481,7 +481,7 @@ class CoreRegressionTests(unittest.TestCase):
         # SUNNYPT：头像菜单里的「立即签到」，点完只有 toast，点到就算成功
         rule = self.core.resolve_rule({"url": "https://sunnypt.top/", "cookie": "c=1"}, {})
         self.assertEqual(rule["engine"], "browserless")
-        self.assertEqual(rule["path"], "/")
+        self.assertEqual(rule["path"], "/home")
         self.assertEqual(rule["submit_text"], "立即签到")
         self.assertIn("avatar", rule.get("pre_click_selector"))   # 先点头像展开菜单
         self.assertTrue(rule.get("success_on_click"))

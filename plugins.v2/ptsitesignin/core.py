@@ -253,7 +253,8 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
     "sunnypt.top": {
         "engine": "browserless",
         "mode": "open_page",
-        "path": "/",
+        # 签到在 /home 页（面板页），头像菜单里的「立即签到」
+        "path": "/home",
         # 签到项要点开头像才渲染出来，先点头像再点「立即签到」
         "pre_click_selector": ("[class*=avatar], [class*=Avatar], header img, .user-avatar, "
                                ".header-avatar, .el-dropdown, [class*=dropdown-toggle]"),
