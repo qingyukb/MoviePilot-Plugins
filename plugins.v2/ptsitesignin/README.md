@@ -41,7 +41,9 @@ MoviePilot 的 PT 站点自动签到插件，支持 V2 / V3。
   "success": "签到成功|已签到", "bonus": "(获得\\s*[\\d,]+\\s*粒爆米花)"}}
 ```
 
-常用字段：`engine`（http / browserless）、`method`、`path`、`submit_text`、`success`、`already`、`absent_keywords`、`success_on_click`、`bonus`、`activity_path`。抓规则用 `tools/collect-rule-snippet.js`。
+常用字段：`engine`（http / browserless）、`method`、`path`、`submit_text`、`pre_click_selector`、`success`、`already`、`absent_keywords`、`success_on_click`、`bonus`、`activity_path`。
+
+抓规则：登录后打开签到页，F12 控制台粘贴 `tools/collect-rule-snippet.js`（会挂上监听），点一次签到按钮，再执行 `__ptsigninDump()`——输出的 JSON 里有按钮元素、签到请求和点完之后的页面状态。
 
 ## Browserless Token
 

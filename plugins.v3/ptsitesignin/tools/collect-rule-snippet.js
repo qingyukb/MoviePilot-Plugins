@@ -1,108 +1,131 @@
 /**
- * PT站点签到插件 —— 站点规则采集脚本
+ * PT站点签到插件 —— 站点规则采集脚本（两段式）
+ *
+ * 为什么分两段：光看页面 DOM 只能知道按钮长什么样，不点到、不抓到那个请求，
+ * 就没法确定签到到底发给谁、成功后页面变成什么。所以要先把监听挂上，再点一次签到。
  *
  * 用法：
- *   1. 浏览器登录目标 PT 站，打开【签到页面】（不是首页，是真正点签到的那个页面）
- *   2. F12 打开开发者工具 → Console 标签
- *   3. 整段粘贴本脚本 → 回车
- *   4. 复制输出的 JSON，发给我，我据此生成站点规则
+ *   1. 浏览器登录目标站，打开签到页（按钮在菜单里的，先别展开）
+ *   2. F12 → Console，整段粘贴本脚本，回车（会出现「已挂好监听」）
+ *   3. 点一次签到按钮（该展开菜单的照常展开、照常点）
+ *   4. 回到 Console 执行：__ptsigninDump()
+ *   5. 把输出的 JSON 发出来即可
  *
- * 说明：
- *   - 本脚本只读取页面 DOM，不会发起任何请求，不会读取或输出 Cookie
- *   - 如果签到按钮需要登录后才显示，请务必先登录再执行
+ * 只监听，不改页面逻辑；不会读取或输出 Cookie；请求体超过 600 字会截断。
  */
 (() => {
-  const pick = (el) => {
-    if (!el) return null;
+  const MAX = 600;
+  const state = {
+    startedAt: new Date().toISOString(),
+    before: (document.body.innerText || "").replace(/\s+/g, " ").trim().slice(0, 1500),
+    clicks: [],
+    requests: [],
+  };
+  window.__ptsigninCollector = state;
+
+  const selectorOf = (el) => {
+    if (!el || el.nodeType !== 1) return "";
     if (el.id) return "#" + el.id;
-    if (el.getAttribute("name")) return `${el.tagName.toLowerCase()}[name='${el.getAttribute("name")}']`;
-    const cls = [...el.classList].slice(0, 2).map((c) => "." + c).join("");
-    return cls ? el.tagName.toLowerCase() + cls : el.tagName.toLowerCase();
+    const cls = [...el.classList].slice(0, 3).map((c) => "." + c).join("");
+    const attr = el.getAttribute("name") ? `[name='${el.getAttribute("name")}']` : "";
+    return el.tagName.toLowerCase() + cls + attr;
   };
-  const text = (el) => (el.value || el.textContent || "").trim().replace(/\s+/g, " ").slice(0, 30);
+  const textOf = (el) => ((el && (el.value || el.textContent)) || "").trim().replace(/\s+/g, " ").slice(0, 60);
+  const trim = (value) => String(value || "").slice(0, MAX);
 
-  const buttons = [...document.querySelectorAll("input[type=submit], button, a.btn, a[href*='sign'], a[onclick]")]
-    .filter((el) => /签到|簽到|打卡|领取|領取|立即|提交/.test(text(el)));
+  // 1) 抓点击：记下点了谁、按钮长什么样、页面上有哪些可点的元素（菜单项可能就是后面才渲染的）
+  document.addEventListener("click", (event) => {
+    const el = event.target;
+    if (!el || state.clicks.length >= 6) return;
+    state.clicks.push({
+      selector: selectorOf(el),
+      text: textOf(el),
+      tag: el.tagName,
+      html: trim((el.outerHTML || "").replace(/\s+/g, " ")),
+      parentHtml: trim(((el.parentElement && el.parentElement.outerHTML) || "").replace(/\s+/g, " ")),
+      at: new Date().toISOString(),
+    });
+  }, true);
 
-  const captchaImgs = [...document.querySelectorAll("img")]
-    .filter((i) => /captcha|verify|code|imagestring|checkcode/i.test(i.src + i.id + i.className));
-
-  const captchaInputs = [...document.querySelectorAll("input")]
-    .filter((i) => /imagestring|captcha|verify|code|checkcode/i.test(i.name + i.id));
-
-  // Turnstile / 人机验证现场：widget 怎么渲染的、token 落在哪里、有没有可调的回调、
-  // 有没有提交按钮或表单——决定插件该用 auto（两段式注入提交）还是别的提交方式。
-  const turnstile = (() => {
-    const roots = [document];
-    for (let index = 0; index < roots.length; index += 1) {
-      roots[index].querySelectorAll("*").forEach((el) => {
-        if (el.shadowRoot) roots.push(el.shadowRoot);
-      });
-    }
-    const pickAll = (selector) => {
-      const found = [];
-      roots.forEach((root) => {
-        root.querySelectorAll(selector).forEach((node) => {
-          if (found.indexOf(node) < 0) found.push(node);
-        });
-      });
-      return found;
-    };
-    const widgets = pickAll(".cf-turnstile, [data-sitekey]");
-    const responses = pickAll('input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"]');
-    const callbackNodes = pickAll("[data-callback]");
-    const globals = [];
-    try {
-      Object.keys(window).forEach((key) => {
-        if (typeof window[key] === "function" && /turnstile|callback|verify|captcha/i.test(key)) {
-          globals.push(key);
-        }
-      });
-    } catch (err) { /* 跨域属性访问失败时忽略 */ }
-    return {
-      widgetCount: widgets.length,
-      widgetHtml: widgets.map((el) => (el.outerHTML || "").replace(/\s+/g, " ").slice(0, 240)),
-      dataCallback: callbackNodes.map((el) => el.getAttribute("data-callback")),
-      responseInputs: responses.map((el) => ({ sel: pick(el), valueLen: (el.value || "").length })),
-      openShadowRoots: roots.length - 1,
-      apiAvailable: !!(window.turnstile && typeof window.turnstile.getResponse === "function"),
-      apiTokenLen: (() => {
+  // 2) 抓 fetch
+  const originalFetch = window.fetch;
+  if (typeof originalFetch === "function") {
+    window.fetch = async function (...args) {
+      const request = args[0];
+      const init = args[1] || {};
+      const url = typeof request === "string" ? request : (request && request.url) || "";
+      const method = (init.method || (request && request.method) || "GET").toUpperCase();
+      let body = init.body;
+      if (body instanceof FormData) {
+        body = [...body.entries()].map(([k, v]) => `${k}=${trim(v)}`).join("&");
+      }
+      const record = { kind: "fetch", method, url: trim(url), body: trim(body) };
+      state.requests.push(record);
+      try {
+        const response = await originalFetch.apply(this, args);
+        record.status = response.status;
         try {
-          return window.turnstile && window.turnstile.getResponse
-            ? (window.turnstile.getResponse() || "").length : 0;
-        } catch (err) { return -1; }
-      })(),
-      candidateGlobals: globals.slice(0, 20),
-      submitButtons: [...document.querySelectorAll("input[type=submit], button[type=submit]")]
-        .map((el) => ({ sel: pick(el), text: text(el) })),
+          const clone = response.clone();
+          record.response = trim(await clone.text());
+        } catch (err) { /* 响应不可复制时忽略 */ }
+        return response;
+      } catch (error) {
+        record.error = String(error);
+        throw error;
+      }
     };
-  })();
+  }
 
-  const result = {
-    url: location.href,
-    title: document.title,
-    forms: [...document.querySelectorAll("form")].map((f) => ({
-      action: f.action,
-      method: (f.method || "get").toUpperCase(),
-      fields: [...f.querySelectorAll("input,select,textarea")].map((i) => i.name).filter(Boolean),
-      text: (f.textContent || "").replace(/\s+/g, " ").trim().slice(0, 80),
-    })),
-    buttons: buttons.map((b) => ({ sel: pick(b), text: text(b) })),
-    captchaImgs: captchaImgs.map((i) => ({ sel: pick(i), src: i.src.slice(0, 90) })),
-    captchaInputs: captchaInputs.map((i) => pick(i)),
-    turnstile,
-    signals: {
-      turnstile: !!document.querySelector(".cf-turnstile, iframe[src*='challenges.cloudflare.com']"),
-      cloudflare: !!document.querySelector("#cf-chl-widget, .cf-turnstile, iframe[src*='challenges.cloudflare.com']"),
-      recaptcha: !!document.querySelector(".g-recaptcha, iframe[src*='recaptcha']"),
-      altcha: !!document.querySelector("altcha-widget"),
-      hasImageCaptcha: captchaImgs.length > 0,
-      needLogin: /用户登录|會員登入|请先登录|login/i.test(document.body.innerText.slice(0, 3000)),
-    },
-    pageText: document.body.innerText.replace(/\s+/g, " ").trim().slice(0, 400),
+  // 3) 抓 XMLHttpRequest
+  const originalOpen = XMLHttpRequest.prototype.open;
+  const originalSend = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.open = function (method, url, ...rest) {
+    this.__ptsignin = { kind: "xhr", method: (method || "GET").toUpperCase(), url: trim(url) };
+    return originalOpen.call(this, method, url, ...rest);
+  };
+  XMLHttpRequest.prototype.send = function (body) {
+    const record = this.__ptsignin || { kind: "xhr" };
+    record.body = body instanceof FormData
+      ? [...body.entries()].map(([k, v]) => `${k}=${trim(v)}`).join("&")
+      : trim(body);
+    state.requests.push(record);
+    this.addEventListener("loadend", () => {
+      record.status = this.status;
+      try { record.response = trim(this.responseText); } catch (err) { /* 忽略 */ }
+    });
+    return originalSend.call(this, body);
   };
 
-  console.log(JSON.stringify(result, null, 2));
-  copy(JSON.stringify(result, null, 2)); // Chrome/Edge：自动复制到剪贴板
-  return "已输出并复制到剪贴板，直接粘贴给我即可";
+  // 4) 输出：点完之后执行 __ptsigninDump()
+  window.__ptsigninDump = () => {
+    const buttons = [...document.querySelectorAll("a, button, input[type=submit], [role='button'], [role='menuitem'], li")]
+      .filter((el) => /签到|簽到|打卡|领取|領取|立即/.test(textOf(el)))
+      .slice(0, 12)
+      .map((el) => ({ selector: selectorOf(el), text: textOf(el), html: trim((el.outerHTML || "").replace(/\s+/g, " ")) }));
+    const result = {
+      url: location.href,
+      title: document.title,
+      after: (document.body.innerText || "").replace(/\s+/g, " ").trim().slice(0, 1500),
+      clicks: state.clicks,
+      requests: state.requests.slice(0, 12),
+      signinButtons: buttons,
+      forms: [...document.querySelectorAll("form")].slice(0, 6).map((form) => ({
+        action: form.action,
+        method: (form.method || "get").toUpperCase(),
+        fields: [...form.querySelectorAll("input,select,textarea")].map((i) => i.name).filter(Boolean),
+      })),
+      signals: {
+        waf: /正在进行安全检测|雷池|SafeLine/i.test(document.body.innerText || ""),
+        cloudflare: !!document.querySelector("#cf-chl-widget, iframe[src*='challenges.cloudflare.com']"),
+        turnstile: !!document.querySelector(".cf-turnstile"),
+        imageCaptcha: !!document.querySelector("img[src*='captcha' i], img[src*='verify' i]"),
+      },
+    };
+    const payload = JSON.stringify(result, null, 2);
+    console.log(payload);
+    try { copy(payload); } catch (err) { /* 非 Chrome 时手动复制 */ }
+    return "已复制到剪贴板（若没自动复制，从上面的输出里全选复制）";
+  };
+
+  return "已挂好监听。现在点一次签到按钮，再执行 __ptsigninDump() 复制结果。";
 })();
