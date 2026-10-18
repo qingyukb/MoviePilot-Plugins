@@ -498,6 +498,29 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertEqual(self.core.extract_activity(html)["last_seen"],
                          "2026-10-17 11:20:33 ( 9分钟前 )")
 
+    def test_judge_http_falls_back_to_state_hint(self):
+        # 页面没有标准成功文案，但出现了签到后的状态字样 → 按已签到处理，别误报失败
+        result = self.core.judge_http("<html><body><div>已领取</div></body></html>", {})
+        self.assertEqual(result.status, "already")
+        self.assertIn("已领取", result.message)
+
+        # 带上奖励文案时一起取出来
+        result = self.core.judge_http(
+            "<html><body><div>这是您的第81次签到，本次签到获得410个憨豆</div></body></html>", {})
+        self.assertEqual(result.status, "already")
+        self.assertIn("410个憨豆", result.message)
+
+        # 页面上还留着「立即签到」按钮，说明这次没签上，不能按已签到处理
+        result = self.core.judge_http(
+            "<html><body><div>已领取</div><button>立即签到</button></body></html>", {})
+        self.assertEqual(result.status, "failed")
+
+        # 规则说明里的字样不算
+        result = self.core.judge_http(
+            "<html><body><div>签到规则：连续签到第 30 天额外奖励 1000 憨豆</div>"
+            "<button>立即签到</button></body></html>", {})
+        self.assertEqual(result.status, "failed")
+
     def test_fallback_rule_carries_cloudflare_wait(self):
         fallback = self.core.fallback_rule(
             {"engine": "http", "path": "/attendance.php", "cloudflare_wait": 25}, "cloudflare")

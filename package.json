@@ -3,7 +3,7 @@
     "name": "PT站点签到",
     "description": "PT 站点自动签到，可登录刷新 Cookie 并读取最近动向；遇到验证码或 Cloudflare 会自动改用浏览器。",
     "labels": "站点,签到",
-    "version": "1.5.11",
+    "version": "1.5.12",
     "icon": "https://cdn.jsdelivr.net/gh/qingyukb/MoviePilot-Plugins@main/icons/ptsignin.png",
     "author": "qingyukb",
     "level": 2,
@@ -11,6 +11,7 @@
     "v2": true,
     "system_version": ">=2.0.0",
     "history": {
+      "v1.5.12": "签到判定放宽：页面出现「已领取」「本次签到」等状态字样时按已签到处理，不再误报找不到成功标志",
       "v1.5.11": "憨憨签完没有提示也能正确判定：点到签到按钮就算成功，奖励照常显示",
       "v1.5.10": "支持憨憨（hhanclub）日历式签到，奖励显示「本次签到获得 N 个憨豆」",
       "v1.5.9": "最近动向的 id 改用 Cookie 里的 uid，不再读到别人的资料页",

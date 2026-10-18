@@ -19,8 +19,10 @@ from html import unescape as _html_unescape
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 DEFAULT_HTTP_PATH = "/attendance.php"
-DEFAULT_SUCCESS_PATTERN = r"(state['\"]?\s*[:=]\s*['\"]?success|签到成功|簽到成功|签到 成功)"
-DEFAULT_ALREADY_PATTERN = r"(今日已签|已连续签到|已经签到|已签到|已簽到|already)"
+DEFAULT_SUCCESS_PATTERN = (r"(state['\"]?\s*[:=]\s*['\"]?success|签到成功|簽到成功|签到 成功|"
+                          r"成功签到|签到完成|簽到完成|领取成功|領取成功|签到已成功)")
+DEFAULT_ALREADY_PATTERN = (r"(今日已签|今天已签|已连续签到|连续签到|已经签到|已签到过|已签到|已簽到|"
+                           r"不要重复签到|无需重复签到|already|signed in today)")
 COOKIE_INVALID_PATTERN = r"(用户登录|會員登入|请先登录|请登录|login\.php)"
 # Cloudflare 挑战页特征（出现即说明请求未穿透盾，需改用 Browserless）
 CLOUDFLARE_PATTERN = r"(just a moment|cf-chl-widget|cf_chl_opt|challenge-platform)"
@@ -767,6 +769,18 @@ def judge_http(content: str, rule: Mapping[str, Any]) -> SignResult:
         prefix = "签到成功" if status == "success" else "今日已签到"
         bonus = extract_reward_sentence(text)
         return SignResult(status, f"{prefix}（{bonus}）" if bonus else prefix)
+    # 兜底：主正则没命中，但页面出现了「已领取 / 本次签到 / 签到获得」这类签到后的状态字样，
+    # 且页面上已经没有「立即签到」之类的按钮，就按已签到处理，别让正常签到报失败。
+    if not login_page(content) and not cloudflare_pending(content) \
+            and not re.search(VSIGNIN_ACTION_PATTERN, visible):
+        for match in re.finditer(STATE_HINT_PATTERN, visible, re.IGNORECASE):
+            window = visible[max(0, match.start() - 50):match.start()]
+            if re.search(RULE_CONTEXT_PATTERN, window):
+                continue
+            bonus = extract_reward_sentence(text) or extract_bonus(text, rule)
+            note = f"页面出现「{match.group(1)}」"
+            return SignResult("already",
+                              f"今日已签到（{note}，{bonus}）" if bonus else f"今日已签到（{note}）")
     return SignResult("failed", f"未匹配到签到成功标志；{page_hint(text)}")
 
 
@@ -796,6 +810,16 @@ ACTIVITY_KEYWORDS = ("最近动向", "最近動向", "最新动向", "最新動�
                      "最後上線", "最后活跃", "最後活躍", "最后造访", "最後造訪", "最近登入",
                      "最近登錄", "最近上线", "最近上線", "最近活跃", "最近活躍", "最后在线",
                      "最後在線")
+# 兜底判定：主正则都没命中时，再看一遍页面里有没有「签到后的状态」字样。
+# 很多站点用「已领取 / 本次签到 / 签到获得 / 已签」这类写法，或者把文案放在说明里，
+# 所以下面会排除「规则 / 说明 / 首次 / 若 / 如果」附近的命中，避免把规则当成结果。
+STATE_HINT_PATTERN = (r"(已签到|已簽到|今日已签|今天已签|已领取|已領取|领取成功|領取成功|"
+                      r"签到成功|簽到成功|成功签到|签到完成|本次签到|签到获得|已签到过|"
+                      r"不要重复签到|无需重复签到|already|signed in)")
+RULE_CONTEXT_PATTERN = r"(规则|規則|說明|说明|首次|连续签到第|若|如果|条件|條件|奖励说明|奖励规则)"
+# 页面上还留着「立即签到」这类按钮，说明这次没签上，不能按已签到处理
+VSIGNIN_ACTION_PATTERN = r"(立即签到|点击签到|點擊簽到|去签到|前往签到|马上签到|开始签到)"
+
 # 站点常见的时间格式（NexusPHP 多为 YYYY-MM-DD HH:MM:SS）
 DATETIME_PATTERN = r"(\d{4}[-/.]\d{1,2}[-/.]\d{1,2}(?:[ T]\d{1,2}:\d{2}(?::\d{2})?)?)"
 # 没有关键词命中时用的严格时间格式：必须带时分。裸日期（2026-09-18）在种子列表、

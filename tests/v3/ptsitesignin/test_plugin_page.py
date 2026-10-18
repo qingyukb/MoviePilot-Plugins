@@ -166,6 +166,12 @@ def chip_labels(page):
 
 
 class PagePluginTests(unittest.TestCase):
+    """详情页渲染逻辑。"""
+
+    @staticmethod
+    def _today(hhmmss: str = "08:30:00") -> str:
+        """今天的时间戳，页面按日期取当天记录，写死日期会随日期变化失效。"""
+        return datetime.now().strftime("%Y-%m-%d") + " " + hhmmss
     def setUp(self):
         self.plugin_module = PLUGINS[0]
         self.plugin = self._make({})
@@ -197,10 +203,10 @@ class PagePluginTests(unittest.TestCase):
     def test_get_page_renders_boxed_tables(self):
         latest = [
             {"site": "观众", "status": "success", "message": "签到成功（获得 20 粒爆米花）",
-             "engine": "browserless", "ran_at": "2026-10-17 08:30:00", "login": "",
+             "engine": "browserless", "ran_at": self._today("08:30:00"), "login": "",
              "activity": ""},
             {"site": "学校", "status": "login", "message": "成功（已换用新 Cookie）",
-             "engine": "http", "ran_at": "2026-10-17 08:30:00", "login": "",
+             "engine": "http", "ran_at": self._today("08:30:00"), "login": "",
              "activity": "2026-10-17 07:12:03 ( < 1分前 )"},
         ]
         page, _ = self._page(latest, history=latest)
@@ -229,12 +235,12 @@ class PagePluginTests(unittest.TestCase):
 
     def test_signin_result_prefers_bonus_field(self):
         latest = [{"site": "AGSVPT", "status": "success", "message": "签到成功（65,）",
-                   "bonus": "获得 65", "ran_at": "2026-10-17 03:20:02", "engine": "http"}]
+                   "bonus": "获得 65", "ran_at": self._today("03:20:02"), "engine": "http"}]
         page, _ = self._page(latest, history=latest)
         self.assertIn(("AGSVPT", "签到成功", "获得 65"), row_pairs(page))
 
     def test_dual_site_shows_in_both_tables(self):
-        latest = [{"site": "观众", "status": "already", "ran_at": "2026-10-17 03:11:49",
+        latest = [{"site": "观众", "status": "already", "ran_at": self._today("03:11:49"),
                    "message": "今日已经签到（获得 20 粒爆米花）", "bonus": "获得 20 粒爆米花",
                    "login": "复用站点管理 Cookie", "activity": "2026-10-17 03:11:47",
                    "dual": True, "login_status": "login"}]
@@ -245,7 +251,7 @@ class PagePluginTests(unittest.TestCase):
 
     def test_dual_login_failure_marks_login_section(self):
         latest = [{"site": "观众", "status": "success", "message": "签到成功", "bonus": "获得 6",
-                   "ran_at": "2026-10-17 08:30:00", "login": "失败：账号或密码错误",
+                   "ran_at": self._today("08:30:00"), "login": "失败：账号或密码错误",
                    "dual": True, "login_status": "login_failed"}]
         page, _ = self._page(latest, history=latest)
         pairs = row_pairs(page)
@@ -303,7 +309,7 @@ class PagePluginTests(unittest.TestCase):
 
     def test_activity_entities_decoded_on_display(self):
         # 修复前存进历史的记录里是 `&lt;`，显示时要解码（不用等下一轮重抓）
-        latest = [{"site": "观众", "status": "already", "ran_at": "2026-10-17 03:52:21",
+        latest = [{"site": "观众", "status": "already", "ran_at": self._today("03:52:21"),
                    "message": "今日已经签到（获得 20 粒爆米花）", "bonus": "获得 20 粒爆米花",
                    "login": "复用站点管理 Cookie",
                    "activity": "2026-10-17 03:52:21 ( &lt; 1分前 )",
