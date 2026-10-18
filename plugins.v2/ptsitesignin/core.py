@@ -203,6 +203,29 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "path": "/attendance.php",
         "submit_selector": "form[action*='attendance.php'] input[type='submit']",
     },
+    # ---- TTG（totheglory.im）：没有 attendance.php，签到入口在站点页面上 ----
+    # 探测：/attendance.php、/signin.php、/checkin.php 都是 404，站点在 Cloudflare 后面，
+    # 所以走浏览器打开首页点「签到」。若你那边入口在别的页面，改 path 即可。
+    "totheglory.im": {
+        "engine": "browserless",
+        "mode": "open_page",
+        "path": "/index.php",
+        "submit_selector": "input[type='submit'], button, a, [role='button'], li, span",
+        "submit_text": "签到",
+        "success_keywords": ["签到成功", "簽到成功", "今日已签到", "本次签到"],
+        "already_keywords": ["今日已签到", "今天已签到", "已签到", "已簽到", "已领取"],
+    },
+    # ---- HDKylin（hdkyl.in）：NexusPHP，签到在 /attendance.php ----
+    # 站点在 Cloudflare 后面（访客请求直接 468），HTTP 直连多半要挑战，默认走浏览器。
+    "hdkyl.in": {
+        "engine": "browserless",
+        "mode": "open_page",
+        "path": "/attendance.php",
+        "submit_selector": "input[type='submit'], button, [role='button']",
+        "submit_text": "立即签到",
+        "success_keywords": ["签到成功", "簽到成功", "签到完成", "已签到"],
+        "already_keywords": ["今日已签到", "今天已签到", "已签到", "已簽到", "已领取"],
+    },
     # ---- SUNNYPT（sunnypt.top）：头像菜单里的「立即签到」，签完右下角弹提示 ----
     # 页面是 Vue 单页，签到项在头像下拉菜单里（默认隐藏，JS 点也能触发）；
     # 点完只有 toast，页面本身不留成功文案，所以按「点到了就算成功」处理。

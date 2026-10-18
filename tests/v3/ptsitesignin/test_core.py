@@ -436,6 +436,18 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertEqual(result.status, "already")
         self.assertIn("获得405个憨豆", result.message)
 
+    def test_ttg_and_hdkyl_presets(self):
+        # TTG 没有 attendance.php，签到入口在站点页面上；HDKylin 是 NexusPHP，签到在 /attendance.php
+        ttg = self.core.resolve_rule({"url": "https://totheglory.im/", "cookie": "c=1"}, {})
+        self.assertEqual(ttg["engine"], "browserless")
+        self.assertEqual(ttg["path"], "/index.php")
+        self.assertEqual(ttg["submit_text"], "签到")
+        for url in ("https://www.hdkyl.in/", "https://hdkyl.in/"):
+            hdk = self.core.resolve_rule({"url": url, "cookie": "c=1"}, {})
+            self.assertEqual(hdk["engine"], "browserless")
+            self.assertEqual(hdk["path"], "/attendance.php")
+            self.assertEqual(hdk["submit_text"], "立即签到")
+
     def test_sunnypt_menu_preset(self):
         # SUNNYPT：头像菜单里的「立即签到」，点完只有 toast，点到就算成功
         rule = self.core.resolve_rule({"url": "https://sunnypt.top/", "cookie": "c=1"}, {})
