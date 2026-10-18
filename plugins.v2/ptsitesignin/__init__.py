@@ -85,9 +85,19 @@ NOTIFY_REASON_LIMIT = 90      # 通知里每条失败原因最多这么长
 NOTIFY_LIMIT = 6              # 通知里最多列几条失败
 # 详情页样式（MoviePilot 插件页支持内联 style 组件）。
 PAGE_STYLE = (
-    # 顶部统计：一行小卡片，数值 + 说明，0 值自动变灰
+    # 整页实底卡片：手机上的弹层是半透明的，不铺底会透出后面的市场列表
+    ".ptsignin-page{background:rgb(var(--v-theme-surface));border-radius:14px;padding:14px 14px 6px;"
+    "max-width:100%;box-sizing:border-box;overflow-x:hidden;overflow-wrap:anywhere}"
+    # 顶部统计：桌面用卡片；手机用一行胶囊（见 @media）
     ".ptsignin-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(104px,1fr));"
     "gap:8px;margin:2px 0 10px}"
+    ".ptsignin-summary-line{display:none;flex-wrap:wrap;gap:6px;margin:2px 0 8px}"
+    # 手机放不下就横向滑动，别裁字
+    "@media (max-width:640px){"
+    ".ptsignin-summary-line{flex-wrap:nowrap;overflow-x:auto;overflow-y:hidden;"
+    "-webkit-overflow-scrolling:touch;padding-bottom:2px}"
+    ".ptsignin-summary-line::-webkit-scrollbar{height:0}"
+    "}"
     ".ptsignin-stat{display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:10px;"
     "border:1px solid rgba(var(--v-theme-on-surface),.10);background:rgba(var(--v-theme-on-surface),.03)}"
     ".ptsignin-stat-num{font-size:1.12rem;font-weight:700;line-height:1.1;font-variant-numeric:tabular-nums}"
@@ -121,28 +131,34 @@ PAGE_STYLE = (
     ".ptsignin-result{font-size:.84rem;line-height:1.45;word-break:break-word;"
     "font-variant-numeric:tabular-nums;display:-webkit-box;-webkit-line-clamp:3;"
     "-webkit-box-orient:vertical;overflow:hidden}"
-    # 手机：统计卡片两列、表格拆成一条条卡片，状态与结果紧跟站点名，不用左右滑
+    # 手机专用卡片列表：和桌面表格是两份渲染，CSS 切换，避免把 table 硬掰成 flex
+    ".ptsignin-list{display:none;width:100%;max-width:100%;box-sizing:border-box;"
+    "overflow-x:auto;-webkit-overflow-scrolling:touch}"
+    ".ptsignin-row{display:flex;flex-direction:column;gap:2px;"
+    "width:100%;max-width:100%;box-sizing:border-box;"
+    "margin-bottom:8px;padding:9px 12px;border-radius:10px;"
+    "border:1px solid rgba(var(--v-theme-on-surface),.10);"
+    "background:rgba(var(--v-theme-on-surface),.025)}"
+    ".ptsignin-row-head{display:flex;align-items:center;gap:8px;width:100%;min-width:0}"
+    ".ptsignin-row-site{flex:1 1 auto;min-width:0;font-weight:600;font-size:.92rem;"
+    "white-space:nowrap;overflow:hidden;text-overflow:ellipsis}"
+    ".ptsignin-row-status{flex:0 0 auto}"
+    ".ptsignin-row-result{width:100%;min-width:0;margin-top:2px;font-size:.8rem;line-height:1.45;"
+    "word-break:break-word;font-variant-numeric:tabular-nums;display:-webkit-box;"
+    "-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}"
     "@media (max-width:640px){"
-    ".ptsignin-stats{grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:6px}"
-    ".ptsignin-stat{padding:6px 8px;gap:6px;border-radius:8px}"
-    ".ptsignin-stat-num{font-size:.95rem}"
-    ".ptsignin-stat-label{font-size:.66rem}"
+    # 手机：统计换成一行胶囊，避免 5 张卡片换行排成 3+2
+    ".ptsignin-stats{display:none}"
+    ".ptsignin-summary-line{display:flex}"
+    ".ptsignin-page{padding:12px 10px 4px;border-radius:12px}"
     ".ptsignin-updated{margin-bottom:6px;font-size:.7rem}"
-    ".ptsignin-section{margin:14px 0 6px}"
-    ".ptsignin-table-wrap{border-radius:10px;box-shadow:none}"
-    ".ptsignin-table{display:block}"
-    ".ptsignin-table thead{display:none}"
-    ".ptsignin-table tbody,.ptsignin-table tr,.ptsignin-table td{display:block;width:auto}"
-    ".ptsignin-table tr{padding:10px 12px;border-bottom:1px solid rgba(var(--v-theme-on-surface),.08)}"
-    ".ptsignin-table tr:last-child{border-bottom:0}"
-    ".ptsignin-table td{padding:0;margin-top:3px}"
-    ".ptsignin-table td:first-child{margin-top:0}"
-    # 手机上状态胶囊必须一行显示，别被挤成两行
-    ".ptsignin-table td:nth-child(2){white-space:nowrap}"
-    ".ptsignin-site{font-size:.9rem}"
+    ".ptsignin-section{margin:14px 0 8px}"
+    # 桌面表格与手机卡片列表二选一
+    ".ptsignin-table-wrap{display:none;overflow-x:auto;-webkit-overflow-scrolling:touch}"
+    ".ptsignin-list{display:block}"
+    ".ptsignin-site{font-size:.92rem;line-height:1.3}"
     ".ptsignin-caption{margin-top:1px;font-size:.68rem;white-space:nowrap;overflow:hidden;"
     "text-overflow:ellipsis}"
-    ".ptsignin-result{font-size:.8rem;-webkit-line-clamp:4}"
     "}"
 )
 
@@ -151,7 +167,7 @@ class PTSiteSignIn(_PluginBase):
     plugin_name = "PT站点签到"
     plugin_desc = ("PT 站点自动签到，可登录刷新 Cookie 并读取最近动向；遇到验证码或 Cloudflare 会自动改用浏览器。")
     plugin_icon = "signin.png"
-    plugin_version = "1.6.9"
+    plugin_version = "1.6.10"
     plugin_author = "qingyukb"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "ptsignin_"
@@ -455,25 +471,33 @@ class PTSiteSignIn(_PluginBase):
         today = self._today_records(latest)
         summary = summarize_records(latest, self._selected_site_names())
         last_run = max((str(row.get("ran_at") or "") for row in latest), default="")[5:16]
-        page: List[dict] = [
-            {"component": "style", "text": PAGE_STYLE},
-            {"component": "div", "props": {"class": "ptsignin-stats"}, "content": [
-                self._stat("站点", summary["total"], "info"),
-                self._stat("成功", summary["success"], "success"),
-                self._stat("失败", summary["failed"], "error"),
-                self._stat("未确认", summary["uncertain"], "warning"),
-                self._stat("未记录", summary["missing"], "grey"),
-            ]},
+        # 同一份统计渲染两种形态：桌面是卡片，手机是胶囊（CSS 控制显示哪套）
+        metrics = [("站点", summary["total"], "info"),
+                   ("成功", summary["success"], "success"),
+                   ("失败", summary["failed"], "error"),
+                   ("未确认", summary["uncertain"], "warning"),
+                   ("未记录", summary["missing"], "grey")]
+        body: List[dict] = [
+            {"component": "div", "props": {"class": "ptsignin-stats"},
+             "content": [self._stat(label, value, color) for label, value, color in metrics]},
+            {"component": "div", "props": {"class": "ptsignin-summary-line"},
+             "content": [{"component": "VChip",
+                          "props": {"size": "x-small", "variant": "tonal",
+                                    "color": color if value else "grey"},
+                          "text": f"{label} {value}"} for label, value, color in metrics]},
         ]
         if last_run:
-            page.append({"component": "div", "props": {"class": "ptsignin-updated"},
+            body.append({"component": "div", "props": {"class": "ptsignin-updated"},
                          "text": f"上次执行 {last_run}"})
-        page += self._status_table("签到状态", "mdi-calendar-check",
+        body += self._status_table("签到状态", "mdi-calendar-check",
                                    self._section_site_names(False, history, latest),
                                    history, today, login_view=False)
-        page += self._status_table("登录状态", "mdi-login-variant",
+        body += self._status_table("登录状态", "mdi-login-variant",
                                    self._section_site_names(True, history, latest),
                                    history, today, login_view=True)
+        page: List[dict] = [{"component": "style", "text": PAGE_STYLE},
+                            {"component": "div", "props": {"class": "ptsignin-page"},
+                             "content": body}]
         recorded = {str(row.get("site") or "") for row in latest}
         missing = [name for name in self._selected_site_names() if name not in recorded]
         if missing:
@@ -521,6 +545,7 @@ class PTSiteSignIn(_PluginBase):
                              "props": {"type": "info", "variant": "tonal", "density": "compact"},
                              "text": "还没有站点；在设置里勾选「签到站点 / 登录站点」后重跑一次。"}]
         body = []
+        rows: List[Dict[str, Any]] = []
         for name in names:
             row = current.get(name)
             if row is None:
@@ -545,17 +570,36 @@ class PTSiteSignIn(_PluginBase):
                      "text": chip["label"]}]},
                 {"component": "td", "props": {"class": "ptsignin-result"}, "text": result},
             ]})
-        return [header, {"component": "div", "props": {"class": "ptsignin-table-wrap"},
-                         "content": [{"component": "VTable",
-                                      "props": {"density": "comfortable", "hover": True,
-                                                "class": "ptsignin-table"},
-                                      "content": [
-                                          {"component": "thead", "content": [
-                                              {"component": "tr", "content": [
-                                                  {"component": "th", "text": "站点"},
-                                                  {"component": "th", "text": "状态"},
-                                                  {"component": "th", "text": "结果"}]}]},
-                                          {"component": "tbody", "content": body}]}]}]
+            rows.append({"site": name, "caption": caption, "chip": chip, "result": result})
+        table = {"component": "div", "props": {"class": "ptsignin-table-wrap"},
+                 "content": [{"component": "VTable",
+                              "props": {"density": "comfortable", "hover": True,
+                                        "class": "ptsignin-table"},
+                              "content": [
+                                  {"component": "thead", "content": [
+                                      {"component": "tr", "content": [
+                                          {"component": "th", "text": "站点"},
+                                          {"component": "th", "text": "状态"},
+                                          {"component": "th", "text": "结果"}]}]},
+                                  {"component": "tbody", "content": body}]}]}
+        # 手机：一行一张卡片（站点 + 状态胶囊在左右，结果独占下一行）
+        cards = {"component": "div", "props": {"class": "ptsignin-list"},
+                 "content": [{"component": "div", "props": {"class": "ptsignin-row"}, "content": [
+                     {"component": "div", "props": {"class": "ptsignin-row-head"}, "content": [
+                         {"component": "div", "props": {"class": "ptsignin-row-site"},
+                          "text": str(item.get("site") or "未知站点")},
+                         {"component": "div", "props": {"class": "ptsignin-row-status"}, "content": [
+                             {"component": "VChip",
+                              "props": {"size": "x-small", "variant": "tonal",
+                                        "color": item.get("chip", {}).get("color", "grey"),
+                                        "prepend-icon": item.get("chip", {}).get("icon", "")},
+                              "text": item.get("chip", {}).get("label", "")}]}]},
+                     {"component": "div", "props": {"class": "ptsignin-caption"},
+                      "text": str(item.get("caption") or "")},
+                     {"component": "div", "props": {"class": "ptsignin-row-result"},
+                      "text": str(item.get("result") or "—")},
+                 ]} for item in rows]}
+        return [header, table, cards]
 
     def _section_site_names(self, login_view: bool, history: List[Dict[str, Any]],
                             latest: List[Dict[str, Any]]) -> List[str]:
