@@ -337,6 +337,33 @@ class LoginCoreTests(unittest.TestCase):
                 self.assertEqual(posted[0][2], {"signin": "签到"})
                 self.assertEqual(posted[0][1], "https://pt.example/attendance.php")
 
+    def test_http_two_step_posts_captured_token(self):
+        # TTG 式：首页 JS 里有 token，POST 到 /signed.php 才算签到
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                home = ('<html><body>欢迎<script>signed_timestamp: "1700000000", '
+                        'signed_token: "tok123"</script></body></html>')
+                session = FakeSession({
+                    "index.php": lambda s, u: FakeResponse(u, home),
+                    "signed.php": lambda s, u: FakeResponse(u, "<html><body>您已连续签到 12 天</body></html>"),
+                })
+                rule = {"engine": "http", "method": "GET", "path": "/index.php",
+                        "signin_path": "/signed.php", "signin_method": "POST",
+                        "signin_token_patterns": {
+                            "signed_timestamp": r"signed_timestamp:\s*\"(\d{10})\"",
+                            "signed_token": r"signed_token:\s*\"([^\"]+)\"",
+                        },
+                        "success_keywords": ["您已连续签到"]}
+                with mock.patch.dict(sys.modules, {"requests": fake_requests(session)}):
+                    result = core.http_two_step({"url": "https://totheglory.im/", "cookie": "c=1", "ua": ""},
+                                                rule, proxies=None)
+                self.assertIsNotNone(result, session.calls)
+                self.assertEqual(result.status, "success", result.message)
+                posted = [call for call in session.calls if call[0] == "POST"]
+                self.assertTrue(posted, session.calls)
+                self.assertEqual(posted[0][2], {"signed_timestamp": "1700000000",
+                                                "signed_token": "tok123"})
+
     def test_http_sign_auto_posts_home_signin_form(self):
         # 首页「每日签到」表单：按表单 action + method 提交，并带上按钮字段
         for core in CORES:

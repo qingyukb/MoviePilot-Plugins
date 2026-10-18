@@ -295,15 +295,22 @@ class CoreRegressionTests(unittest.TestCase):
                          '<1分前> & "签到成功"')
         self.assertEqual(self.core.page_text("<div>a &lt; b &amp; c</div>"), "a < b & c")
 
-    def test_btschool_preset_posts_homepage(self):
-        # 学校：签到按钮在首页，没有独立签到页 → 直接 POST /index.php
+    def test_btschool_preset_two_step(self):
+        # 学校：和 thsrite 的站点模块一致——先看首页有没有「每日签到」入口，
+        # 没有就是已签到；有就访问 addbonus，入口消失即签到成功
         rule = self.core.resolve_rule({"url": "https://pt.btschool.club/", "cookie": "c=1"}, {})
         self.assertEqual(rule["engine"], "http")
-        self.assertEqual(rule["method"], "POST")
+        self.assertEqual(rule["method"], "GET")
         self.assertEqual(rule["path"], "/index.php")
-        self.assertEqual(rule["submit_text"], "每日签到")
-        fallback = self.core.fallback_rule(rule, "cloudflare")
-        self.assertEqual(fallback["submit_text"], "每日签到")
+        self.assertEqual(rule["absent_keywords"], ["每日签到"])
+        self.assertEqual(rule["absent_status"], "already")
+        self.assertEqual(rule["signin_path"], "/index.php?action=addbonus")
+        self.assertEqual(rule["signin_absent_status"], "success")
+        # 第二段页面上入口消失 → 判成功（用 signin_absent_status 覆盖 absent_status）
+        probe = dict(rule, absent_status=rule["signin_absent_status"])
+        self.assertEqual(
+            self.core.judge_http("<html><body>首页 论坛 魔力值</body></html>", probe).status,
+            "success")
 
     def test_summarize_records_separates_uncertain_and_missing(self):
         rows = [
@@ -485,11 +492,21 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertTrue(self.core.cloudflare_pending(waf))
 
     def test_ttg_and_hdkyl_presets(self):
-        # TTG 没有 attendance.php，签到入口在站点页面上；HDKylin 是 NexusPHP，签到在 /attendance.php
+        # TTG：首页有绿色「已签到」就是签过了，否则取 token POST /signed.php（HTTP 就能签）
         ttg = self.core.resolve_rule({"url": "https://totheglory.im/", "cookie": "c=1"}, {})
-        self.assertEqual(ttg["engine"], "browserless")
+        self.assertEqual(ttg["engine"], "http")
         self.assertEqual(ttg["path"], "/index.php")
-        self.assertEqual(ttg["submit_text"], "签到")
+        self.assertEqual(ttg["signin_path"], "/signed.php")
+        self.assertEqual(ttg["signin_method"], "POST")
+        self.assertTrue(ttg["signin_token_patterns"]["signed_timestamp"])
+        self.assertTrue(ttg["signin_token_patterns"]["signed_token"])
+        # 首页那段「已签到」标记 → already；普通首页 → 不误判
+        signed = ('<html><body><b style="color:green;">已签到</b>'
+                  '<script>signed_timestamp: "1700000000"</script></body></html>')
+        self.assertEqual(self.core.judge_http(signed, ttg).status, "already")
+        pending = ('<html><body>欢迎<script>signed_timestamp: "1700000000", '
+                   'signed_token: "abc"</script></body></html>')
+        self.assertEqual(self.core.judge_http(pending, ttg).status, "failed")
         for url in ("https://www.hdkyl.in/", "https://hdkyl.in/"):
             hdk = self.core.resolve_rule({"url": url, "cookie": "c=1"}, {})
             self.assertEqual(hdk["engine"], "browserless")

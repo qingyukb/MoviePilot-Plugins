@@ -21,7 +21,9 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 DEFAULT_HTTP_PATH = "/attendance.php"
 DEFAULT_SUCCESS_PATTERN = (r"(state['\"]?\s*[:=]\s*['\"]?success|签到成功|簽到成功|签到 成功|"
                           r"成功签到|签到完成|簽到完成|领取成功|領取成功|签到已成功)")
-DEFAULT_ALREADY_PATTERN = (r"(今日已签|今天已签|已连续签到|已经签到|已签到过|已签到|已簽到|"
+# 注意：不要在这里放「已连续签到」——TTG 用「您已连续签到 N 天」表示**签到成功**，
+# 憨憨那类站点需要它时在自己的 already_keywords 里单独声明。
+DEFAULT_ALREADY_PATTERN = (r"(今日已签|今天已签|已经签到|已签到过|已签到|已簽到|"
                            r"不要重复签到|无需重复签到|already|signed in today)")
 COOKIE_INVALID_PATTERN = r"(用户登录|會員登入|请先登录|请登录|login\.php)"
 # Cloudflare 挑战页特征（出现即说明请求未穿透盾，需改用 Browserless）
@@ -216,14 +218,20 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
     # 探测：/attendance.php、/signin.php、/checkin.php 都是 404，站点在 Cloudflare 后面，
     # 所以走浏览器打开首页点「签到」。若你那边入口在别的页面，改 path 即可。
     "totheglory.im": {
-        "engine": "browserless",
-        "mode": "open_page",
+        "engine": "http",
+        "method": "GET",
+        # 和 thsrite 的站点模块同一套流程：首页有绿色「已签到」就是今天签过了；
+        # 否则从首页 JS 里取 signed_timestamp / signed_token，POST 到 /signed.php。
         "path": "/index.php",
-        "submit_selector": "input[type='submit'], button, a, [role='button'], li, span",
-        "submit_method": "dom_click",
-        "submit_text": "签到",
-        "success_keywords": ["签到成功", "簽到成功", "今日已签到", "本次签到"],
-        "already_keywords": ["今日已签到", "今天已签到", "已签到", "已簽到", "已领取"],
+        "already": "<b[^>]*>\\s*已签到\\s*</b>",
+        "already_keywords": ["今天已签到过", "不要太贪", "已連續簽到", "您已連續簽到"],
+        "signin_path": "/signed.php",
+        "signin_method": "POST",
+        "signin_token_patterns": {
+            "signed_timestamp": "signed_timestamp:\\s*\"(\\d{10})\"",
+            "signed_token": "signed_token:\\s*\"([^\"]+)\"",
+        },
+        "success_keywords": ["您已连续签到", "已連續簽到", "签到成功"],
     },
     # ---- HDKylin（hdkyl.in）：NexusPHP，签到在 /attendance.php ----
     # 站点在 Cloudflare 后面（访客请求直接 468），HTTP 直连多半要挑战，默认走浏览器。
@@ -297,15 +305,15 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
     # 「您获得 N 点魔力值」这类奖励是每天不同的，由 extract_bonus 每次从页面文本抓取，不写死。
     "btschool.club": {
         "engine": "http",
-        "method": "POST",
+        "method": "GET",
+        # 和 thsrite 的站点模块同一套判断：
+        # 首页没有「每日签到」入口 = 今天已签；有就访问 addbonus，入口消失即签到成功。
         "path": "/index.php",
-        "submit_selector": "input[type='submit'], button[type='submit'], button",
-        "submit_method": "dom_click",
-        "submit_text": "每日签到",
-        # 这站签到成功时**不给任何提示**，只是把「每日签到」入口拿掉（实测），所以用
-        # 「入口消失」作为完成依据；奖励（如「获得 N 点魔力值」）仍按页面原文抓。
         "absent_keywords": ["每日签到"],
         "absent_status": "already",
+        "signin_path": "/index.php?action=addbonus",
+        "signin_absent_status": "success",
+        "success_keywords": ["签到成功", "领取成功"],
     },
     # ---- 观众（Audiences）：签到页内嵌 Turnstile，验证通过后由站点自行提交 ----
     # 该站 Turnstile 渲染在 closed shadow DOM 里（本地 Edge 复现），页面 JS 读不到
@@ -444,6 +452,12 @@ def validate_rule(rule: Mapping[str, Any]) -> Dict[str, Any]:
         path = str(result.get("path") or "")
         if not path.startswith("/") or path.startswith("//"):
             raise ValueError("签到路径必须是以 / 开头的站内路径")
+        signin_path = str(result.get("signin_path") or "")
+        if signin_path and (not signin_path.startswith("/") or signin_path.startswith("//")):
+            raise ValueError("第二段签到地址必须是以 / 开头的站内路径")
+        patterns = result.get("signin_token_patterns")
+        if patterns is not None and not isinstance(patterns, Mapping):
+            raise ValueError("signin_token_patterns 必须是 {字段: 正则} 形式的对象")
         return result
     mode = result.get("mode")
     if mode not in {"open_page", "cloudflare", "image", "trigger_image", "altcha"}:
@@ -626,6 +640,75 @@ def http_sign_form(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: in
     return judge_http(response.text or "", rule)
 
 
+def http_two_step(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: int = 30,
+                  proxies: Optional[Dict[str, str]] = None) -> Optional[SignResult]:
+    """第二段签到：先读首页，按规则抓 token / 直接访问签到地址，再判定。
+
+    对应两类站点（都是 thsrite 的「站点自动签到」里验证过的流程）：
+
+    * TTG 这种：首页 JS 里有 ``signed_timestamp`` / ``signed_token``，要 POST 到 ``/signed.php``；
+    * 学校这种：首页有「每日签到」入口，访问 ``/index.php?action=addbonus`` 后入口消失即签到成功。
+
+    规则字段：``signin_path``（第二段地址）、``signin_method``（默认有参数就 POST）、
+    ``signin_data``（固定字段）、``signin_token_patterns``（{字段: 正则}，从首页抓）、
+    ``signin_absent_status``（第二段页面上 absent_keywords 消失时判什么状态）。
+    """
+    import requests
+
+    signin_path = str(rule.get("signin_path") or "").strip()
+    if not signin_path:
+        return None
+    base_url = str(site.get("url") or "").rstrip("/")
+    cookie = str(site.get("cookie") or "").strip()
+    if not base_url or not cookie:
+        return None
+    ua = str(site.get("ua") or "").strip() or DEFAULT_USER_AGENT
+    first_url = target_url(base_url, str(rule.get("path") or DEFAULT_HTTP_PATH))
+    first = fetch_page(first_url, cookie, timeout, proxies, ua)
+    if not first:
+        return None
+
+    data: Dict[str, str] = {}
+    static = rule.get("signin_data")
+    if isinstance(static, Mapping):
+        data.update({str(key): str(value) for key, value in static.items()})
+    patterns = rule.get("signin_token_patterns")
+    if isinstance(patterns, Mapping):
+        for name, pattern in patterns.items():
+            match = re.search(str(pattern), first)
+            if not match:
+                # 抓不到 token 就别盲目提交，交给上层继续报原始失败原因
+                return None
+            data[str(name)] = match.group(1) if match.groups() else match.group(0)
+
+    method = str(rule.get("signin_method") or ("POST" if data else "GET")).upper()
+    url = target_url(base_url, signin_path)
+    headers = {"User-Agent": ua, "Cookie": cookie, "Referer": first_url,
+               "Accept": "text/html,application/json,*/*;q=0.8"}
+    try:
+        session = requests.Session()
+        session.headers.update(headers)
+        if method == "POST":
+            response = session.post(url, data=data or None, timeout=timeout,
+                                    allow_redirects=True, proxies=proxies)
+        else:
+            response = session.get(url, params=data or None, timeout=timeout,
+                                   allow_redirects=True, proxies=proxies)
+    except Exception:
+        return None
+    if response.status_code >= 400:
+        return None
+
+    # 第二段页面上「签到入口消失」也是一种成功信号（学校：addbonus 后首页不再有「每日签到」）
+    probe = dict(rule)
+    if rule.get("signin_absent_status"):
+        probe["absent_status"] = rule["signin_absent_status"]
+    judged = judge_http(response.text or "", probe)
+    if judged.status in {"success", "already"}:
+        return SignResult(judged.status, f"{judged.message}（{signin_path}）")
+    return None
+
+
 def http_confirm(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: int = 30,
                  proxies: Optional[Dict[str, str]] = None) -> Optional[SignResult]:
     """回读签到页确认结果：有的站点提交后返回 302 / 空白页，只有再打开一次才看得到状态。"""
@@ -760,6 +843,10 @@ def http_sign_auto(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: in
     # 页面能打开但没判定出结果：很多站点签到是「点表单按钮」触发的，
     # 这里按页面上的表单 POST 一次，再回读签到页确认，避免「签上了却报失败」。
     if not result.missing_path and not result.challenge:
+        # 有的站点签到在第二个地址上（TTG 的 signed.php、学校的 addbonus），先按规则走完
+        two_step = http_two_step(site, rule, timeout=timeout, proxies=proxies)
+        if two_step is not None:
+            return two_step
         posted = http_sign_form(site, rule, timeout=timeout, proxies=proxies)
         if posted is not None and posted.status in {"success", "already"}:
             return SignResult(posted.status, f"{posted.message}（按页面表单 POST 提交）")
