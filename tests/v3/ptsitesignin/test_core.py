@@ -440,9 +440,9 @@ class CoreRegressionTests(unittest.TestCase):
         # Piggo 整站在 Cloudflare 后面，按 NexusPHP 通用签到页处理
         rule = self.core.resolve_rule({"url": "https://piggo.me/", "cookie": "c=1"}, {})
         self.assertEqual(rule["engine"], "browserless")
-        self.assertEqual(rule["path"], "/attendance.php")
-        self.assertEqual(rule["submit_text"], "立即签到")
-        self.assertEqual(rule["mode"], "cloudflare")
+        self.assertEqual(rule["path"], "/index.php")
+        self.assertEqual(rule["submit_text"], "签到")
+        self.assertEqual(rule["wait"], 12000)
 
     def test_waf_page_is_treated_as_challenge(self):
         # 雷池（SafeLine）WAF 安全检测页：按挑战处理，交给浏览器重试
@@ -463,11 +463,10 @@ class CoreRegressionTests(unittest.TestCase):
         for url in ("https://www.hdkyl.in/", "https://hdkyl.in/"):
             hdk = self.core.resolve_rule({"url": url, "cookie": "c=1"}, {})
             self.assertEqual(hdk["engine"], "browserless")
-            self.assertEqual(hdk["path"], "/attendance.php")
-            self.assertEqual(hdk["submit_text"], "立即签到")
-            # 点签到后跳雷池 WAF 检测页，预设要等它放行
-            self.assertEqual(hdk["mode"], "cloudflare")
-            self.assertEqual(hdk["cloudflare_wait"], 15)
+            # 签到入口在首页，点完跳雷池 WAF 检测页，等它放行后再读结果
+            self.assertEqual(hdk["path"], "/index.php")
+            self.assertEqual(hdk["submit_text"], "签到")
+            self.assertEqual(hdk["wait"], 12000)
 
     def test_sunnypt_menu_preset(self):
         # SUNNYPT：头像菜单里的「立即签到」，点完只有 toast，点到就算成功

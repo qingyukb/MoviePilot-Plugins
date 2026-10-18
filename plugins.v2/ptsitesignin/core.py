@@ -222,13 +222,14 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
     # 站点在 Cloudflare 后面（访客请求直接 468），HTTP 直连多半要挑战，默认走浏览器。
     "hdkyl.in": {
         "engine": "browserless",
-        # 点签到后会跳雷池 WAF 安全检测页，等它自动放行再继续
-        "mode": "cloudflare",
-        "cloudflare_wait": 15,
-        "path": "/attendance.php",
-        "submit_selector": "input[type='submit'], button, [role='button']",
-        "submit_text": "立即签到",
-        "success_keywords": ["签到成功", "簽到成功", "签到完成", "已签到"],
+        "mode": "open_page",
+        # 签到入口是首页的「签到」链接，点完会跳雷池 WAF 检测页，等放行后再读结果
+        "path": "/index.php",
+        "submit_selector": "a, input[type='submit'], button, [role='button'], span",
+        "submit_text": "签到",
+        "wait": 12000,
+        "pending_keywords": ["正在进行安全检测", "安全检测"],
+        "success_keywords": ["签到成功", "簽到成功", "签到完成", "已签到", "本次签到"],
         "already_keywords": ["今日已签到", "今天已签到", "已签到", "已簽到", "已领取"],
     },
     # ---- Piggo（piggo.me）：整站在 Cloudflare 后面，按 NexusPHP 通用签到页处理 ----
@@ -236,12 +237,13 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
     # 先按 /attendance.php + 「立即签到」配，若日志显示卡在挑战页或找不到按钮再调。
     "piggo.me": {
         "engine": "browserless",
-        # 同 hdkyl：点签到后跳雷池 WAF 检测，等放行
-        "mode": "cloudflare",
-        "cloudflare_wait": 15,
-        "path": "/attendance.php",
-        "submit_selector": "input[type='submit'], button, [role='button'], a",
-        "submit_text": "立即签到",
+        "mode": "open_page",
+        # 同 hdkyl：首页点「签到」，跳雷池检测页，等放行
+        "path": "/index.php",
+        "submit_selector": "a, input[type='submit'], button, [role='button'], span",
+        "submit_text": "签到",
+        "wait": 12000,
+        "pending_keywords": ["正在进行安全检测", "安全检测"],
         "success_keywords": ["签到成功", "簽到成功", "签到完成", "已签到", "本次签到"],
         "already_keywords": ["今日已签到", "今天已签到", "已签到", "已簽到", "已领取"],
     },
