@@ -12,7 +12,7 @@
     "v2": true,
     "system_version": ">=2.0.0,<3.0.0",
     "history": {
-      "v1.6.9": "新增 HTTP 第二段签到（signin_path / 从首页抓 token 再提交）：TTG 改走 signed.php，学校改成「首页入口判断 + addbonus」两步",
+      "v1.6.9": "参考 thsrite 的站点自动签到：TTG 走 signed.php、学校两步判定、SUNNYPT 用自带签到页、新增 HTTP 第二段签到与随机答题；补齐 10+4 个内置预设；新增站点模块机制（sites/ 目录，支持图片验证码 OCR：HDSky / TJUPT / M-Team）",
       "v1.6.8": "SUNNYPT 改用站点自带签到页 /user/attendance，已签到时按「今日签到已完成」判成功，不再误报失败",
       "v1.6.7": "最近动向改为逐处扫描并优先取带「(40分钟前)」的相对时间，用户页有两个日期时不再抓错",
       "v1.6.6": "HTTP 签到改为「GET 没结论 → 按页面表单 POST 提交 → 回读签到页确认」，普通站点签上了却报失败的情况会少很多",

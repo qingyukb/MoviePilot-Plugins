@@ -423,6 +423,54 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertEqual(self.core.same_site_path("https://pt.example/", "../x.php"), "/x.php")
         self.assertEqual(self.core.same_site_path("https://pt.example/", "#top"), "")
 
+    def test_random_form_fields_picks_one_option(self):
+        # 52pt 的 bakatest：隐藏 questionid + 两个 choice[]，随便挑一个
+        html = ('<form><input type="hidden" name="questionid" value="450">'
+                '<input type="checkbox" name="choice[]" value="8">'
+                '<input type="checkbox" name="choice[]" value="4"></form>')
+        fields = self.core.random_form_fields(html)
+        self.assertEqual(fields["questionid"], "450")
+        self.assertIn(fields["choice[]"], {"8", "4"})
+        # U2 的四选一：随机挑一个提交按钮
+        u2 = ('<form><input type="hidden" name="req" value="r1">'
+              '<input type="hidden" name="hash" value="h1">'
+              '<input type="submit" name="a" value="选项一">'
+              '<input type="submit" name="b" value="选项二"></form>')
+        picked = self.core.random_form_fields(u2)
+        self.assertEqual(picked["req"], "r1")
+        self.assertTrue({"a", "b"} & set(picked))
+
+    def test_site_modules_loaded(self):
+        # 插件目录 sites/ 下的模块应能自动发现（图片验证码 / 答题 / API Token 这几类站点）
+        modules = self.core.load_site_modules()
+        names = {getattr(module, "site_url", "") for module in modules}
+        self.assertIn("hdsky.me", names)
+        self.assertIn("tjupt.org", names)
+        self.assertIn("m-team", names)
+        self.assertIsNotNone(self.core.site_module_for("https://hdsky.me/"))
+        self.assertIsNotNone(self.core.site_module_for("https://www.tjupt.org/"))
+        self.assertIsNotNone(self.core.site_module_for("https://kp.m-team.cc/"))
+        # 没有模块的站点返回 None，交给规则引擎
+        self.assertIsNone(self.core.site_module_for("https://open.cd/"))
+
+    def test_run_site_module_dispatch(self):
+        fake = type("FakeModule", (), {
+            "site_url": "fake-module.example",
+            "signin": lambda self, site, ctx: (True, "签到成功"),
+        })
+        original = self.core._SITE_MODULES
+        self.core._SITE_MODULES = [fake]
+        try:
+            result = self.core.run_site_module({"url": "https://fake-module.example/", "cookie": "c=1"})
+            self.assertIsNotNone(result)
+            self.assertEqual(result.status, "success")
+            self.assertEqual(result.message, "签到成功")
+            # 没 Cookie 时不执行
+            missing = self.core.run_site_module({"url": "https://fake-module.example/"})
+            self.assertEqual(missing.status, "failed")
+        finally:
+            self.core._SITE_MODULES = original
+
     def test_find_signin_form(self):
         # 签到页里是「点按钮」触发的表单：要能取出 action / method / 字段
         html = ('<html><body><div>每日签到</div>'

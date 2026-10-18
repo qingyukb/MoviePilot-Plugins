@@ -55,6 +55,7 @@ from .core import (
     discover_signin_target,
     fetch_page,
     http_sign_auto,
+    run_site_module,
     is_login_record,
     is_signin_record,
     login as site_login,
@@ -719,7 +720,15 @@ class PTSiteSignIn(_PluginBase):
         try:
             rule = resolve_rule(info, rules)
             engine = str(rule["engine"])
-            if engine == "browserless":
+            # 规则表达不了的站点（图片验证码 / 答题选海报 / API Token）有专门模块，
+            # 放在插件目录 sites/ 下，优先于规则执行。
+            module_outcome = run_site_module(info, timeout=self._timeout,
+                                             proxies=self._proxies_for(info), logger=logger)
+            if module_outcome is not None:
+                outcome = module_outcome
+                engine = "module"
+                logger.info("PT站点签到：%s 使用站点模块", site_name)
+            elif engine == "browserless":
                 if signer is None:
                     outcome = SignResult("failed", "未配置 Browserless 地址或 Token")
                 else:

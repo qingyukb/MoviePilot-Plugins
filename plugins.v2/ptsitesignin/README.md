@@ -45,6 +45,25 @@ MoviePilot 的 PT 站点自动签到插件，支持 V2 / V3。
 
 抓规则：登录后打开签到页，F12 控制台粘贴 `tools/collect-rule-snippet.js`（会挂上监听），点一次签到按钮，再执行 `__ptsigninDump()`——输出的 JSON 里有按钮元素、签到请求和点完之后的页面状态。
 
+## 站点模块
+
+图片验证码、答题选海报、API Token 这类规则写不了的站点，用插件目录里的 \sites/\ 放一个 Python 模块（一个站一个文件），
+插件会按域名自动加载并优先于规则执行。内置三个：\hdsky.py\（OCR 验证码）、\	jupt.py\（豆瓣海报比对）、
+\mteam.py\（API Token）。
+
+`python
+class Example:
+    site_url = "example.com"
+
+    def signin(self, site, ctx):
+        page = ctx.page("https://example.com/")
+        if "已签到" in page:
+            return True, "今日已签到"
+        return False, "签到失败"
+`
+
+模块里可用 \ctx.page(url)\ / \ctx.post(url, data=...)\ / \ctx.image(url)\ / \ctx.ocr(图片地址)\。
+
 ## 抓规则脚本（可直接复制）
 
 内置预设没覆盖、或者预设失效时，先抓一份现场再写规则。

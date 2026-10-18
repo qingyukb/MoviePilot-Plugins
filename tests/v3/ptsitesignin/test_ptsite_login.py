@@ -337,6 +337,62 @@ class LoginCoreTests(unittest.TestCase):
                 self.assertEqual(posted[0][2], {"signin": "签到"})
                 self.assertEqual(posted[0][1], "https://pt.example/attendance.php")
 
+    def test_http_two_step_picks_random_choice(self):
+        # 52pt 式：答题签到，随机挑一个 choice[] 提交，返回「获得 N 点魔力值」即成功
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                question = ('<html><body><form>'
+                            '<input type="hidden" name="questionid" value="450">'
+                            '<input type="checkbox" name="choice[]" value="8">'
+                            '<input type="checkbox" name="choice[]" value="4">'
+                            '</form></body></html>')
+                session = FakeSession({
+                    "bakatest.php": lambda s, u: FakeResponse(
+                        u, question if s.calls[-1][0] == "GET"
+                        else "<html><body>获得 20 点魔力值</body></html>"),
+                })
+                rule = {"engine": "http", "method": "GET", "path": "/bakatest.php",
+                        "signin_path": "/bakatest.php", "signin_method": "POST",
+                        "signin_pick": "random",
+                        "signin_data": {"usercomment": "太难了！", "wantskip": "不会"},
+                        "success": r"\d+\s*点魔力值"}
+                with mock.patch.dict(sys.modules, {"requests": fake_requests(session)}):
+                    result = core.http_two_step({"url": "https://52pt.site/", "cookie": "c=1", "ua": ""},
+                                                rule, proxies=None)
+                self.assertIsNotNone(result, session.calls)
+                self.assertEqual(result.status, "success", result.message)
+                posted = [call for call in session.calls if call[0] == "POST"][0][2]
+                self.assertEqual(posted["questionid"], "450")
+                self.assertIn(posted["choice[]"], {"8", "4"})
+                self.assertEqual(posted["wantskip"], "不会")
+
+    def test_http_two_step_posts_json_with_header(self):
+        # 朱雀式：首页取 x-csrf-token，带 JSON body 和自定义头 POST
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                home = ('<html><head><meta name="x-csrf-token" content="csrf123"></head>'
+                        '<body>首页</body></html>')
+                session = FakeSession({
+                    "zhuque.in/": lambda s, u: FakeResponse(u, home),
+                    "fireGenshinCharacterMagic": lambda s, u: FakeResponse(
+                        u, '{"status":200,"data":{"code":"FIRE_GENSHIN_CHARACTER_MAGIC_SUCCESS","bonus":3}}'),
+                })
+                rule = {"engine": "http", "method": "GET", "path": "/",
+                        "signin_path": "/api/gaming/fireGenshinCharacterMagic",
+                        "signin_method": "POST",
+                        "signin_token_patterns": {"csrf": r'<meta name="x-csrf-token" content="([^"]+)"'},
+                        "signin_headers": {"x-csrf-token": "{csrf}"},
+                        "signin_json_raw": '{"all": 1, "resetModal": "true"}',
+                        "success_keywords": ['"status":200']}
+                with mock.patch.dict(sys.modules, {"requests": fake_requests(session)}):
+                    result = core.http_two_step({"url": "https://zhuque.in/", "cookie": "c=1", "ua": ""},
+                                                rule, proxies=None)
+                self.assertIsNotNone(result, session.calls)
+                self.assertEqual(result.status, "success", result.message)
+                self.assertEqual(session.headers.get("x-csrf-token"), "csrf123")
+                posted = [call for call in session.calls if call[0] == "POST"][0][2]
+                self.assertEqual(posted, b'{"all": 1, "resetModal": "true"}')
+
     def test_http_two_step_posts_captured_token(self):
         # TTG 式：首页 JS 里有 token，POST 到 /signed.php 才算签到
         for core in CORES:

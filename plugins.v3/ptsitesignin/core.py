@@ -8,8 +8,11 @@ Browserless 相关实现参考 tmzg0000/moviepilot-plugins 的 captchasignin 插
 from __future__ import annotations
 
 import base64
+import importlib.util
 import json
+import random
 import re
+from pathlib import Path
 import time
 import urllib.error
 import urllib.parse
@@ -264,6 +267,144 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "pending_keywords": ["正在进行安全检测", "安全检测", "正在验证您是否是真人"],
         "success_keywords": ["签到成功", "簽到成功", "签到完成", "已签到", "本次签到"],
         "already_keywords": ["今日已签到", "今天已签到", "已签到", "已簽到", "已领取"],
+    },
+    # ---- 以下站点流程参考 thsrite「站点自动签到」的 sites/ 模块 ----
+    # 只收录能用规则表达的：POST 固定字段、首页抓 CSRF、JSON 返回判定这几种。
+    # ---- hdarea（hdarea.club）：POST sign_in.php，返回页带「此次签到您获得」 ----
+    "hdarea.club": {
+        "engine": "http",
+        "method": "POST",
+        "path": "/sign_in.php",
+        "data": {"action": "sign_in"},
+        "success_keywords": ["此次签到您获得"],
+        "already_keywords": ["请不要重复签到哦"],
+    },
+    # ---- NexusHD（v6.nexushd.org）：POST signin.php ----
+    "nexushd.org": {
+        "engine": "http",
+        "method": "POST",
+        "path": "/signin.php",
+        "data": {"action": "post", "content": ""},
+        "success_keywords": ["本次签到获得"],
+        "already_keywords": ["你今天已经签到过了"],
+    },
+    # ---- HDCTV（hdcity.city）：签到页 /sign 直接给结果 ----
+    "hdcity.city": {
+        "engine": "http",
+        "method": "GET",
+        "path": "/sign",
+        "success_keywords": ["本次签到获得魅力"],
+        "already_keywords": ["已签到"],
+    },
+    # ---- HDUPT（pt.hdupt.com）：GET added.php?action=qiandao ----
+    "hdupt.com": {
+        "engine": "http",
+        "method": "GET",
+        "path": "/added.php?action=qiandao",
+        "success_keywords": ["本次签到获得魅力"],
+        # 已签到时首页会把这个 span 打出来
+        "already": "<span[^>]*id=\"yiqiandao\"",
+    },
+    # ---- PTT（pttime.org）：attendance.php 直接签 ----
+    "pttime.org": {
+        "engine": "http",
+        "method": "GET",
+        "path": "/attendance.php",
+        "success_keywords": ["签到成功"],
+        "already_keywords": ["今日已签到", "今天已签到", "已签到"],
+    },
+    # ---- Hares（club.hares.top）：attendance.php?action=sign 返回 JSON ----
+    "hares.top": {
+        "engine": "http",
+        "method": "GET",
+        "path": "/attendance.php?action=sign",
+        "success_keywords": ["签到成功", "\"success\":true"],
+        "already_keywords": ["已签到", "已经签到"],
+    },
+    # ---- PterClub（pterclub.com）：attendance-ajax.php 返回 JSON，status=1 即成功 ----
+    "pterclub.com": {
+        "engine": "http",
+        "method": "GET",
+        "path": "/attendance-ajax.php",
+        "success_keywords": ["\"status\":\"1\"", "签到已成功", "本次签到获得"],
+        "already_keywords": ["您今天已经签到过了", "请勿重复刷新"],
+    },
+    # ---- 海胆（haidan.video）：signin.php 触发签到，回首页看按钮是否变「已经打卡」 ----
+    "haidan.video": {
+        "engine": "http",
+        "method": "GET",
+        "path": "/signin.php",
+        "signin_path": "/index.php",
+        "success_keywords": ["已经打卡"],
+        "already_keywords": ["今日已签到", "已签到"],
+    },
+    # ---- HDChina（hdchina.org）：首页取 x-csrf，POST plugin_sign-in.php?cmd=signin ----
+    "hdchina.org": {
+        "engine": "http",
+        "method": "GET",
+        "path": "/index.php",
+        "already": "<a[^>]*class=\"label label-default\"[^>]*>已签到</a>",
+        "signin_path": "/plugin_sign-in.php?cmd=signin",
+        "signin_method": "POST",
+        "signin_token_patterns": {"csrf": "<meta name=\"x-csrf\" content=\"([^\"]+)\""},
+        "success_keywords": ["\"state\":\"success\"", "\"state\": \"success\""],
+    },
+    # ---- 52PT（52pt.site）/ CHDBits（ptchdbits.co）：bakatest 答题签到，随机选一个选项 ----
+    # 两个站同一套 NexusPHP 插件：首页签到页给 questionid + 若干 choice[]，随便选一个提交即可。
+    "52pt.site": {
+        "engine": "http",
+        "method": "GET",
+        "path": "/bakatest.php",
+        "already_keywords": ["今天已经签过到了"],
+        "signin_path": "/bakatest.php",
+        "signin_method": "POST",
+        "signin_pick": "random",
+        "signin_data": {"usercomment": "太难了！", "wantskip": "不会"},
+        "success": "\\d+\\s*点魔力值",
+    },
+    "ptchdbits.co": {
+        "engine": "http",
+        "method": "GET",
+        "path": "/bakatest.php",
+        "already_keywords": ["今天已经签过到了"],
+        "signin_path": "/bakatest.php",
+        "signin_method": "POST",
+        "signin_pick": "random",
+        "signin_data": {"usercomment": "太难了！", "wantskip": "不会"},
+        "success": "\\d+\\s*点魔力值",
+    },
+    # ---- U2（u2.dmhy.org）：showup 四选一答题，随机点一个提交按钮 ----
+    "u2.dmhy.org": {
+        "engine": "http",
+        "method": "GET",
+        "path": "/showup.php",
+        "already": "<a[^>]*href=\"showup.php\"[^>]*>已签到</a>",
+        "signin_path": "/showup.php?action=show",
+        "signin_method": "POST",
+        "signin_pick": "random",
+        "signin_data": {"message": "一切随缘~"},
+        "success_keywords": ["window.location.href = 'showup.php'"],
+    },
+    # ---- 朱雀（zhuque.in）：首页取 x-csrf-token，POST JSON 释放技能（就是它的签到）----
+    "zhuque.in": {
+        "engine": "http",
+        "method": "GET",
+        "path": "/",
+        "signin_path": "/api/gaming/fireGenshinCharacterMagic",
+        "signin_method": "POST",
+        "signin_token_patterns": {"csrf": "<meta name=\"x-csrf-token\" content=\"([^\"]+)\""},
+        "signin_headers": {"x-csrf-token": "{csrf}",
+                           "Content-Type": "application/json; charset=utf-8"},
+        "signin_json_raw": "{\"all\": 1, \"resetModal\": \"true\"}",
+        "success_keywords": ["\"status\":200", "FIRE_GENSHIN_CHARACTER_MAGIC_SUCCESS"],
+    },
+    # ---- 野马（yemapt.org）：GET api/consumer/checkIn，JSON success 即签到成功 ----
+    "yemapt.org": {
+        "engine": "http",
+        "method": "GET",
+        "path": "/api/consumer/checkIn",
+        "success_keywords": ["\"success\":true"],
+        "already_keywords": ["已经签到", "已签到"],
     },
     # ---- SUNNYPT（sunnypt.top）：站点自带签到页 /user/attendance（Next.js + JSON API） ----
     # 头像菜单里的「每日签到」只是跳这个页面，不用再点菜单；
@@ -640,6 +781,36 @@ def http_sign_form(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: in
     return judge_http(response.text or "", rule)
 
 
+def random_form_fields(html: str) -> Dict[str, str]:
+    """从签到页表单里取隐藏字段 + 随机挑一个选项/按钮。
+
+    对应两类「答题式」签到：
+
+    * 52pt / CHDBits 的 bakatest：隐藏字段 ``questionid`` + 若干 ``choice[]``，随便选一个提交；
+    * U2 的 showup：隐藏字段 ``req`` / ``hash`` / ``form`` + 若干提交按钮（选项），随机点一个。
+    """
+    hidden: Dict[str, str] = {}
+    options: List[tuple] = []
+    for tag in re.findall(r"<input\b[^>]*>", html or "", re.IGNORECASE):
+        attrs = _tag_attrs(tag)
+        name = str(attrs.get("name") or "").strip()
+        if not name:
+            continue
+        kind = str(attrs.get("type") or "text").lower()
+        value = str(attrs.get("value") or "")
+        if kind in {"submit", "button", "image"}:
+            options.append((name, value))
+        elif kind in {"radio", "checkbox"} or "choice" in name:
+            options.append((name, value))
+        elif kind == "hidden":
+            hidden[name] = value
+    if not options:
+        return hidden
+    name, value = random.choice(options)
+    hidden[name] = value
+    return hidden
+
+
 def http_two_step(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: int = 30,
                   proxies: Optional[Dict[str, str]] = None) -> Optional[SignResult]:
     """第二段签到：先读首页，按规则抓 token / 直接访问签到地址，再判定。
@@ -680,15 +851,29 @@ def http_two_step(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: int
                 # 抓不到 token 就别盲目提交，交给上层继续报原始失败原因
                 return None
             data[str(name)] = match.group(1) if match.groups() else match.group(0)
+    if str(rule.get("signin_pick") or "").lower() == "random":
+        data.update(random_form_fields(first))
 
     method = str(rule.get("signin_method") or ("POST" if data else "GET")).upper()
     url = target_url(base_url, signin_path)
     headers = {"User-Agent": ua, "Cookie": cookie, "Referer": first_url,
                "Accept": "text/html,application/json,*/*;q=0.8"}
+    extra_headers = rule.get("signin_headers")
+    if isinstance(extra_headers, Mapping):
+        for name, value in extra_headers.items():
+            try:
+                headers[str(name)] = str(value).format(**{k: v for k, v in data.items()
+                                                         if isinstance(k, str) and k.isidentifier()})
+            except (KeyError, IndexError, ValueError):
+                headers[str(name)] = str(value)
+    raw_body = rule.get("signin_json_raw")
     try:
         session = requests.Session()
         session.headers.update(headers)
-        if method == "POST":
+        if raw_body:
+            response = session.post(url, data=str(raw_body).encode("utf-8"),
+                                    timeout=timeout, allow_redirects=True, proxies=proxies)
+        elif method == "POST":
             response = session.post(url, data=data or None, timeout=timeout,
                                     allow_redirects=True, proxies=proxies)
         else:
@@ -827,6 +1012,97 @@ def discover_signin_target(html: str, base_url: str) -> Dict[str, Any]:
         return target
     found = discover_signin_path(body, base_url)
     return {"path": found, "method": "GET"} if found else {}
+
+
+# ---------------------------------------------------------------- 站点模块
+# 规则表达不了的站点（图片验证码、答题选海报、API Token）放在插件目录的 sites/ 下，
+# 一个站一个文件。这里按文件路径加载，不依赖包名，测试里单独加载 core.py 也能用。
+SITE_MODULE_DIR = Path(__file__).resolve().parent / "sites"
+_SITE_MODULES: Optional[List[Any]] = None
+_SITES_API: Any = None
+
+
+def _sites_api() -> Any:
+    """加载 sites/__init__.py 里的 SignContext 等辅助（避免相对导入）。"""
+    global _SITES_API
+    if _SITES_API is None:
+        path = SITE_MODULE_DIR / "__init__.py"
+        if not path.is_file():
+            _SITES_API = False
+        else:
+            spec = importlib.util.spec_from_file_location("ptsitesignin_sites_api", path)
+            module = importlib.util.module_from_spec(spec) if spec else None
+            if module is None or spec.loader is None:
+                _SITES_API = False
+            else:
+                spec.loader.exec_module(module)
+                _SITES_API = module
+    return _SITES_API or None
+
+
+def load_site_modules(refresh: bool = False) -> List[Any]:
+    """扫描 sites/ 目录，返回带 site_url + signin 的模块类（带缓存）。"""
+    global _SITE_MODULES
+    if _SITE_MODULES is not None and not refresh:
+        return _SITE_MODULES
+    modules: List[Any] = []
+    if SITE_MODULE_DIR.is_dir():
+        for path in sorted(SITE_MODULE_DIR.glob("*.py")):
+            if path.name.startswith("__"):
+                continue
+            name = "ptsitesignin_site_" + re.sub(r"\W+", "_", path.stem)
+            try:
+                spec = importlib.util.spec_from_file_location(name, path)
+                if spec is None or spec.loader is None:
+                    continue
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+            except Exception:
+                continue
+            for obj in vars(module).values():
+                if isinstance(obj, type) and hasattr(obj, "site_url") and hasattr(obj, "signin"):
+                    modules.append(obj)
+                    break
+    _SITE_MODULES = modules
+    return modules
+
+
+def site_module_for(url: str) -> Optional[Any]:
+    """按站点 URL 找匹配的模块类。"""
+    api = _sites_api()
+    if api is None:
+        return None
+    for module in load_site_modules():
+        matcher = getattr(module, "match", None)
+        if callable(matcher):
+            try:
+                if matcher(url):
+                    return module
+            except Exception:
+                continue
+            continue
+        if api.domain_matches(url, str(getattr(module, "site_url", "") or "")):
+            return module
+    return None
+
+
+def run_site_module(site: Mapping[str, Any], timeout: int = 30,
+                    proxies: Optional[Dict[str, str]] = None,
+                    logger: Any = None) -> Optional[SignResult]:
+    """有匹配的站点模块就执行它，返回结果；没有模块返回 None，交给规则引擎。"""
+    api = _sites_api()
+    if api is None:
+        return None
+    module = site_module_for(str(site.get("url") or ""))
+    if module is None:
+        return None
+    if not str(site.get("cookie") or "").strip() and not str(site.get("token") or "").strip():
+        return SignResult("failed", "站点没有 Cookie，无法签到")
+    context = api.SignContext(site, timeout=timeout, proxies=proxies, logger=logger)
+    ok, message = api.sign_via_module(module, site, context)
+    if ok:
+        return SignResult("already" if "已签到" in message else "success", message or "签到成功")
+    return SignResult("failed", message or "签到失败")
 
 
 def http_sign_auto(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: int = 30,
