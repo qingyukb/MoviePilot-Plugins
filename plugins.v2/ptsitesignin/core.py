@@ -1329,15 +1329,17 @@ def record_uncertain(row: Mapping[str, Any]) -> bool:
     return bool(re.search(UNCERTAIN_PATTERN, str(row.get("message") or "")))
 
 
-def is_login_record(row: Mapping[str, Any]) -> bool:
+def is_login_record(row: Mapping[str, Any], strict: bool = False) -> bool:
     """这条记录要不要进「登录状态」。
 
-    纯登录记录、双选站点的签到记录都算；此外只要这一轮确实做过登录（有登录结论）或读过
-    「最近动向」，也一并计入——1.4.0 之前的记录没有 dual 标记，这样历史条数不会因为升级
-    而突然变成 0。
+    strict=True：只认真正的登录记录（纯登录，或签到站点同时也勾了登录站点）——详情页展示用，
+    否则配了账号密码的纯签到站点会混进登录表，状态却显示「签到成功」，看着很怪。
+    strict=False：还兼容 1.4.0 之前没有 dual 标记的历史记录（只要那一轮做过登录或读过动向就算）。
     """
     if bool(row.get("dual")) or str(row.get("status") or "") in LOGIN_STATUSES:
         return True
+    if strict:
+        return False
     return bool(str(row.get("login") or "").strip() or str(row.get("activity") or "").strip())
 
 

@@ -354,7 +354,8 @@ class PagePluginTests(unittest.TestCase):
         plugin._notify(results)
         self.assertEqual(len(sent), 1)
         text = sent[0]["text"]
-        self.assertTrue(text.startswith("签到成功 1｜登录成功 1｜失败 1"))
+        self.assertTrue(text.startswith("签到成功 1 ｜ 登录成功 1 ｜ 失败 1"))
+        self.assertIn("失败：", text)
         self.assertIn("· 红豆饭：Cookie 无效或已过期", text)
         self.assertNotIn("观众", text)                    # 成功站点不逐条罗列
         plugin._notify_enabled = False                    # 关掉开关 → 不发送
@@ -362,7 +363,7 @@ class PagePluginTests(unittest.TestCase):
         self.assertEqual(len(sent), 1)
         plugin._notify_enabled = True                     # 全部成功 → 只有一行
         plugin._notify([{"site": "PT时间", "status": "already", "message": "今日已签到"}])
-        self.assertEqual(sent[-1]["text"], "签到成功 1｜登录成功 0｜失败 0")
+        self.assertTrue(sent[-1]["text"].startswith("签到成功 1 ｜ 登录成功 0 ｜ 失败 0"))
 
     def test_notify_counts_login_only_sites(self):
         # 只勾在「登录站点」里的站点：签到成功记 0，登录成功记 1；双选站点两边各记一次
@@ -370,10 +371,10 @@ class PagePluginTests(unittest.TestCase):
         sent = []
         plugin.post_message = lambda **kwargs: sent.append(kwargs)
         plugin._notify([{"site": "皇后", "status": "login", "message": "成功（已换用新 Cookie）"}])
-        self.assertEqual(sent[-1]["text"], "签到成功 0｜登录成功 1｜失败 0")
+        self.assertTrue(sent[-1]["text"].startswith("签到成功 0 ｜ 登录成功 1 ｜ 失败 0"))
         plugin._notify([{"site": "观众", "status": "already", "message": "今日已签到",
                          "dual": True, "login_status": "login"}])
-        self.assertEqual(sent[-1]["text"], "签到成功 1｜登录成功 1｜失败 0")
+        self.assertTrue(sent[-1]["text"].startswith("签到成功 1 ｜ 登录成功 1 ｜ 失败 0"))
 
     def test_notify_switch_backward_compatible(self):
         parse = self.plugin_module.PTSiteSignIn._parse_notify_switch

@@ -80,7 +80,8 @@ ALL_SITES = "all"
 # 每个站点面板里最多展示多少条历史记录（历史本身按天保留最近 30 天）。
 HISTORY_SHOW = 10
 # 通知里每个失败原因最多显示多少字，避免长诊断把通知撑成一堵墙。
-NOTIFY_REASON_LIMIT = 180
+NOTIFY_REASON_LIMIT = 90      # 通知里每条失败原因最多这么长
+NOTIFY_LIMIT = 6              # 通知里最多列几条失败
 # 详情页样式（MoviePilot 插件页支持内联 style 组件）。
 PAGE_STYLE = (
     # 顶部统计：一行小卡片，数值 + 说明，0 值自动变灰
@@ -116,6 +117,29 @@ PAGE_STYLE = (
     ".ptsignin-result{font-size:.84rem;line-height:1.45;word-break:break-word;"
     "font-variant-numeric:tabular-nums;display:-webkit-box;-webkit-line-clamp:3;"
     "-webkit-box-orient:vertical;overflow:hidden}"
+    # 手机：统计卡片两列、表格拆成一条条卡片，状态与结果紧跟站点名，不用左右滑
+    "@media (max-width:640px){"
+    ".ptsignin-stats{grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:6px}"
+    ".ptsignin-stat{padding:6px 8px;gap:6px;border-radius:8px}"
+    ".ptsignin-stat-num{font-size:.95rem}"
+    ".ptsignin-stat-label{font-size:.66rem}"
+    ".ptsignin-updated{margin-bottom:6px;font-size:.7rem}"
+    ".ptsignin-section{margin:14px 0 6px}"
+    ".ptsignin-table-wrap{border-radius:10px;box-shadow:none}"
+    ".ptsignin-table{display:block}"
+    ".ptsignin-table thead{display:none}"
+    ".ptsignin-table tbody,.ptsignin-table tr,.ptsignin-table td{display:block;width:auto}"
+    ".ptsignin-table tr{padding:10px 12px;border-bottom:1px solid rgba(var(--v-theme-on-surface),.08)}"
+    ".ptsignin-table tr:last-child{border-bottom:0}"
+    ".ptsignin-table td{padding:0;margin-top:3px}"
+    ".ptsignin-table td:first-child{margin-top:0}"
+    # 手机上状态胶囊必须一行显示，别被挤成两行
+    ".ptsignin-table td:nth-child(2){white-space:nowrap}"
+    ".ptsignin-site{font-size:.9rem}"
+    ".ptsignin-caption{margin-top:1px;font-size:.68rem;white-space:nowrap;overflow:hidden;"
+    "text-overflow:ellipsis}"
+    ".ptsignin-result{font-size:.8rem;-webkit-line-clamp:4}"
+    "}"
 )
 
 
@@ -123,7 +147,7 @@ class PTSiteSignIn(_PluginBase):
     plugin_name = "PT站点签到"
     plugin_desc = ("PT 站点自动签到，可登录刷新 Cookie 并读取最近动向；遇到验证码或 Cloudflare 会自动改用浏览器。")
     plugin_icon = "signin.png"
-    plugin_version = "1.6.3"
+    plugin_version = "1.6.4"
     plugin_author = "qingyukb"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "ptsignin_"
@@ -472,7 +496,8 @@ class PTSiteSignIn(_PluginBase):
                       history: List[Dict[str, Any]], today: List[Dict[str, Any]],
                       login_view: bool) -> List[dict]:
         """一张方框表格：站点（含记录条数）｜今日｜结果。"""
-        belongs = is_login_record if login_view else is_signin_record
+        belongs = ((lambda row: is_login_record(row, strict=True)) if login_view
+                   else is_signin_record)
         counts: Dict[str, int] = {}
         for row in history:
             if belongs(row):
@@ -542,7 +567,8 @@ class PTSiteSignIn(_PluginBase):
         else:
             ids = list(sites) if self._all_sites else self._site_ids
         names = [str(sites[sid].name) for sid in ids if sid in sites]
-        belongs = is_login_record if login_view else is_signin_record
+        belongs = ((lambda row: is_login_record(row, strict=True)) if login_view
+                   else is_signin_record)
         for row in latest + history:
             if not belongs(row):
                 continue
@@ -1104,8 +1130,8 @@ class PTSiteSignIn(_PluginBase):
     def _notify(self, results: List[Dict[str, str]]) -> None:
         """推送结果（由「发送通知」开关控制）。
 
-        就四行以内：一行「签到成功 N｜登录成功 N｜失败 N」，有失败才在下面逐条列「站点：原因」。
-        双选站点两边都做成功时，会计入两个数字（签到成功 +1、登录成功 +1），这是预期行为。
+        版式固定三块：一行统计、一行执行时间、失败时再列站点与原因（最多 6 条，多出来的写条数），
+        避免失败多的时候刷出一大段。
         """
         if not self._notify_enabled or not results:
             return
@@ -1114,10 +1140,16 @@ class PTSiteSignIn(_PluginBase):
         login_ok = sum(1 for item in results
                        if str(self._login_view(item).get("status") or "") == "login")
         failures = [item for item in results if self._is_failed(item)]
-        lines = [f"签到成功 {signed}｜登录成功 {login_ok}｜失败 {len(failures)}"]
+        moment = max((str(item.get("ran_at") or "") for item in results), default="")[5:16]
+        lines = [f"签到成功 {signed} ｜ 登录成功 {login_ok} ｜ 失败 {len(failures)}"]
+        if moment:
+            lines.append(f"共 {len(results)} 个站点 · {moment}")
         if failures:
             lines.append("")
-            lines.extend("· " + self._failure_reason(item) for item in failures)
+            lines.append("失败：")
+            lines.extend("· " + self._failure_reason(item) for item in failures[:NOTIFY_LIMIT])
+            if len(failures) > NOTIFY_LIMIT:
+                lines.append(f"…另有 {len(failures) - NOTIFY_LIMIT} 个站点失败，详见插件日志")
         self.post_message(mtype=NotificationType.SiteMessage,
                           title="PT站点签到",
                           text="\n".join(lines))
@@ -1132,8 +1164,14 @@ class PTSiteSignIn(_PluginBase):
         """失败原因：站点名 + 结果文案，过长时截断，别让通知变成一堵墙。"""
         site = str(item.get("site") or "未知站点")
         detail = str(item.get("message") or "").strip() or str(item.get("login") or "").strip()
-        if len(detail) > NOTIFY_REASON_LIMIT:
-            detail = detail[:NOTIFY_REASON_LIMIT].rstrip() + "…"
+        # 失败原因只留一句，长了直接截断——通知里看到的够判断就行，细节看日志
+        limit = NOTIFY_REASON_LIMIT
+        for marker in ("；诊断：", "；标题", "；正文", "；片段"):
+            if marker in detail:
+                detail = detail.split(marker, 1)[0]
+                break
+        if len(detail) > limit:
+            detail = detail[:limit].rstrip() + "…"
         return decode_entities(f"{site}：{detail}") if detail else site
 
     def stop_service(self) -> None:
