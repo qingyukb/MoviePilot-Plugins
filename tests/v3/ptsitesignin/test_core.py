@@ -532,6 +532,24 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertEqual(self.core.classify(signed, rule).status, "already")
         self.assertEqual(self.core.classify(pending, rule).status, "failed")
 
+    def test_absent_keywords_ignore_script_and_template_text(self):
+        # 脚本 / 隐藏模板里带「每日签到」不算入口还在，否则签完了也会被判成没签
+        rule = self.core.resolve_rule({"url": "https://pt.btschool.club/", "cookie": "c=1"}, {})
+        script_only = ("<html><body><div>欢迎回来</div>"
+                       "<script>var tpl = \"每日签到\";</script></body></html>")
+        self.assertEqual(self.core.classify(script_only, rule).status, "already")
+        self.assertEqual(self.core.judge_http(script_only, rule).status, "already")
+        # 真正的控件还在就不能算已签
+        button = ('<html><body><a href="/index.php?action=addbonus">每日签到</a></body></html>')
+        self.assertEqual(self.core.classify(button, rule).status, "failed")
+        self.assertEqual(self.core.judge_http(button, rule).status, "failed")
+
+    def test_control_text_extracts_button_labels(self):
+        self.assertIn("每日签到", self.core.control_text(
+            '<form><input type="submit" value="每日签到"></form>'))
+        self.assertIn("立即签到", self.core.control_text('<button>立即签到</button>'))
+        self.assertEqual(self.core.control_text("<script>var a='签到';</script>"), "")
+
     def test_judge_http_honours_keyword_lists(self):
         # 规则里写了 success_keywords / already_keywords 时，HTTP 判定也要认
         rule = {"success_keywords": ["领取成功"], "already_keywords": ["今日已領取"]}

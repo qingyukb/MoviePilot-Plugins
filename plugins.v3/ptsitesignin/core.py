@@ -771,8 +771,9 @@ def judge_http(content: str, rule: Mapping[str, Any]) -> SignResult:
     # 可见正文里本来就没有这个词，用 visible 判断会把「入口还在」误当成「入口已消失」。
     absent = [str(item).strip() for item in (rule.get("absent_keywords") or [])
               if str(item).strip()]
+    control = control_text(text)
     if absent and not login_page(content) and not cloudflare_pending(content) \
-            and not any(word in content or word in visible for word in absent):
+            and not any(word in visible or word in control for word in absent):
         status = "success" if str(rule.get("absent_status") or "").lower() == "success" else "already"
         prefix = "签到成功" if status == "success" else "今日已签到"
         bonus = extract_reward_sentence(text)
@@ -1858,6 +1859,23 @@ def cloudflare_pending(html: str) -> bool:
     return bool(re.search(CF_INTERSTITIAL_PATTERN, html or "", re.IGNORECASE))
 
 
+def control_text(html: str) -> str:
+    """抽出页面上的「控件文字」：input 的 value、button/a/option 的文本等。
+
+    签到入口大多是 `<input type=submit value="每日签到">` 或 `<a>签到</a>`，
+    plain_text 会把标签连同属性一起去掉，直接用原始 HTML 判断又会被脚本 / 隐藏模板里的
+    同样字样骗到。这个函数只取真正会显示在按钮上的文字。
+    """
+    body = str(html or "")
+    parts = [match.group(1) for match in re.finditer(
+        r"<input\b[^>]*\bvalue\s*=\s*[\"']([^\"']{1,40})[\"']", body, re.IGNORECASE)]
+    for pattern in (r"<button\b[^>]*>(.{0,40}?)</button>", r"<a\b[^>]*>(.{0,40}?)</a>",
+                    r"<option\b[^>]*>(.{0,40}?)</option>"):
+        parts.extend(match.group(1) for match in re.finditer(
+            pattern, body, re.IGNORECASE | re.DOTALL))
+    return re.sub(r"\s+", " ", plain_text(" ".join(parts)))
+
+
 def login_page(html: str) -> bool:
     """页面是否就是站点登录页。
 
@@ -2206,8 +2224,9 @@ def classify(html: str, rule: Mapping[str, Any]) -> SignResult:
     # 静默成功的站点（学校这种）：入口消失即视为完成，浏览器引擎也要认
     absent = [str(item).strip() for item in (rule.get("absent_keywords") or [])
               if str(item).strip()]
-    # 入口常写在按钮的 value="..." 里，去掉标签的正文看不到，所以原始 HTML 也要一起看
-    if absent and not any(word in full_text or word in html for word in absent):
+    # 按钮文字常写在 value="..." 里，正文看不到；但脚本 / 隐藏模板里的字样不能算数，
+    # 所以用「可见文字 + 控件文字」判断入口还在不在
+    if absent and not any(word in full_text or word in control_text(html) for word in absent):
         status = "success" if str(rule.get("absent_status") or "").lower() == "success" else "already"
         label = "签到成功" if status == "success" else "今日已经签到"
         return SignResult(status, _bonus_message(label, full_text, rule))

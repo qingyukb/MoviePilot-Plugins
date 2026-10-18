@@ -3,7 +3,7 @@
     "name": "PT站点签到",
     "description": "PT 站点自动签到，可登录刷新 Cookie 并读取最近动向；遇到验证码或 Cloudflare 会自动改用浏览器。",
     "labels": "站点,签到",
-    "version": "1.6.0",
+    "version": "1.6.1",
     "icon": "https://cdn.jsdelivr.net/gh/qingyukb/MoviePilot-Plugins@main/icons/ptsignin.png",
     "author": "qingyukb",
     "level": 2,
@@ -11,6 +11,7 @@
     "v2": true,
     "system_version": ">=2.0.0",
     "history": {
+      "v1.6.1": "修正入口判定：脚本 / 隐藏模板里的「每日签到」字样不再让插件以为没签上（学校签到成功却报失败）",
       "v1.6.0": "签到判定与回退调整：① 页面出现「已领取」「本次签到」等状态字样时按已签到处理，不再误报「未找到签到成功标志」；② 未写规则的站点签到失败时也会用 Browserless 再试一次；③ 学校这类「入口消失即完成」的判定在浏览器引擎里同样生效。",
       "v1.5.11": "憨憨签完没有提示也能正确判定：点到签到按钮就算成功，奖励照常显示",
       "v1.5.10": "支持憨憨（hhanclub）日历式签到，奖励显示「本次签到获得 N 个憨豆」",
