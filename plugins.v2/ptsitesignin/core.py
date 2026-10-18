@@ -729,6 +729,14 @@ def judge_http(content: str, rule: Mapping[str, Any]) -> SignResult:
     if re.search(already, visible, re.IGNORECASE):
         bonus = extract_bonus(text, rule)
         return SignResult("already", f"今日已签到（{bonus}）" if bonus else "今日已签到")
+    # 规则里写了关键词时（浏览器引擎用的那套），HTTP 判定也认，免得同一个预设两种引擎结论不同
+    lower_visible = visible.lower()
+    if any(str(word).lower() in lower_visible for word in (rule.get("success_keywords") or [])):
+        bonus = extract_bonus(text, rule)
+        return SignResult("success", f"签到成功（{bonus}）" if bonus else "签到成功")
+    if any(str(word).lower() in lower_visible for word in (rule.get("already_keywords") or [])):
+        bonus = extract_bonus(text, rule)
+        return SignResult("already", f"今日已签到（{bonus}）" if bonus else "今日已签到")
     # 页面内嵌 Cloudflare Turnstile 人机验证（观众 Audiences 这类 Vue 签到页）：签到的判定
     # 文案由 JS 在验证回调里生成，HTTP 直连拿不到，只能交给浏览器引擎。放在成功 / 已签到
     # 之后判断，避免「已签到」页仍带 Turnstile 组件时被判成还需要验证。
@@ -2195,6 +2203,14 @@ def classify(html: str, rule: Mapping[str, Any]) -> SignResult:
         return SignResult("success", _bonus_message("签到成功", full_text, rule))
     if any(word.lower() in lower for word in rule.get("already_keywords", [])):
         return SignResult("already", _bonus_message("今日已经签到", full_text, rule))
+    # 静默成功的站点（学校这种）：入口消失即视为完成，浏览器引擎也要认
+    absent = [str(item).strip() for item in (rule.get("absent_keywords") or [])
+              if str(item).strip()]
+    # 入口常写在按钮的 value="..." 里，去掉标签的正文看不到，所以原始 HTML 也要一起看
+    if absent and not any(word in full_text or word in html for word in absent):
+        status = "success" if str(rule.get("absent_status") or "").lower() == "success" else "already"
+        label = "签到成功" if status == "success" else "今日已经签到"
+        return SignResult(status, _bonus_message(label, full_text, rule))
     if not rule.get("strict_status_keywords") and any(word in lower for word in SUCCESS_WORDS):
         return SignResult("success", _bonus_message("签到成功", full_text, rule))
     if not rule.get("strict_status_keywords") and any(word in lower for word in ALREADY_WORDS):

@@ -10,7 +10,7 @@ PT 站点自动签到，支持 V2 / V3。签到走 HTTP 直连，遇验证码或
 
 - HTTP 直连签到（NexusPHP），默认路径 404 时自动查找签到入口
 - 内置站点预设（观众、学校、憨憨、AGSVPT、LuckPT、HDSky 等），未覆盖的站点可写自定义规则
-- 验证码 / Cloudflare / Turnstile 走 Browserless，未写规则的站点自动回退一次
+- 验证码 / Cloudflare / Turnstile 改用 Browserless；没写规则的站点签到失败时也会用它再试一次
 - 详情页分「签到状态」「登录状态」，结果列显示奖励或失败原因
 - 当天已签到成功的站点跳过，通知只统计成功与失败数量
 

@@ -107,7 +107,7 @@ class PTSiteSignIn(_PluginBase):
     plugin_name = "PT站点签到"
     plugin_desc = ("PT 站点自动签到，可登录刷新 Cookie 并读取最近动向；遇到验证码或 Cloudflare 会自动改用浏览器。")
     plugin_icon = "ptsignin.png"
-    plugin_version = "1.5.12"
+    plugin_version = "1.5.13"
     plugin_author = "qingyukb"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "ptsignin_"
@@ -698,7 +698,7 @@ class PTSiteSignIn(_PluginBase):
             else:
                 outcome = http_sign_auto(info, rule, timeout=self._timeout,
                                          proxies=self._proxies_for(info))
-                if outcome.status == "failed" and outcome.challenge:
+                if outcome.status == "failed" and self._should_fallback(rule, outcome):
                     outcome, engine = self._maybe_fallback(info, rule, outcome, signer)
         except ValueError as error:
             outcome = SignResult("failed", str(error))
@@ -795,6 +795,20 @@ class PTSiteSignIn(_PluginBase):
         logger.info("PT站点签到：%s 最近动向 ← %s：%s", site_name, activity.source, value)
         return value, activity.source
 
+    @staticmethod
+    def _should_fallback(rule: Dict[str, Any], outcome: SignResult) -> bool:
+        """这一轮失败要不要改用浏览器再试一次。
+
+        两种情况：① 撞上 Cloudflare / 验证码；② 拿到了页面但没匹配到成功标志——
+        后者常见于只能靠浏览器点击的站点，未写规则的站点也给它一次机会。
+        404（找不到签到入口）、Cookie 失效这类重试没用，不折腾。
+        """
+        if outcome.challenge:
+            return True
+        if not rule.get("auto_fallback") or outcome.missing_path:
+            return False
+        return "未匹配到" in str(outcome.message or "")
+
     def _maybe_fallback(self, info: Dict[str, Any], rule: Dict[str, Any], outcome: SignResult,
                         signer: Optional[BrowserlessSigner]) -> Tuple[SignResult, str]:
         """HTTP 直连撞上 Cloudflare / 验证码时，自动改用 Browserless 重试一次。
@@ -805,7 +819,9 @@ class PTSiteSignIn(_PluginBase):
         # 自动回退恒为开启（设置页不再提供开关）；用户在规则里显式写了 engine 的站点不参与
         if not rule.get("auto_fallback"):
             return outcome, "http"
-        label = "Cloudflare 验证" if outcome.challenge == "cloudflare" else "验证码"
+        label = ("Cloudflare 验证" if outcome.challenge == "cloudflare"
+                 else "验证码" if outcome.challenge
+                 else "未匹配到签到结果")
         if signer is None:
             return SignResult("failed", f"{outcome.message}；检测到{label}，但未配置 Browserless 地址或 Token"), "http"
         site_name = str(info.get("name") or info.get("url") or "未知站点")

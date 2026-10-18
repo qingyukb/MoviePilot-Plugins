@@ -12,7 +12,7 @@ MoviePilot 的 PT 站点自动签到插件，支持 V2 / V3。
 
 - HTTP 直连签到，默认 `/attendance.php`，404 时自动查找首页签到入口
 - 内置站点预设（观众、学校、憨憨、AGSVPT、LuckPT、HDSky 等）按域名匹配，未覆盖的站点写自定义规则
-- 验证码 / Cloudflare / Turnstile 改用 Browserless，未写规则的站点自动回退一次
+- 验证码 / Cloudflare / Turnstile 改用 Browserless；没写规则的站点签到失败时也会用它再试一次
 - 签到后读取「最近动向」，包含站点自带的相对时间
 - 详情页分「签到状态」「登录状态」，结果列显示奖励或失败原因
 - 当天已签到成功的站点跳过；通知只统计签到成功 / 登录成功 / 失败

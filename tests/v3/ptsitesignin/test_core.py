@@ -521,6 +521,25 @@ class CoreRegressionTests(unittest.TestCase):
             "<button>立即签到</button></body></html>", {})
         self.assertEqual(result.status, "failed")
 
+    def test_btschool_absent_keywords_in_both_engines(self):
+        # 学校：签到成功后「每日签到」入口消失，HTTP 与浏览器两种判定都要认
+        rule = self.core.resolve_rule({"url": "https://pt.btschool.club/", "cookie": "c=1"}, {})
+        signed = "<html><body><div>欢迎回来</div><div>控制面板 论坛 种子</div></body></html>"
+        pending = ('<html><body><form method="post" action="/index.php">'
+                   '<input type="submit" value="每日签到"></form></body></html>')
+        self.assertEqual(self.core.judge_http(signed, rule).status, "already")
+        self.assertEqual(self.core.judge_http(pending, rule).status, "failed")
+        self.assertEqual(self.core.classify(signed, rule).status, "already")
+        self.assertEqual(self.core.classify(pending, rule).status, "failed")
+
+    def test_judge_http_honours_keyword_lists(self):
+        # 规则里写了 success_keywords / already_keywords 时，HTTP 判定也要认
+        rule = {"success_keywords": ["领取成功"], "already_keywords": ["今日已領取"]}
+        self.assertEqual(self.core.judge_http(
+            "<html><body><div>领取成功</div></body></html>", rule).status, "success")
+        self.assertEqual(self.core.judge_http(
+            "<html><body><div>今日已領取</div></body></html>", rule).status, "already")
+
     def test_fallback_rule_carries_cloudflare_wait(self):
         fallback = self.core.fallback_rule(
             {"engine": "http", "path": "/attendance.php", "cloudflare_wait": 25}, "cloudflare")

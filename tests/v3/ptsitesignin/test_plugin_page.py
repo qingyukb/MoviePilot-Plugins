@@ -319,6 +319,24 @@ class PagePluginTests(unittest.TestCase):
         self.assertIn(("观众", "登录成功", "2026-10-17 03:52:21 ( < 1分前 )"), pairs)
         self.assertNotIn("&lt;", str(page))
 
+    def test_should_fallback_rules(self):
+        plugin = self._make({})
+        failed = self.plugin_module.SignResult
+        # 撞盾 → 回退
+        self.assertTrue(plugin._should_fallback(
+            {"auto_fallback": True}, failed("failed", "验证页", challenge="cloudflare")))
+        # 拿到页面但没匹配到成功标志 → 未写规则的站点也回退一次
+        self.assertTrue(plugin._should_fallback(
+            {"auto_fallback": True}, failed("failed", "未匹配到签到成功标志；正文「…」")))
+        # 404（找不到入口）/ Cookie 失效 / 显式写了 engine 的站点 → 不回退
+        self.assertFalse(plugin._should_fallback(
+            {"auto_fallback": True},
+            failed("failed", "没找到可用的签到入口（HTTP 404）", missing_path=True)))
+        self.assertFalse(plugin._should_fallback(
+            {"auto_fallback": True}, failed("failed", "Cookie 无效或已过期")))
+        self.assertFalse(plugin._should_fallback(
+            {"auto_fallback": False}, failed("failed", "未匹配到签到成功标志")))
+
     def test_notify_switch_and_message(self):
         plugin = self._make({}, _notify_enabled=True)
         sent = []
