@@ -73,10 +73,10 @@ CAPTCHA_PATTERN = (
 )
 # 签到奖励提取：按「获得 22 粒爆米花」「魔力值 +30」「签到已得 22」等常见文案取第一个命中（含繁体）
 BONUS_PATTERNS = (
-    r"((?:获得|獲得|獲取)\s*[\d,]+(?:\.\d+)?\s*(?:个|粒|枚|点|個|顆)?\s*(?:魔力值|爆米花|积分|做种积分|金币|憨豆|奖励))",
-    r"([\d,]+(?:\.\d+)?\s*(?:个|粒|枚|点|個|顆)\s*(?:魔力值|爆米花|积分|做种积分|金币|憨豆))",
-    r"((?:魔力值|爆米花|积分|做种积分|金币|憨豆)\s*[:：]?\s*\+?\s*[\d,]+(?:\.\d+)?)",
-    r"\+([\d,]+(?:\.\d+)?)\s*(?:魔力值|爆米花|积分|做种积分|金币|憨豆)",
+    r"((?:获得|獲得|獲取)\s*[\d,]+(?:\.\d+)?\s*(?:个|粒|枚|点|個|顆)?\s*(?:魔力值|爆米花|积分|做种积分|金币|憨豆|金贝|奖励))",
+    r"([\d,]+(?:\.\d+)?\s*(?:个|粒|枚|点|個|顆)\s*(?:魔力值|爆米花|积分|做种积分|金币|憨豆|金贝))",
+    r"((?:魔力值|爆米花|积分|做种积分|金币|憨豆|金贝)\s*[:：]?\s*\+?\s*[\d,]+(?:\.\d+)?)",
+    r"\+([\d,]+(?:\.\d+)?)\s*(?:魔力值|爆米花|积分|做种积分|金币|憨豆|金贝)",
     r"(?:签到已得|簽到已得)\s*([\d,]+)",
 )
 DEFAULT_USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -202,6 +202,19 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "mode": "cloudflare",
         "path": "/attendance.php",
         "submit_selector": "form[action*='attendance.php'] input[type='submit']",
+    },
+    # ---- SUNNYPT（sunnypt.top）：头像菜单里的「立即签到」，签完右下角弹提示 ----
+    # 页面是 Vue 单页，签到项在头像下拉菜单里（默认隐藏，JS 点也能触发）；
+    # 点完只有 toast，页面本身不留成功文案，所以按「点到了就算成功」处理。
+    "sunnypt.top": {
+        "engine": "browserless",
+        "mode": "open_page",
+        "path": "/",
+        "submit_selector": "[role='menuitem'], li, a, button, span, div",
+        "submit_text": "立即签到",
+        "success_on_click": True,
+        "success_keywords": ["签到成功", "簽到成功", "今日已签到"],
+        "already_keywords": ["已签到", "今日已签到", "签到成功", "已簽到"],
     },
     # ---- 憨憨（hhanclub.net）：日历式签到页，点「签到」后当天按钮变成「已领取」 ----
     # 页面是 Vue 渲染的日历，签到要点击完成；判定不认日历里过去几天的「已领取」，
@@ -851,7 +864,7 @@ _ATTR_RE = re.compile(r"([a-zA-Z_:][-a-zA-Z0-9_:.]*)\s*=\s*(\"[^\"]*\"|'[^']*'|[
 _UID_RE = re.compile(r"userdetails\.php\?id=(\d+)", re.IGNORECASE)
 # 「获得 87 点魔力值」这类明确的奖励句子（静默成功时只用它，避免误抓侧栏统计数字）
 REWARD_SENTENCE_PATTERN = (r"((?:获得|獲得|獲取|签到已得|簽到已得)\s*[\d,]+(?:\.\d+)?"
-                           r"\s*(?:个|粒|枚|点|個|顆)?\s*(?:魔力值|爆米花|积分|做种积分|金币|憨豆|奖励))")
+                           r"\s*(?:个|粒|枚|点|個|顆)?\s*(?:魔力值|爆米花|积分|做种积分|金币|憨豆|金贝|奖励))")
 
 
 @dataclass(frozen=True)
@@ -1405,9 +1418,22 @@ def _submit_script(selector: str, method: str, captcha_input: Optional[str] = No
     input_json = json.dumps(captcha_input or "")
     text_json = json.dumps(submit_text or "")
     target_script = """(() => { const wanted = %s.trim();
-      if (wanted) { const matches = [...document.querySelectorAll('input, button, a')];
-        const found = matches.find((node) => ((node.value || node.textContent || '').trim().includes(wanted)));
-        if (found) return found; }
+      if (wanted) {
+        // 头像菜单、下拉项这类元素常是 div / li / span，而且默认是隐藏的；
+        // 取「文字最短」的那个，避免点到包着一大片内容的外层容器。
+        const nodes = [...document.querySelectorAll(
+          "input, button, a, [role='button'], [role='menuitem'], [role='link'], li, span, div")];
+        const hits = nodes
+          .map((node) => ({
+            node,
+            text: ((node.value || node.textContent || '') + '').replace(/\s+/g, ' ').trim(),
+          }))
+          .filter((item) => item.text && item.text.includes(wanted) && item.text.length <= 40);
+        if (hits.length) {
+          hits.sort((left, right) => left.text.length - right.text.length);
+          return hits[0].node;
+        }
+      }
       return document.querySelector(%s);
     })()""" % (text_json, selector_json)
     if method in {"click", "dom_click", "confirm_click"}:

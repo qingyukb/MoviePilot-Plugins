@@ -436,6 +436,19 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertEqual(result.status, "already")
         self.assertIn("获得405个憨豆", result.message)
 
+    def test_sunnypt_menu_preset(self):
+        # SUNNYPT：头像菜单里的「立即签到」，点完只有 toast，点到就算成功
+        rule = self.core.resolve_rule({"url": "https://sunnypt.top/", "cookie": "c=1"}, {})
+        self.assertEqual(rule["engine"], "browserless")
+        self.assertEqual(rule["path"], "/")
+        self.assertEqual(rule["submit_text"], "立即签到")
+        self.assertTrue(rule.get("success_on_click"))
+        clicked = self.core.judge_after_click(
+            rule, True, "<html><body>签到成功，获得 50 金贝</body></html>")
+        self.assertEqual(clicked.status, "success")
+        self.assertIn("50 金贝", clicked.message)
+        self.assertEqual(self.core.classify("<html><body>已签到</body></html>", rule).status, "already")
+
     def test_hhanclub_success_on_click(self):
         # 憨憨点完没有任何提示，只有按钮变「已领取」：点到就算成功，没点到交给文案判定
         rule = self.core.resolve_rule({"url": "https://hhanclub.net/", "cookie": "c=1"}, {})
