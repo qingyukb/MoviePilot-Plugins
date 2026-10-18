@@ -507,19 +507,22 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertIn('avatar', submit)
         self.assertIn('立即签到', submit)
 
-    def test_sunnypt_menu_preset(self):
-        # SUNNYPT：头像菜单里的「立即签到」，点完只有 toast，点到就算成功
+    def test_sunnypt_attendance_page_preset(self):
+        # SUNNYPT：站点自带签到页 /user/attendance，不用再点头像菜单
         rule = self.core.resolve_rule({"url": "https://sunnypt.top/", "cookie": "c=1"}, {})
         self.assertEqual(rule["engine"], "browserless")
-        self.assertEqual(rule["path"], "/home")
-        self.assertEqual(rule["submit_text"], "立即签到")
-        self.assertIn("avatar", rule.get("pre_click_selector"))   # 先点头像展开菜单
-        self.assertTrue(rule.get("success_on_click"))
+        self.assertEqual(rule["path"], "/user/attendance")
+        self.assertEqual(rule["submit_text"], "签到")
+        self.assertEqual(rule["submit_method"], "dom_click")
+        # 已签到的页面（今日签到已完成 / 今日已签到）必须判 already，不能报失败
+        signed = ("<html><body>签到日历<div>今日签到已完成</div>"
+                  "<div>本次获得 12 魔力，已连续签到 3 天</div>"
+                  "<button disabled>今日已签到</button></body></html>")
+        self.assertEqual(self.core.classify(signed, rule).status, "already")
         clicked = self.core.judge_after_click(
-            rule, True, "<html><body>签到成功，获得 50 金贝</body></html>")
+            rule, True, "<html><body>今日签到已完成，本次获得 12 魔力</body></html>")
         self.assertEqual(clicked.status, "success")
-        self.assertIn("50 金贝", clicked.message)
-        self.assertEqual(self.core.classify("<html><body>已签到</body></html>", rule).status, "already")
+        self.assertIn("12 魔力", clicked.message)   # 站点奖励单位就是「魔力」
 
     def test_hhanclub_success_on_click(self):
         # 憨憨点完没有任何提示，只有按钮变「已领取」：点到就算成功，没点到交给文案判定

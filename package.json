@@ -3,7 +3,7 @@
     "name": "PT站点签到",
     "description": "PT 站点自动签到，可登录刷新 Cookie 并读取最近动向；遇到验证码或 Cloudflare 会自动改用浏览器。",
     "labels": "站点,签到",
-    "version": "1.6.7",
+    "version": "1.6.8",
     "icon": "https://raw.githubusercontent.com/qingyukb/MoviePilot-Plugins/main/icons/ptsignin.png",
     "author": "qingyukb",
     "level": 2,
@@ -11,6 +11,7 @@
     "v2": true,
     "system_version": ">=2.0.0",
     "history": {
+      "v1.6.8": "SUNNYPT 改用站点自带签到页 /user/attendance，已签到时按「今日签到已完成」判成功，不再误报失败",
       "v1.6.7": "最近动向改为逐处扫描并优先取带「(40分钟前)」的相对时间，用户页有两个日期时不再抓错",
       "v1.6.6": "HTTP 签到改为「GET 没结论 → 按页面表单 POST 提交 → 回读签到页确认」，普通站点签上了却报失败的情况会少很多",
       "v1.6.5": "按文字点击的站点（SUNNYPT / TTG / hdkyl / piggo / 憨憨 等）补上 dom_click，不再点错元素；piggo 支持 Cloudflare 勾选验证后重试",

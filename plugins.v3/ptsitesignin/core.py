@@ -75,7 +75,7 @@ CAPTCHA_PATTERN = (
     r"|验证码|驗證碼)"
 )
 # 签到奖励：单位 / 数量 / 动词抽成常量共用，新增币种只改 BONUS_UNITS 一处
-BONUS_UNITS = "魔力值|爆米花|积分|做种积分|金币|憨豆|金贝|奖励"
+BONUS_UNITS = "魔力值|魔力|爆米花|积分|做种积分|金币|憨豆|金贝|奖励"
 BONUS_AMOUNT = r"[\d,]+(?:\.\d+)?"
 BONUS_COUNTERS = "个|粒|枚|点|個|顆"
 BONUS_VERBS = "获得|獲得|獲取"
@@ -257,24 +257,21 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "success_keywords": ["签到成功", "簽到成功", "签到完成", "已签到", "本次签到"],
         "already_keywords": ["今日已签到", "今天已签到", "已签到", "已簽到", "已领取"],
     },
-    # ---- SUNNYPT（sunnypt.top）：头像菜单里的「立即签到」，签完右下角弹提示 ----
-    # 页面是 Vue 单页，签到项在头像下拉菜单里（默认隐藏，JS 点也能触发）；
-    # 点完只有 toast，页面本身不留成功文案，所以按「点到了就算成功」处理。
+    # ---- SUNNYPT（sunnypt.top）：站点自带签到页 /user/attendance（Next.js + JSON API） ----
+    # 头像菜单里的「每日签到」只是跳这个页面，不用再点菜单；
+    # 已签到时页面上是「今日签到已完成 … 已连续签到 N 天」，按钮变灰的「今日已签到」。
     "sunnypt.top": {
         "engine": "browserless",
         "mode": "open_page",
-        # 签到在 /home 页（面板页），头像菜单里的「立即签到」
-        "path": "/home",
-        # 签到项要点开头像才渲染出来，先点头像再点「立即签到」
-        "pre_click_selector": ("[class*=avatar], [class*=Avatar], header img, .user-avatar, "
-                               ".header-avatar, .el-dropdown, [class*=dropdown-toggle]"),
-        "submit_selector": "[role='menuitem'], li, a, button, span, div",
+        "path": "/user/attendance",
         "submit_method": "dom_click",
-        "submit_text": "立即签到",
-        "wait": 5000,
+        "submit_selector": "button, [role='button'], a",
+        "submit_text": "签到",
+        "wait": 4000,
+        # 点完页面不弹 toast，但按钮会立刻变成「今日已签到」：点到就算成功
         "success_on_click": True,
-        "success_keywords": ["签到成功", "簽到成功", "今日已签到"],
-        "already_keywords": ["已签到", "今日已签到", "签到成功", "已簽到"],
+        "success_keywords": ["签到成功", "簽到成功"],
+        "already_keywords": ["今日已签到", "已签到", "今日签到已完成"],
     },
     # ---- 憨憨（hhanclub.net）：日历式签到页，点「签到」后当天按钮变成「已领取」 ----
     # 页面是 Vue 渲染的日历，签到要点击完成；判定不认日历里过去几天的「已领取」，
