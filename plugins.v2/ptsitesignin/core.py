@@ -26,6 +26,9 @@ DEFAULT_ALREADY_PATTERN = (r"(今日已签|今天已签|已连续签到|已经�
 COOKIE_INVALID_PATTERN = r"(用户登录|會員登入|请先登录|请登录|login\.php)"
 # Cloudflare 挑战页特征（出现即说明请求未穿透盾，需改用 Browserless）
 CLOUDFLARE_PATTERN = r"(just a moment|cf-chl-widget|cf_chl_opt|challenge-platform)"
+# 雷池（SafeLine）WAF 的安全检测页：hdkyl.in、piggo.me 这类站点点签到后会先跳这里，
+# 由页面自己的 JS 跑几秒后自动放行，行为和 Cloudflare 交互挑战一样，只是文案不同。
+WAF_PATTERN = r"(正在进行安全检测|安全检测能力由|雷池\s*WAF|SafeLine)"
 # Cloudflare「Just a moment...」交互挑战的专属特征：这类挑战会在真实浏览器里自动执行 JS
 # 并放行，只要留够等待时间即可，无需人工点击。注意不能用 challenge-platform /
 # cf-chl-widget 判断——正常的 Turnstile 组件页也会带这些标记；挑战放行后页面会换成新
@@ -219,7 +222,9 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
     # 站点在 Cloudflare 后面（访客请求直接 468），HTTP 直连多半要挑战，默认走浏览器。
     "hdkyl.in": {
         "engine": "browserless",
-        "mode": "open_page",
+        # 点签到后会跳雷池 WAF 安全检测页，等它自动放行再继续
+        "mode": "cloudflare",
+        "cloudflare_wait": 15,
         "path": "/attendance.php",
         "submit_selector": "input[type='submit'], button, [role='button']",
         "submit_text": "立即签到",
@@ -231,7 +236,9 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
     # 先按 /attendance.php + 「立即签到」配，若日志显示卡在挑战页或找不到按钮再调。
     "piggo.me": {
         "engine": "browserless",
-        "mode": "open_page",
+        # 同 hdkyl：点签到后跳雷池 WAF 检测，等放行
+        "mode": "cloudflare",
+        "cloudflare_wait": 15,
         "path": "/attendance.php",
         "submit_selector": "input[type='submit'], button, [role='button'], a",
         "submit_text": "立即签到",
@@ -762,6 +769,8 @@ def judge_http(content: str, rule: Mapping[str, Any]) -> SignResult:
     text = content[:200000]
     if re.search(CLOUDFLARE_PATTERN, text, re.IGNORECASE):
         return SignResult("failed", "站点返回 Cloudflare 验证页", challenge="cloudflare")
+    if re.search(WAF_PATTERN, text, re.IGNORECASE):
+        return SignResult("failed", "站点返回雷池 WAF 安全检测页", challenge="cloudflare")
     if re.search(COOKIE_INVALID_PATTERN, text, re.IGNORECASE) and "logout" not in text.lower():
         return SignResult("failed", "Cookie 无效或已过期")
     already = str(rule.get("already") or DEFAULT_ALREADY_PATTERN)
@@ -1916,8 +1925,11 @@ def first_keyword(text: str, keywords: Any) -> str:
 
 
 def cloudflare_pending(html: str) -> bool:
-    """页面是否仍停留在 Cloudflare 交互挑战页（自动放行后即不再命中）。"""
-    return bool(re.search(CF_INTERSTITIAL_PATTERN, html or "", re.IGNORECASE))
+    """页面是否仍停留在 Cloudflare / 雷池 WAF 的检测页（自动放行后即不再命中）。"""
+    body = html or ""
+    if re.search(CF_INTERSTITIAL_PATTERN, body, re.IGNORECASE):
+        return True
+    return bool(re.search(WAF_PATTERN, body, re.IGNORECASE))
 
 
 def control_text(html: str) -> str:

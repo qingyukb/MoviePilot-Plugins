@@ -442,6 +442,17 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertEqual(rule["engine"], "browserless")
         self.assertEqual(rule["path"], "/attendance.php")
         self.assertEqual(rule["submit_text"], "立即签到")
+        self.assertEqual(rule["mode"], "cloudflare")
+
+    def test_waf_page_is_treated_as_challenge(self):
+        # 雷池（SafeLine）WAF 安全检测页：按挑战处理，交给浏览器重试
+        waf = ("<html><head><title>安全检测</title></head><body>正在进行安全检测"
+               "<div>安全检测能力由 雷池 WAF 驱动</div></body></html>")
+        result = self.core.judge_http(waf, {})
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.challenge, "cloudflare")
+        self.assertIn("WAF", result.message)
+        self.assertTrue(self.core.cloudflare_pending(waf))
 
     def test_ttg_and_hdkyl_presets(self):
         # TTG 没有 attendance.php，签到入口在站点页面上；HDKylin 是 NexusPHP，签到在 /attendance.php
@@ -454,6 +465,9 @@ class CoreRegressionTests(unittest.TestCase):
             self.assertEqual(hdk["engine"], "browserless")
             self.assertEqual(hdk["path"], "/attendance.php")
             self.assertEqual(hdk["submit_text"], "立即签到")
+            # 点签到后跳雷池 WAF 检测页，预设要等它放行
+            self.assertEqual(hdk["mode"], "cloudflare")
+            self.assertEqual(hdk["cloudflare_wait"], 15)
 
     def test_sunnypt_menu_preset(self):
         # SUNNYPT：头像菜单里的「立即签到」，点完只有 toast，点到就算成功
