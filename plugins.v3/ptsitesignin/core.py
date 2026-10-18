@@ -546,6 +546,104 @@ def http_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: int = 3
     return judge_http(content, rule)
 
 
+def find_signin_form(html: str, base_url: str,
+                     submit_text: str = "") -> Optional[Dict[str, Any]]:
+    """从签到页里找签到表单，返回 ``{"action", "method", "data"}``；找不到返回 None。
+
+    NexusPHP 的签到是「点表单按钮」触发的，光 GET 页面只会渲染按钮、不产生签到记录。
+    这里优先找提交按钮文字含「签到 / 打卡 / 领取」（或规则的 submit_text）的表单，
+    实在没有就退到「带提交按钮且 action 像签到」的那个。
+    """
+    wanted = str(submit_text or "").strip()
+    best: Optional[Dict[str, Any]] = None
+    fallback: Optional[Dict[str, Any]] = None
+    for raw_attrs, inner in _FORM_RE.findall(html or ""):
+        control = _submit_control(inner)
+        if not control:
+            continue
+        attrs = _tag_attrs("<form " + raw_attrs + ">")
+        action = same_site_path(base_url, attrs.get("action") or "") or \
+            (urllib.parse.urlparse(base_url).path or "/")
+        method = (attrs.get("method") or "POST").strip().upper()
+        label = re.sub(r"\s+", "", plain_text(inner) + str(control.get("value") or ""))
+        fields: Dict[str, str] = {}
+        for tag in re.findall(r"<input\b[^>]*>", inner, re.IGNORECASE):
+            item = _tag_attrs(tag)
+            name = str(item.get("name") or "").strip()
+            if not name:
+                continue
+            kind = (item.get("type") or "text").lower()
+            if kind in {"submit", "button", "image", "reset"} and \
+                    not any(word in label for word in SIGNIN_LINK_WORDS):
+                continue
+            fields[name] = str(item.get("value") or "")
+        if str(control.get("name") or "").strip():
+            fields[str(control["name"])] = str(control.get("value") or "")
+        form = {"action": action, "method": "POST" if method != "GET" else "GET",
+                "data": fields}
+        if wanted and wanted in label:
+            return form
+        if any(word in label for word in SIGNIN_LINK_WORDS):
+            best = best or form
+        elif "attendance" in action or "signin" in action or "checkin" in action:
+            fallback = fallback or form
+    return best or fallback
+
+
+def http_sign_form(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: int = 30,
+                   proxies: Optional[Dict[str, str]] = None) -> Optional[SignResult]:
+    """打开签到页、按页面上的表单 POST 提交一次，再用返回页判定。
+
+    找不到表单（或表单是 GET 链）时返回 None，交给上层继续用 GET 结果。
+    """
+    import requests
+
+    base_url = str(site.get("url") or "").rstrip("/")
+    cookie = str(site.get("cookie") or "").strip()
+    if not base_url or not cookie:
+        return None
+    path = str(rule.get("path") or DEFAULT_HTTP_PATH)
+    page_url = target_url(base_url, path)
+    headers = {
+        "User-Agent": str(site.get("ua") or "").strip() or DEFAULT_USER_AGENT,
+        "Referer": f"{base_url}/index.php",
+        "Cookie": cookie,
+        "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+    }
+    try:
+        session = requests.Session()
+        session.headers.update(headers)
+        page = session.get(page_url, timeout=timeout, allow_redirects=True, proxies=proxies)
+        if page.status_code >= 400:
+            return None
+        form = find_signin_form(page.text or "", base_url, str(rule.get("submit_text") or ""))
+        if not form or form["method"] != "POST":
+            return None
+        post_url = target_url(base_url, form["action"])
+        response = session.post(post_url, data=form["data"], timeout=timeout,
+                                allow_redirects=True, proxies=proxies)
+    except Exception:
+        return None
+    if response.status_code >= 400:
+        return None
+    return judge_http(response.text or "", rule)
+
+
+def http_confirm(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: int = 30,
+                 proxies: Optional[Dict[str, str]] = None) -> Optional[SignResult]:
+    """回读签到页确认结果：有的站点提交后返回 302 / 空白页，只有再打开一次才看得到状态。"""
+    base_url = str(site.get("url") or "").rstrip("/")
+    cookie = str(site.get("cookie") or "").strip()
+    if not base_url or not cookie:
+        return None
+    path = str(rule.get("path") or DEFAULT_HTTP_PATH)
+    html = fetch_page(target_url(base_url, path), cookie, timeout, proxies,
+                      str(site.get("ua") or ""))
+    if not html:
+        return None
+    return judge_http(html, rule)
+
+
 # 常见签到入口路径：默认路径 404 时按顺序再试，仍然找不到就从站点首页自动发现
 FALLBACK_SIGNIN_PATHS = ("/attendance.php", "/signin.php", "/sign_in.php", "/checkin.php",
                          "/plugin_sign-in.php", "/attendance.php?action=sign")
@@ -660,6 +758,19 @@ def http_sign_auto(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: in
     先试规则里的 path → 从站点首页「签到」链接自动发现 → 再试几个常见路径。
     """
     result = http_sign(site, rule, timeout=timeout, proxies=proxies)
+    if result.status in {"success", "already"}:
+        return result
+    # 页面能打开但没判定出结果：很多站点签到是「点表单按钮」触发的，
+    # 这里按页面上的表单 POST 一次，再回读签到页确认，避免「签上了却报失败」。
+    if not result.missing_path and not result.challenge:
+        posted = http_sign_form(site, rule, timeout=timeout, proxies=proxies)
+        if posted is not None and posted.status in {"success", "already"}:
+            return SignResult(posted.status, f"{posted.message}（按页面表单 POST 提交）")
+        confirmed = http_confirm(site, rule, timeout=timeout, proxies=proxies)
+        if confirmed is not None and confirmed.status in {"success", "already"}:
+            return SignResult(confirmed.status, f"{confirmed.message}（回读签到页确认）")
+        if posted is not None and posted.status == "failed":
+            return posted
     if not result.missing_path:
         return result
     base_url = str(site.get("url") or "").rstrip("/")

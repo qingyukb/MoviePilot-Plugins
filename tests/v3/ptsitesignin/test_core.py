@@ -403,6 +403,20 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertEqual(self.core.same_site_path("https://pt.example/", "../x.php"), "/x.php")
         self.assertEqual(self.core.same_site_path("https://pt.example/", "#top"), "")
 
+    def test_find_signin_form(self):
+        # 签到页里是「点按钮」触发的表单：要能取出 action / method / 字段
+        html = ('<html><body><div>每日签到</div>'
+                '<form action="/attendance.php" method="post">'
+                '<input type="hidden" name="site" value="1">'
+                '<input type="submit" name="signin" value="立即签到"></form></body></html>')
+        form = self.core.find_signin_form(html, "https://pt.example/")
+        self.assertEqual(form["action"], "/attendance.php")
+        self.assertEqual(form["method"], "POST")
+        self.assertEqual(form["data"].get("signin"), "立即签到")
+        self.assertEqual(form["data"].get("site"), "1")
+        self.assertIsNone(self.core.find_signin_form(
+            "<html><body>今日已签到</body></html>", "https://pt.example/"))
+
     def test_discover_signin_target_from_home_form(self):
         # 学校（BTSCHOOL）这种：首页上挂一个「每日签到」提交按钮，没有独立签到页
         home = ('<html><body><form method="post" action="/index.php">'

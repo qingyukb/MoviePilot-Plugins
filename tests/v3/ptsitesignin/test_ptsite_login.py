@@ -308,6 +308,35 @@ class LoginCoreTests(unittest.TestCase):
                 self.assertEqual(result.status, "failed")
                 self.assertIn("最近动向", result.message)
 
+    def test_http_sign_auto_posts_form_then_confirms(self):
+        # 签到页只有表单按钮（GET 判定不出结果）→ 按表单 POST → 回读签到页看到已签到
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                state = {"page": 0}
+                form_page = ('<html><body>每日签到'
+                             '<form action="/attendance.php" method="post">'
+                             '<input type="submit" name="signin" value="签到"></form></body></html>')
+                signed_page = "<html><body>今日已签到，已连续签到 12 天</body></html>"
+
+                def handler(session, url):
+                    method = session.calls[-1][0]
+                    if method == "POST":
+                        return FakeResponse(url, "<html><body>提交成功</body></html>")
+                    state["page"] += 1
+                    # 前两次 GET 都是「签到前的页面」（判定 + 取表单），之后回读才看到已签到
+                    return FakeResponse(url, form_page if state["page"] <= 2 else signed_page)
+
+                session = FakeSession({"attendance.php": handler})
+                rule = core.resolve_rule({"url": "https://pt.example/", "cookie": "c=1"}, {})
+                with mock.patch.dict(sys.modules, {"requests": fake_requests(session)}):
+                    result = core.http_sign_auto({"url": "https://pt.example/", "cookie": "c=1"}, rule)
+                self.assertEqual(result.status, "already", result.message)
+                self.assertIn("回读签到页确认", result.message)
+                posted = [call for call in session.calls if call[0] == "POST"]
+                self.assertTrue(posted, session.calls)
+                self.assertEqual(posted[0][2], {"signin": "签到"})
+                self.assertEqual(posted[0][1], "https://pt.example/attendance.php")
+
     def test_http_sign_auto_posts_home_signin_form(self):
         # 首页「每日签到」表单：按表单 action + method 提交，并带上按钮字段
         for core in CORES:
