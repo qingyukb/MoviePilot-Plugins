@@ -34,6 +34,13 @@ jobs:
               tail -n 120 /tmp/test.log
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
+            # 失败用例名用注解抛出来，annotations API 能直接读到
+            grep -E "^(FAIL|ERROR): " /tmp/test.log | head -n 12 | while IFS= read -r line; do
+              echo "::error title=unittest($MATRIX_PY)::$line"
+            done
+            grep -E "^(AssertionError|[A-Za-z]+Error): " /tmp/test.log | head -n 6 | while IFS= read -r line; do
+              echo "::error title=reason($MATRIX_PY)::$line"
+            done
           fi
           exit "$status"
         env:
