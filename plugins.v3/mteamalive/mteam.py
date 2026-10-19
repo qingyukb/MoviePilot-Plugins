@@ -404,8 +404,20 @@ def keepalive_login(username: str, password: str, totp_secret: str,
                 if any(word in lowered for word in keywords):
                     note.append(reason)
                     break
+        if ok:
+            # 登录成功后再真正访问几个页面：M-Team 的「最近浏览」是服务端按请求记录的，
+            # 只停在登录页有时不会刷新（日志里出现过「登录成功但最近浏览没变」）。
+            for path in ("/index", "/profile"):
+                try:
+                    page.goto(base + path, wait_until="domcontentloaded", timeout=20000)
+                    page.wait_for_timeout(1500)
+                except Exception:
+                    continue
         session_payload = capture_session(page) if ok else {}
-        return {"ok": ok, "note": "；".join(note), "title": title,
+        note_text = "；".join(note)
+        if ok:
+            note_text = (note_text + "；已访问首页确认登录").strip("；")
+        return {"ok": ok, "note": note_text, "title": title,
                 "url": getattr(page, "url", ""), "session": session_payload}
 
     try:

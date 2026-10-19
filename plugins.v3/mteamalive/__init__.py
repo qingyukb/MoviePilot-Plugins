@@ -74,7 +74,7 @@ class MTeamAlive(_PluginBase):
     plugin_name = "馒头保活"
     plugin_desc = "定时用真实浏览器登录 M-Team（账号密码 + TOTP），避免长期不登录被删号；顺带读取分享率与魔力。"
     plugin_icon = "mteamalive.png"
-    plugin_version = "1.2.0"
+    plugin_version = "1.2.1"
     plugin_author = "qingyukb"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "mteamalive_"
@@ -308,15 +308,17 @@ class MTeamAlive(_PluginBase):
             minutes = activity_minutes_ago(profile)
             moment, label = last_activity(profile)
             shown = moment.strftime("%m-%d %H:%M") if moment else "未读到"
+            browser_message = message
             if minutes is None:
-                message = f"{message}（读不到最近动向，无法二次确认）"
+                message = f"{browser_message}；读不到最近动向，无法二次确认"
             elif minutes <= self._verify_minutes:
                 ok = True
                 message = f"登录成功（{label} {shown}）"
             else:
                 ok = False
-                message = (f"登录后{label}仍是 {shown}（{minutes:.0f} 分钟前），"
-                           f"超过 {self._verify_minutes} 分钟窗口，判定本次没真正登录")
+                message = (f"浏览器侧：{browser_message}｜站点侧：{label}仍是 {shown}"
+                           f"（{minutes:.0f} 分钟前），超过 {self._verify_minutes} 分钟窗口，"
+                           f"判定本次没真正登录")
         record = {"time": now, "ok": ok, "message": message,
                   "ratio": (profile or {}).get("ratio", ""),
                   "bonus": (profile or {}).get("bonus", "")}
