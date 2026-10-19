@@ -75,7 +75,7 @@ class MTeamAlive(_PluginBase):
     plugin_name = "馒头保活"
     plugin_desc = "定时用真实浏览器登录 M-Team（账号密码 + TOTP），避免长期不登录被删号；顺带读取分享率与魔力。"
     plugin_icon = "mteamalive.png"
-    plugin_version = "1.3.1"
+    plugin_version = "1.3.2"
     plugin_author = "qingyukb"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "mteamalive_"
@@ -94,7 +94,6 @@ class MTeamAlive(_PluginBase):
     _api_base = DEFAULT_API_BASE
     _ratio_warn = 1.0
     _verify_minutes = 10
-    _reuse_session = True
     _interval_days = 20
     _api_verify = True
     _scheduler: Optional[BackgroundScheduler] = None
@@ -120,7 +119,6 @@ class MTeamAlive(_PluginBase):
                 self._verify_minutes = int(config.get("verify_minutes") or 10)
             except (TypeError, ValueError):
                 self._verify_minutes = 10
-            self._reuse_session = bool(config.get("reuse_session", True))
             try:
                 self._interval_days = max(1, int(config.get("interval_days") or 20))
             except (TypeError, ValueError):
@@ -152,7 +150,7 @@ class MTeamAlive(_PluginBase):
             "password": self._password, "totp_secret": self._totp_secret,
             "api_key": self._api_key, "api_base": self._api_base,
             "ratio_warn": self._ratio_warn, "verify_minutes": self._verify_minutes,
-            "reuse_session": self._reuse_session, "api_verify": self._api_verify,
+ "api_verify": self._api_verify,
             "interval_days": self._interval_days,
         })
 
@@ -256,9 +254,6 @@ class MTeamAlive(_PluginBase):
                      "低于该值时通知里会带上提醒，默认 1.0", type="number", min=0, step=0.1)),
             row(hint("VSwitch", "api_verify", "用 API 校验最近浏览",
                      "关掉就只按浏览器登录结果判定，不读 API", md=4),
-                hint("VSwitch", "reuse_session", "复用登录态",
-                     "保存浏览器登录态，下次直接复用（同一设备、减少异地风控与登录次数）",
-                     md=4),
                 hint("VTextField", "verify_minutes", "最近动向校验窗口（分钟）",
                      "登录后用 API 读「最近动向」（lastBrowse），在这个时间窗内才算保活成功，默认 10 分钟",
                      type="number", min=1, max=180)),
@@ -289,7 +284,7 @@ class MTeamAlive(_PluginBase):
             "password": self._password, "totp_secret": self._totp_secret,
             "api_key": self._api_key, "api_base": self._api_base,
             "ratio_warn": self._ratio_warn, "verify_minutes": self._verify_minutes,
-            "reuse_session": self._reuse_session, "api_verify": self._api_verify,
+ "api_verify": self._api_verify,
             "interval_days": self._interval_days,
         }
 
@@ -312,24 +307,14 @@ class MTeamAlive(_PluginBase):
     def keepalive(self) -> Dict[str, Any]:
         """执行一次保活：浏览器登录 + 读统计 + 记历史 + 通知。"""
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        logger.info("M-Team 保活：开始浏览器登录（账号 %s，%s）", self._username,
-                    "复用登录态" if self._reuse_session else "每次重新登录")
-        saved_session = self.get_data("session") if self._reuse_session else None
+        logger.info("M-Team 保活：开始浏览器登录（账号 %s，每次真实登录）", self._username)
         api_key = self.site_apikey()
         before_profile: Dict[str, Any] = {}
         if api_key:
             before_profile, _ = fetch_profile(api_key, self._api_base)
-        ok, message, session_out = keepalive_login(
+        ok, message = keepalive_login(
             self._username, self._password, self._totp_secret,
-            site_url=self._site_url, logger=logger, saved_session=saved_session)
-        if session_out and self._reuse_session:
-            merged = dict(saved_session or {})
-            merged.update(session_out)
-            merged["__saved_at__"] = now
-            self.save_data("session", merged)
-        elif not ok and saved_session:
-            # 登录态失效又没登录成功：清掉，避免下次继续用坏状态
-            self.del_data("session")
+            site_url=self._site_url, logger=logger)
         logger.info("M-Team 保活：浏览器登录结果 - %s", message)
         profile: Dict[str, Any] = {}
         if api_key:

@@ -1,4 +1,4 @@
-"""M-Team 保活与统计：TOTP 生成、浏览器登录、API 读取账号数据。
+﻿"""M-Team 保活与统计：TOTP 生成、浏览器登录、API 读取账号数据。
 
 保活必须是**真实浏览器登录**（M-Team 的「连续 40 天不登录删号」只有真实登录才重置），
 所以这里用 MoviePilot 自带的 PlaywrightHelper 在本机登录，不走 API ping。
@@ -332,105 +332,29 @@ LOGGED_IN_JS = """
 """
 
 
-CAPTURE_SESSION_JS = """
-() => {
-  const out = {};
-  try {
-    for (let i = 0; i < localStorage.length; i += 1) {
-      const key = localStorage.key(i);
-      if (key) out[key] = localStorage.getItem(key);
-    }
-  } catch (error) {}
-  return out;
-}
-"""
-
-RESTORE_SESSION_JS = """
-(items) => {
-  try {
-    Object.entries(items || {}).forEach(([key, value]) => {
-      if (value !== null && value !== undefined) localStorage.setItem(key, value);
-    });
-    return true;
-  } catch (error) {
-    return false;
-  }
-}
-"""
-
-
-def capture_session(page: Any) -> Dict[str, str]:
-    """把当前页面的 localStorage 抓下来（M-Team 的登录态就存这里）。"""
-    try:
-        items = page.evaluate(CAPTURE_SESSION_JS) or {}
-    except Exception:
-        return {}
-    if not isinstance(items, dict):
-        return {}
-    return {str(key): str(value) for key, value in items.items() if value is not None}
-
-
-def restore_session(page: Any, base_url: str, items: Mapping[str, Any],
-                    wait_ms: int = 3000) -> bool:
-    """先打开站点，再把上次保存的 localStorage 写回去并刷新，尽量伪装成同一台设备。"""
-    if not items:
-        return False
-    base = str(base_url or DEFAULT_SITE).rstrip("/")
-    try:
-        page.goto(base + "/", wait_until="domcontentloaded", timeout=30000)
-    except Exception:
-        return False
-    try:
-        applied = bool(page.evaluate(RESTORE_SESSION_JS, dict(items)))
-    except Exception:
-        return False
-    if not applied:
-        return False
-    try:
-        page.reload(wait_until="domcontentloaded", timeout=30000)
-        page.wait_for_timeout(max(800, int(wait_ms)))
-    except Exception:
-        pass
-    return True
-
-
 def keepalive_login(username: str, password: str, totp_secret: str,
                     site_url: str = DEFAULT_SITE, timeout: int = 90,
-                    logger: Any = None,
-                    saved_session: Optional[Mapping[str, Any]] = None
-                    ) -> Tuple[bool, str, Dict[str, str]]:
-    """用本机浏览器登录 M-Team 保活，返回 (是否成功, 说明, 本次的登录态)。
+                    logger: Any = None) -> Tuple[bool, str]:
+    """用本机浏览器做一次真实登录（账号密码 + TOTP），返回 (是否成功, 说明)。
 
-    给了 ``saved_session`` 就先尝试恢复上次的登录态（同一「设备」、也不再天天登录，
-    能显著降低异地/新设备风控）；恢复失败再退回账号密码 + TOTP。
+    不做登录态复用：实测复用 localStorage 站点不认（最近动向不刷新），
+    40 天保活只认真实登录，所以每次都走账号密码 + TOTP。
     """
     try:
         from app.helper.browser import PlaywrightHelper
     except Exception:
-        return False, "本机没有 Playwright（MoviePilot 浏览器依赖缺失），无法保活", {}
+        return False, "本机没有 Playwright（MoviePilot 浏览器依赖缺失），无法保活"
     if not hasattr(PlaywrightHelper, "action"):
-        return False, "当前 MoviePilot 版本的 PlaywrightHelper 不支持 action()，无法保活", {}
+        return False, "当前 MoviePilot 版本的 PlaywrightHelper 不支持 action()，无法保活"
 
     base = str(site_url or DEFAULT_SITE).rstrip("/")
     login_url = f"{base}/login"
-    saved_cookie = str((saved_session or {}).get("__cookie__") or "").strip()
     user = str(username or "").strip()
     if not user or not str(password or "").strip():
-        return False, "未配置 M-Team 账号或密码", {}
+        return False, "未配置 M-Team 账号或密码"
 
     def callback(page: Any) -> Dict[str, Any]:
         note = []
-        reused = False
-        if saved_session and restore_session(page, base, saved_session):
-            if page.evaluate(LOGGED_IN_JS):
-                note.append("复用上次登录态")
-                reused = True
-            else:
-                note.append("上次登录态已失效")
-        if reused:
-            session_payload = capture_session(page)
-            return {"ok": True, "note": "；".join(note), "reused": True,
-                    "session": session_payload, "title": "", "url": ""}
         try:
             page.goto(login_url, wait_until="domcontentloaded",
                       timeout=max(20000, int(timeout * 1000)))
@@ -545,26 +469,21 @@ def keepalive_login(username: str, password: str, totp_secret: str,
                     page.wait_for_timeout(1500)
                 except Exception:
                     continue
-        session_payload = capture_session(page) if ok else {}
         note_text = "；".join(note)
         if ok:
             note_text = (note_text + "；已访问首页确认登录").strip("；")
         return {"ok": ok, "note": note_text, "title": title,
-                "url": getattr(page, "url", ""), "session": session_payload}
+                "url": getattr(page, "url", "")}
 
     try:
         outcome = PlaywrightHelper().action(url="about:blank", callback=callback,
-                                            cookies=saved_cookie or None,
                                             headless=True, timeout=max(60, int(timeout)))
     except Exception as error:
-        return False, f"启动本机浏览器失败：{error}", {}
+        return False, f"启动本机浏览器失败：{error}"
     if not outcome:
-        return False, "本机浏览器没有返回结果", {}
-    session_out = outcome.get("session") if isinstance(outcome.get("session"), dict) else {}
+        return False, "本机浏览器没有返回结果"
     if outcome.get("ok"):
         note = outcome.get("note") or ""
-        prefix = "登录成功" if not outcome.get("reused") else "登录态复用成功"
         stamp = datetime.now().strftime("%m-%d %H:%M")
-        return True, f"{prefix}（{stamp}）{('；' + note) if note else ''}", session_out
-    return (False, "登录未成功" + (f"：{outcome.get('note')}" if outcome.get("note") else ""),
-            session_out)
+        return True, f"登录成功（{stamp}）{('；' + note) if note else ''}"
+    return False, "登录未成功" + (f"：{outcome.get('note')}" if outcome.get("note") else "")
