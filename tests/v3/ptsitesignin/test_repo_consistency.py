@@ -13,7 +13,7 @@ ROOT = next((parent for parent in Path(__file__).resolve().parents
 # 插件目录名 -> 市场清单里的插件 key
 PLUGINS = {
     "ptsitesignin": "PTSiteSignIn",
-    "mteamkeepalive": "MTeamKeepAlive",
+    "mteamalive": "MTeamAlive",
 }
 MANIFESTS = ("package.json", "package.v2.json", "package.v3.json")
 

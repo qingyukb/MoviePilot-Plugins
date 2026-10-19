@@ -70,14 +70,14 @@ PAGE_STYLE = (
 )
 
 
-class MTeamKeepAlive(_PluginBase):
+class MTeamAlive(_PluginBase):
     plugin_name = "馒头保活"
     plugin_desc = "定时用真实浏览器登录 M-Team（账号密码 + TOTP），避免长期不登录被删号；顺带读取分享率与魔力。"
-    plugin_icon = "mteamkeepalive.png"
-    plugin_version = "1.1.5"
+    plugin_icon = "mteamalive.png"
+    plugin_version = "1.2.0"
     plugin_author = "qingyukb"
     author_url = "https://blog.qyus.cn"
-    plugin_config_prefix = "mteamkeepalive_"
+    plugin_config_prefix = "mteamalive_"
     plugin_order = 30
     auth_level = 1
 
@@ -125,7 +125,7 @@ class MTeamKeepAlive(_PluginBase):
             add_once = getattr(scheduler_sdk, "add_plugin_once_job", None) if scheduler_sdk else None
             if callable(add_once):
                 try:
-                    add_once(self.__class__.__name__, "keepalive_once", self.keepalive,
+                    add_once(self.__class__.__name__, "mteam_alive_once", self.keepalive,
                              "M-Team 保活（立即执行）", delay_seconds=3)
                 except Exception:
                     logger.exception("M-Team 保活：登记一次性任务失败")

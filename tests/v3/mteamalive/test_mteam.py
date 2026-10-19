@@ -10,8 +10,8 @@ from pathlib import Path
 ROOT = next((parent for parent in Path(__file__).resolve().parents
               if (parent / "package.json").is_file() and (parent / "plugins.v2").is_dir()),
              Path(__file__).resolve().parents[1])
-PLUGIN_DIRS = (ROOT / "plugins.v2" / "mteamkeepalive",
-               ROOT / "plugins.v3" / "mteamkeepalive")
+PLUGIN_DIRS = (ROOT / "plugins.v2" / "mteamalive",
+               ROOT / "plugins.v3" / "mteamalive")
 
 
 class _Logger:
@@ -111,7 +111,7 @@ _install_stubs()
 
 
 def _load(folder: Path):
-    package = "mteamkeepalive_" + folder.parent.name.replace(".", "_")
+    package = "mteamalive_" + folder.parent.name.replace(".", "_")
     spec = importlib.util.spec_from_file_location(
         package, folder / "__init__.py", submodule_search_locations=[str(folder)])
     module = importlib.util.module_from_spec(spec)
@@ -232,7 +232,7 @@ class FetchProfileTests(unittest.TestCase):
 
 class KeepaliveFlowTests(unittest.TestCase):
     def _plugin(self, module):
-        plugin = module.MTeamKeepAlive.__new__(module.MTeamKeepAlive)
+        plugin = module.MTeamAlive.__new__(module.MTeamAlive)
         plugin._data = {}
         plugin._enabled = True
         plugin._notify = True
@@ -356,7 +356,7 @@ class PageTests(unittest.TestCase):
     def test_empty_page_hint(self):
         for module in PLUGINS:
             with self.subTest(plugin=module.__name__):
-                plugin = module.MTeamKeepAlive.__new__(module.MTeamKeepAlive)
+                plugin = module.MTeamAlive.__new__(module.MTeamAlive)
                 plugin._data = {}
                 page = plugin.get_page()
                 self.assertEqual(page[0]["component"], "VAlert")
@@ -364,7 +364,7 @@ class PageTests(unittest.TestCase):
     def test_page_renders_stats_and_rows(self):
         for module in PLUGINS:
             with self.subTest(plugin=module.__name__):
-                plugin = module.MTeamKeepAlive.__new__(module.MTeamKeepAlive)
+                plugin = module.MTeamAlive.__new__(module.MTeamAlive)
                 plugin._data = {
                     "profile": module.parse_profile(ProfileTests.PAYLOAD),
                     "history": [{"time": "2026-10-19 09:00:00", "ok": True, "message": "登录成功"},
@@ -396,7 +396,7 @@ class FormTests(unittest.TestCase):
     def test_form_has_expected_models(self):
         for module in PLUGINS:
             with self.subTest(plugin=module.__name__):
-                plugin = module.MTeamKeepAlive.__new__(module.MTeamKeepAlive)
+                plugin = module.MTeamAlive.__new__(module.MTeamAlive)
                 form, defaults = plugin.get_form()
                 text = str(form)
                 for model in ("enabled", "notify", "run_once", "cron", "site_url",
