@@ -16,15 +16,16 @@
     }
   },
   "MTeamKeepAlive": {
-    "name": "M-Team 保活",
-    "description": "定时用真实浏览器登录 M-Team（账号密码 + TOTP），避免连续 40 天不登录被删号；顺带用 API Key 读取分享率、上传下载与魔力。",
+    "name": "馒头保活",
+    "description": "定时用真实浏览器登录 M-Team（馒头，账号密码 + TOTP），避免连续 40 天不登录被删号；顺带用 API Key 读取分享率、上传下载与魔力。",
     "labels": "站点,保活",
-    "version": "1.1.4",
+    "version": "1.1.5",
     "icon": "mteamkeepalive.png",
     "author": "qingyukb",
     "level": 1,
     "release": false,
     "history": {
+      "v1.1.5": "插件显示名改为「馒头保活」",
       "v1.1.4": "关闭 release 标记：仓库没有 GitHub Release 包，改由市场按源码下载安装",
       "v1.1.3": "图标改成官方写法：icons/mteamkeepalive.png 配裸文件名",
       "v1.1.2": "按官方 V3 规范整改：优先使用 app.sdk 导入、一次性任务交给宿主调度器、远程命令改成 PluginAction + data 格式",

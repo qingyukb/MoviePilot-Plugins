@@ -18,9 +18,9 @@ PT 站点自动签到，支持 V2 / V3。签到走 HTTP 直连，遇验证码或
 
 不配置也能签普通站点。需要时：<https://browserless.io/signup/email?plan=free> 注册 → 打开 <https://browserless.io/account/> 复制 API Key → 填入插件设置，地址留 `https://production-sfo.browserless.io`。
 
-## M-Team 保活
+## 馒头保活（M-Team）
 
-M-Team（馒头）连续 40 天不登录会删号，而且只有真实登录才重置计时。插件每天用 MoviePilot
+馒头（M-Team）连续 40 天不登录会删号，而且只有真实登录才重置计时。插件每天用 MoviePilot
 自带的浏览器在家宽 IP 上登录一次，账号密码 + TOTP 全自动；顺带读取分享率、上传下载与魔力。
 
 主要功能：
