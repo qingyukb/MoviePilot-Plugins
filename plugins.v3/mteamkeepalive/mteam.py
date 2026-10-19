@@ -146,7 +146,11 @@ def activity_minutes_ago(profile: Mapping[str, Any]) -> Optional[float]:
 def fetch_profile(api_key: str, api_base: str = DEFAULT_API_BASE,
                   timeout: int = 20) -> Tuple[Optional[Dict[str, Any]], str]:
     """用 API Key 读账号详情，返回 (profile, 错误说明)。"""
-    import requests
+    try:
+        import requests
+    except ImportError:
+        # 极少见的精简环境没有 requests：保活照常，只是读不到统计
+        return None, "当前环境缺少 requests 库，读不到账号统计"
 
     key = str(api_key or "").strip()
     if not key:

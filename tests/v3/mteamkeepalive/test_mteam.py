@@ -321,11 +321,14 @@ class KeepaliveFlowTests(unittest.TestCase):
             with self.subTest(plugin=module.__name__):
                 plugin = self._plugin(module)
                 original = module.keepalive_login
+                original_fetch = module.fetch_profile
                 module.keepalive_login = lambda *a, **k: (False, "需要 2FA 但没有配置 TOTP 密钥", {})
+                module.fetch_profile = lambda *a, **k: (None, "mock")
                 try:
                     record = plugin.keepalive()
                 finally:
                     module.keepalive_login = original
+                    module.fetch_profile = original_fetch
                 self.assertFalse(record["ok"])
                 self.assertIn("保活失败", plugin._last_message["text"])
                 self.assertIn("TOTP", plugin._last_message["text"])
