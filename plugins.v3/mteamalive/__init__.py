@@ -75,7 +75,7 @@ class MTeamAlive(_PluginBase):
     plugin_name = "馒头保活"
     plugin_desc = "定时用真实浏览器登录 M-Team（账号密码 + TOTP），避免长期不登录被删号；顺带读取分享率与魔力。"
     plugin_icon = "mteamalive.png"
-    plugin_version = "1.3.4"
+    plugin_version = "1.3.5"
     plugin_author = "qingyukb"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "mteamalive_"
@@ -241,51 +241,53 @@ class MTeamAlive(_PluginBase):
             return {"component": "VRow", "content": list(cols)}
 
         return [{"component": "VForm", "content": [
+            # 总开关
             row(field("VSwitch", "enabled", "启用插件", 4),
-                hint("VSwitch", "notify", "发送通知", "每次保活结果都会推送，含分享率与魔力", 4),
+                hint("VSwitch", "notify", "发送通知", "每次结果都会推送，含分享率与魔力", 4),
                 hint("VSwitch", "run_once", "保存后立即执行一次",
-                     "保存后马上登录一次，验证账号密码与 TOTP 是否可用", 4)),
-            row(field("VCronField", "cron", "执行周期",
-                      placeholder="5 位 Cron；默认 0 9 * * *（每天 9 点）"),
-                hint("VTextField", "interval_days", "执行间隔（天）",
-                     "定时任务每天检查一次，距上次成功保活不满这么多天就跳过，默认 20 天",
-                     type="number", min=1, max=60),
-                hint("VTextField", "ratio_warn", "分享率提醒阈值",
-                     "低于该值时通知里会带上提醒，默认 1.0", type="number", min=0, step=0.1)),
-            row(hint("VSwitch", "api_verify", "用 API 校验最近浏览",
-                     "关掉就只按浏览器登录结果判定，不读 API", md=4),
-                hint("VTextField", "verify_minutes", "最近动向校验窗口（分钟）",
-                     "登录后用 API 读「最近动向」（lastBrowse），在这个时间窗内才算保活成功，默认 10 分钟",
-                     type="number", min=1, max=180)),
-            row(field("VTextField", "site_url", "站点地址",
-                      placeholder=DEFAULT_SITE,
-                      hint="默认 https://kp.m-team.cc，也可填 m-team.io 镜像",
-                      **{"persistent-hint": True}),
+                     "保存后马上登录一次，验证账号密码与 TOTP", 4)),
+            # 账号与二次验证
+            row(hint("VTextField", "username", "M-Team 账号", "站点登录账号", 4),
+                hint("VTextField", "password", "密码", "站点登录密码", 4,
+                     type="password"),
+                hint("VTextField", "totp_secret", "TOTP 密钥",
+                     "二次验证的 32 位密钥，用于自动填 6 位码；没开 2FA 可留空", 4)),
+            # 站点地址
+            row(hint("VTextField", "site_url", "站点地址",
+                     "默认 https://kp.m-team.cc，也可填 m-team.io 镜像", 6,
+                     placeholder=DEFAULT_SITE),
                 hint("VTextField", "api_base", "API 地址",
-                     "读取统计用，默认 https://api.m-team.cc", placeholder=DEFAULT_API_BASE)),
-            row(field("VTextField", "username", "M-Team 账号", 4),
-                field("VTextField", "password", "密码", 4, type="password"),
-                field("VTextField", "totp_secret", "TOTP 密钥", 4,
-                      hint="二次验证的 32 位密钥（去掉空格），用于自动填 2FA",
-                      **{"persistent-hint": True})),
-            row({"component": "VCol", "props": {"cols": 12}, "content": [{
-                "component": "VAlert", "props": {"type": "info", "variant": "tonal",
-                                                 "density": "compact", "class": "mb-2"},
-                "text": "API Key 不用填：统计与「最近动向」校验自动使用 MoviePilot 站点管理里 "
-                        "m-team 站点的「令牌（API Key）」。"}]}),
+                     "读统计用，默认 https://api.m-team.cc", 6,
+                     placeholder=DEFAULT_API_BASE)),
+            # 执行策略
+            row(hint("VTextField", "interval_days", "执行间隔（天）",
+                     "每天检查一次，距上次成功不满这么多天就跳过，默认 20 天", 4,
+                     type="number", min=1, max=60),
+                hint("VCronField", "cron", "检查时间",
+                     "多久检查一次是否需要保活，默认每天 9 点", 4,
+                     placeholder="0 9 * * *"),
+                hint("VTextField", "ratio_warn", "分享率提醒阈值",
+                     "低于该值时通知里带提醒，默认 1.0", 4,
+                     type="number", min=0, step=0.1)),
+            # 校验
+            row(hint("VSwitch", "api_verify", "用「最近动向」校验登录",
+                     "关掉只按浏览器结果判定", 4),
+                hint("VTextField", "verify_minutes", "校验窗口（分钟）",
+                     "登录后站点「最近动向」必须在这个时间内刷新，默认 10 分钟", 4,
+                     type="number", min=1, max=180),
+                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": []}),
             row({"component": "VCol", "props": {"cols": 12}, "content": [{
                 "component": "VAlert", "props": {"type": "warning", "variant": "tonal",
                                                  "density": "compact"},
-                "text": "M-Team 连续 40 天不登录会删号，且只有「真实登录」才重置计时（API 访问不算）。"
-                        "本插件用 MoviePilot 自带的浏览器在家宽 IP 上登录，请确保容器里有 Playwright。"}]}),
+                "text": "M-Team 连续 40 天不登录会删号，且只有真实登录才重置计时（API 访问不算）。"
+                        "插件用 MoviePilot 自带浏览器登录，请确保容器里有 Playwright。"}]}),
         ]}], {
             "enabled": self._enabled, "notify": self._notify, "run_once": False,
             "cron": self._cron, "site_url": self._site_url, "username": self._username,
             "password": self._password, "totp_secret": self._totp_secret,
             "api_key": self._api_key, "api_base": self._api_base,
             "ratio_warn": self._ratio_warn, "verify_minutes": self._verify_minutes,
- "api_verify": self._api_verify,
-            "interval_days": self._interval_days,
+            "api_verify": self._api_verify, "interval_days": self._interval_days,
         }
 
     # ------------------------------------------------------------------ 保活
