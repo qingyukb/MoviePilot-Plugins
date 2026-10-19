@@ -233,6 +233,48 @@ _LOGIN_HINTS = (
     (("帳號已被封", "账号已被封", "banned"), "账号被封禁"),
 )
 
+HAS_LOGIN_FORM_JS = """
+() => Boolean(document.querySelector(
+  'input#username, input[name=username], input[type=email], input#password, input[name=password]'))
+"""
+
+CHALLENGE_JS = """
+() => {
+  const text = (document.body && document.body.innerText || '').toLowerCase();
+  return /just a moment|checking your browser|正在进行安全检测|正在验证您是否是真人|verify you are human/.test(text)
+    || Boolean(document.querySelector('iframe[src*=challenges.cloudflare.com], .cf-turnstile, #cf-chl-widget'));
+}
+"""
+
+CLICK_CF_JS = """
+() => {
+  const frame = document.querySelector('iframe[src*=challenges.cloudflare.com]');
+  if (frame) {
+    try {
+      const doc = frame.contentDocument;
+      const box = doc && doc.querySelector('input[type=checkbox]');
+      if (box) { box.click(); return true; }
+    } catch (error) {}
+  }
+  const turnstile = document.querySelector('.cf-turnstile, #cf-chl-widget');
+  if (turnstile) { turnstile.click(); return true; }
+  return false;
+}
+"""
+
+PAGE_SNAPSHOT_JS = """
+() => {
+  const body = (document.body && document.body.innerText) || '';
+  return JSON.stringify({
+    url: location.href,
+    title: document.title || '',
+    text: body.replace(/\\s+/g, ' ').slice(0, 300),
+    hasForm: Boolean(document.querySelector('input#username, input[name=username], input#password')),
+  });
+}
+"""
+
+
 LOGGED_IN_JS = """
 () => {
   try {
@@ -349,6 +391,39 @@ def keepalive_login(username: str, password: str, totp_secret: str,
                       timeout=max(20000, int(timeout * 1000)))
         except Exception as error:
             note.append(f"打开登录页失败：{error}")
+
+        # 等页面真正可用：要么已登录，要么出现登录表单；遇到 Cloudflare/雷池 检测页就等它放行
+        ready = False
+        waited_ms = 0
+        for _ in range(12):
+            try:
+                if page.evaluate(LOGGED_IN_JS):
+                    ready = True
+                    break
+                if page.evaluate(HAS_LOGIN_FORM_JS):
+                    ready = True
+                    break
+                if page.evaluate(CHALLENGE_JS):
+                    try:
+                        page.evaluate(CLICK_CF_JS)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            try:
+                page.wait_for_timeout(1500)
+            except Exception:
+                break
+            waited_ms += 1500
+        if not ready:
+            snapshot = ""
+            try:
+                snapshot = str(page.evaluate(PAGE_SNAPSHOT_JS) or "")
+            except Exception:
+                snapshot = ""
+            note.append(f"等了 {waited_ms // 1000} 秒没等到登录表单")
+            if snapshot:
+                note.append(f"页面现场：{snapshot[:400]}")
             return {"ok": False, "note": "；".join(note)}
         try:
             page.wait_for_timeout(1500)
