@@ -184,9 +184,6 @@ def fetch_profile(api_key: str, api_base: str = DEFAULT_API_BASE,
 LOGIN_JS_FILL = """
 (args) => {
   const [username, password] = args;
-  const userInput = document.querySelector('input#username, input[name=username]');
-  const passInput = document.querySelector('input#password, input[name=password]');
-  if (!userInput || !passInput) return false;
   const setValue = (node, value) => {
     const setter = Object.getOwnPropertyDescriptor(
       node.constructor.prototype, 'value').set;
@@ -194,48 +191,75 @@ LOGIN_JS_FILL = """
     node.dispatchEvent(new Event('input', { bubbles: true }));
     node.dispatchEvent(new Event('change', { bubbles: true }));
   };
+  const visible = (node) => Boolean(node) &&
+    (node.offsetParent !== null || node.getClientRects().length > 0);
+
+  // 密码框最稳：type=password
+  const passInput = [...document.querySelectorAll('input[type=password]')].find(visible);
+  if (!passInput) return false;
+
+  // 用户名框：同表单里密码框前面的文本框，或按 placeholder / autocomplete 猜
+  const form = passInput.form || document;
+  const candidates = [
+    form.querySelector('input#username'),
+    form.querySelector('input[name=username]'),
+    form.querySelector('input[autocomplete=username]'),
+    form.querySelector('input[type=email]'),
+    form.querySelector('input[type=text]'),
+    ...[...form.querySelectorAll('input')].filter((node) =>
+      /帳號|账号|用戶|用户|郵箱|邮箱|email|account|username/i.test(node.placeholder || '')),
+  ].filter((node) => node && node !== passInput && visible(node));
+
+  const userInput = candidates[0];
+  if (!userInput) return false;
+
   setValue(userInput, username);
   setValue(passInput, password);
-  const form = passInput.form || document;
-  const button = form.querySelector('button[type=submit]') ||
-                 document.querySelector('button[type=submit]');
-  if (button) { button.click(); return true; }
-  return false;
+
+  const scope = passInput.form || document;
+  const button = scope.querySelector('button[type=submit]') ||
+                 [...scope.querySelectorAll('button, [role=button]')].find((node) =>
+                   /登錄|登录|登入|login|sign in/i.test((node.textContent || '').trim()));
+  if (!button) return false;
+  button.click();
+  return true;
 }
 """
 
 OTP_JS_FILL = """
 (code) => {
-  const input = document.querySelector(
-    'input#otp-code, input[name=otp-code], input[id*=otp], input[name*=otp]');
-  if (!input) return false;
+  const visible = (node) => Boolean(node) &&
+    (node.offsetParent !== null || node.getClientRects().length > 0);
+  const inputs = [...document.querySelectorAll('input')].filter(visible);
+  const target = inputs.find((node) => /驗證碼|验证码|verification|authenticator|otp/i
+                    .test(node.placeholder || '')) ||
+                 inputs.find((node) => node.autocomplete === 'one-time-code') ||
+                 inputs.find((node) => node.maxLength === 6 && node.type !== 'password') ||
+                 document.querySelector('input#otp-code, input[name=otp-code]');
+  if (!target) return false;
   const setter = Object.getOwnPropertyDescriptor(
-    input.constructor.prototype, 'value').set;
-  setter.call(input, code);
-  input.dispatchEvent(new Event('input', { bubbles: true }));
-  input.dispatchEvent(new Event('change', { bubbles: true }));
-  const form = input.form || document;
+    target.constructor.prototype, 'value').set;
+  setter.call(target, code);
+  target.dispatchEvent(new Event('input', { bubbles: true }));
+  target.dispatchEvent(new Event('change', { bubbles: true }));
+
+  const form = target.form || document;
   const button = form.querySelector('button[type=submit]') ||
-                 document.querySelector('button[type=submit]') ||
-                 [...document.querySelectorAll('button')].find((node) =>
-                    (node.textContent || '').includes('確認'));
-  if (button) { button.click(); return true; }
-  return false;
+                 [...form.querySelectorAll('button, [role=button]')].find((node) =>
+                   /登錄|登录|登入|確認|确认|下一步|next/i.test((node.textContent || '').trim()));
+  if (!button) return false;
+  button.click();
+  return true;
 }
 """
 
-# 登录失败时页面上的提示 → 给用户看得懂的结论
-_LOGIN_HINTS = (
-    (("郵箱驗證", "邮箱验证", "驗證碼已發送", "验证码已发送", "check your email",
-      "verification code has been sent"), "站点要求邮箱验证码（风控触发），插件无法自动完成"),
-    (("安全問題", "安全问题", "security question"), "站点要求回答安全问题，插件无法自动完成"),
-    (("密碼錯誤", "密码错误", "incorrect password", "帳號或密碼"), "账号或密码错误"),
-    (("帳號已被封", "账号已被封", "banned"), "账号被封禁"),
-)
-
 HAS_LOGIN_FORM_JS = """
-() => Boolean(document.querySelector(
-  'input#username, input[name=username], input[type=email], input#password, input[name=password]'))
+() => {
+  const pick = (selector) => [...document.querySelectorAll(selector)]
+    .some((node) => node.offsetParent !== null || node.getClientRects().length > 0);
+  return pick('input[type=password]') || pick('input#username') || pick('input[name=username]')
+    || pick('input[placeholder*="帳號"]') || pick('input[placeholder*="账号"]');
+}
 """
 
 CHALLENGE_JS = """
