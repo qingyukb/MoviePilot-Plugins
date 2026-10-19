@@ -9,13 +9,36 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-import pytz
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from app.core.config import settings
-from app.log import logger
-from app.plugins import _PluginBase
+# 官方 V3 规范：优先用稳定 SDK；V2 环境回退到旧路径
+try:  # MoviePilot V3
+    from app.sdk.plugin import _PluginBase  # type: ignore[no-redef]
+except ImportError:  # V2
+    from app.plugins import _PluginBase
+
+try:
+    from app.sdk.logging import logger
+except ImportError:
+    from app.log import logger
+
+try:
+    from app.sdk.config import settings
+except ImportError:
+    from app.core.config import settings
+
+try:  # 一次性任务交给宿主调度器（V3）
+    from app.sdk import scheduler as scheduler_sdk
+except ImportError:
+    scheduler_sdk = None
+
+try:
+    from app.sdk.events import Event, EventType, eventmanager
+except ImportError:
+    from app.core.event import Event, eventmanager
+    from app.schemas.types import EventType
+
 from app.schemas.types import NotificationType
 
 from .mteam import (DEFAULT_API_BASE, DEFAULT_SITE, activity_minutes_ago, fetch_profile,
@@ -51,7 +74,7 @@ class MTeamKeepAlive(_PluginBase):
     plugin_name = "M-Team 保活"
     plugin_desc = "定时用真实浏览器登录 M-Team（账号密码 + TOTP），避免长期不登录被删号；顺带读取分享率与魔力。"
     plugin_icon = "signin.png"
-    plugin_version = "1.1.1"
+    plugin_version = "1.1.2"
     plugin_author = "qingyukb"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "mteamkeepalive_"
@@ -98,12 +121,21 @@ class MTeamKeepAlive(_PluginBase):
         if self._run_once:
             self._run_once = False
             self._save_config()
-            scheduler = BackgroundScheduler(timezone=settings.TZ)
-            scheduler.add_job(func=self.keepalive, trigger="date",
-                              run_date=datetime.now(tz=pytz.timezone(settings.TZ)),
-                              name="M-Team 保活（立即执行）")
-            scheduler.start()
-            self._scheduler = scheduler
+            # 官方规范：一次性任务交给宿主调度器，不自建 BackgroundScheduler
+            add_once = getattr(scheduler_sdk, "add_plugin_once_job", None) if scheduler_sdk else None
+            if callable(add_once):
+                try:
+                    add_once(self.__class__.__name__, "keepalive_once", self.keepalive,
+                             "M-Team 保活（立即执行）", delay_seconds=3)
+                except Exception:
+                    logger.exception("M-Team 保活：登记一次性任务失败")
+            else:
+                # 老版本没有该接口时退回本地调度器
+                scheduler = BackgroundScheduler(timezone=settings.TZ)
+                scheduler.add_job(func=self.keepalive, trigger="date",
+                                  run_date=datetime.now(), name="M-Team 保活（立即执行）")
+                scheduler.start()
+                self._scheduler = scheduler
 
     def _save_config(self) -> None:
         self.update_config({
@@ -145,12 +177,23 @@ class MTeamKeepAlive(_PluginBase):
 
     @staticmethod
     def get_command() -> List[Dict[str, Any]]:
+        """注册远程命令：/mteam_keepalive 立即保活一次。"""
         return [{
             "cmd": "/mteam_keepalive",
-            "event": "mteam_keepalive",
+            "event": EventType.PluginAction,
             "desc": "立即执行一次 M-Team 保活",
-            "category": "站点",
+            "category": "插件命令",
+            "data": {"action": "mteam_keepalive"},
         }]
+
+    @eventmanager.register(EventType.PluginAction)
+    def handle_command(self, event: Event) -> None:
+        """处理插件命令事件（只认自己的 action）。"""
+        payload = (getattr(event, "event_data", None) or {})
+        if str(payload.get("action") or "") != "mteam_keepalive":
+            return
+        record = self.keepalive()
+        logger.info("M-Team 保活：命令执行完成，%s", record.get("message", ""))
 
     def get_api(self) -> List[Dict[str, Any]]:
         return [{

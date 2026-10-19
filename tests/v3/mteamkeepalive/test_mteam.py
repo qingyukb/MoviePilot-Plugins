@@ -50,11 +50,28 @@ def _install_stubs() -> None:
     schemas = types.ModuleType("app.schemas")
     types_mod = types.ModuleType("app.schemas.types")
     types_mod.NotificationType = types.SimpleNamespace(Plugin="Plugin", SiteMessage="SiteMessage")
+    types_mod.EventType = types.SimpleNamespace(PluginAction="PluginAction")
     schemas.types = types_mod
     config = types.ModuleType("app.core.config")
     config.settings = types.SimpleNamespace(TZ="Asia/Shanghai", PROXY=None)
     core = types.ModuleType("app.core")
     core.config = config
+    event_mod = types.ModuleType("app.core.event")
+
+    class _Event:
+        def __init__(self, event_data=None):
+            self.event_data = event_data or {}
+
+    class _EventManager:
+        @staticmethod
+        def register(event_type):
+            def decorator(func):
+                return func
+            return decorator
+
+    event_mod.Event = _Event
+    event_mod.eventmanager = _EventManager()
+    core.event = event_mod
     sched = types.ModuleType("apscheduler")
     sched_bg = types.ModuleType("apscheduler.schedulers")
     sched_bg_bg = types.ModuleType("apscheduler.schedulers.background")
@@ -82,6 +99,7 @@ def _install_stubs() -> None:
     sys.modules.update({
         "app": app, "app.plugins": plugins, "app.log": log, "app.schemas": schemas,
         "app.schemas.types": types_mod, "app.core": core, "app.core.config": config,
+        "app.core.event": event_mod,
         "apscheduler": sched, "apscheduler.schedulers": sched_bg,
         "apscheduler.schedulers.background": sched_bg_bg,
         "apscheduler.triggers": sched_tr, "apscheduler.triggers.cron": sched_tr_cron,
