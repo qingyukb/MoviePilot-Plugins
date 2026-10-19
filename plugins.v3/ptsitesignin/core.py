@@ -1100,6 +1100,62 @@ _PAGE_CLICK_JS = """
 """
 
 
+_CHALLENGE_PATTERN = re.compile(r"(just a moment|cf-chl|_cf_chl_opt|chl_page|"
+                                r"正在进行安全检测|安全检测能力由|雷池\s*WAF|SafeLine|"
+                                r"正在验证您是否是真人|verify you are human|checking your browser)",
+                                re.IGNORECASE)
+_CF_FRAME_RE = "iframe[src*='challenges.cloudflare.com'], iframe[src*='turnstile']"
+
+
+def _page_has_challenge(html: str) -> bool:
+    """页面是否还停在 Cloudflare / 雷池 的检测页。"""
+    return bool(html) and bool(_CHALLENGE_PATTERN.search(html))
+
+
+def _click_cf_checkbox(page: Any) -> bool:
+    """试着点 Cloudflare/Turnstile 的「验证您是真人」勾选框（在 iframe 里）。"""
+    try:
+        frames = getattr(page, "frames", None)
+        targets = [frame for frame in (frames or []) if "challenges.cloudflare.com" in
+                   str(getattr(frame, "url", "") or "")]
+        for frame in targets:
+            for selector in ("input[type='checkbox']", "label", "#challenge-stage"):
+                try:
+                    frame.click(selector, timeout=1500)
+                    return True
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    # 退化方案：用 frame_locator 点 iframe 内的勾选框
+    try:
+        page.frame_locator(_CF_FRAME_RE).locator("input[type='checkbox']").first.click(timeout=1500)
+        return True
+    except Exception:
+        return False
+
+
+def _wait_challenge_clear(page: Any, budget_ms: int) -> str:
+    """等检测页自己放行，返回最后的页面 HTML。"""
+    import time as _time
+
+    deadline = _time.monotonic() + max(3, budget_ms / 1000)
+    html = ""
+    while _time.monotonic() < deadline:
+        try:
+            html = page.content() or ""
+        except Exception:
+            html = ""
+        if not _page_has_challenge(html):
+            return html
+        _click_cf_checkbox(page)
+        try:
+            page.wait_for_timeout(1500)
+        except Exception:
+            _time.sleep(1.5)
+    return html
+
+
 def playwright_available() -> bool:
     """MoviePilot 是否带 PlaywrightHelper（官方镜像默认带）。"""
     try:
@@ -1133,13 +1189,18 @@ def playwright_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: i
     submit_text = str(rule.get("submit_text") or "")
     wait_ms = int(rule.get("wait") or 4000)
 
+    # CF / 雷池 都靠页面自己的 JS 跑完才放行：勾选式还要点一下 iframe 里的勾选框。
+    # 预算取规则里的 cloudflare_wait（秒），没写就按 20 秒。
+    try:
+        challenge_budget = int(float(rule.get("cloudflare_wait") or 20)) * 1000
+    except (TypeError, ValueError):
+        challenge_budget = 20000
+    # 挑战页本身也要能点勾选，给足超时
+    wait_ms = max(wait_ms, 4000)
+
     def callback(page: Any) -> Dict[str, Any]:
         page.wait_for_load_state("domcontentloaded")
-        before = ""
-        try:
-            before = page.content() or ""
-        except Exception:
-            before = ""
+        before = _wait_challenge_clear(page, challenge_budget)
         clicked = False
         if not before or classify(before, rule).status not in {"success", "already"}:
             try:
@@ -1150,11 +1211,14 @@ def playwright_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: i
                 page.wait_for_timeout(max(1000, wait_ms))
             except Exception:
                 pass
-        after = ""
-        try:
-            after = page.content() or ""
-        except Exception:
-            after = ""
+            # 点完签到可能被踢到雷池 / Cloudflare 检测页，再等一次放行
+            after = _wait_challenge_clear(page, challenge_budget)
+        else:
+            after = before
+            try:
+                after = page.content() or after
+            except Exception:
+                pass
         return {"before": before, "after": after, "clicked": clicked}
 
     try:
