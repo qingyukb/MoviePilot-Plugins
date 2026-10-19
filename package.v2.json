@@ -19,13 +19,13 @@
     "name": "馒头保活",
     "description": "定时用真实浏览器登录 M-Team（馒头，账号密码 + TOTP），避免连续 40 天不登录被删号；顺带用 API Key 读取分享率、上传下载与魔力。",
     "labels": "站点,保活",
-    "version": "1.3.2",
+    "version": "1.3.3",
     "icon": "mteamalive.png",
     "author": "qingyukb",
     "level": 1,
     "release": false,
     "history": {
-      "v1.3.2": "删掉「复用登录态」：复用 localStorage 站点不认（最近动向不刷新），改为每次都用账号密码 + TOTP 真实登录"
+      "v1.3.3": "插件图标改用 M-Team 站点图标（favicon 重绘为 128x128 圆角图标）"
     },
     "system_version": ">=2.0.0,<3.0.0"
   }
