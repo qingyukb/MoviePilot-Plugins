@@ -268,6 +268,39 @@ class KeepaliveFlowTests(unittest.TestCase):
                 self.assertFalse(record["ok"], record["message"])
                 self.assertIn("判定本次没真正登录", record["message"])
 
+    def test_api_key_falls_back_to_site_management(self):
+        # 没手填 API Key 时，从 MoviePilot 站点管理的 m-team 站点里取
+        for module in PLUGINS:
+            with self.subTest(plugin=module.__name__):
+                plugin = self._plugin(module)
+                plugin._api_key = ""
+                site = type("FakeSite", (), {"domain": "kp.m-team.cc", "url": "https://kp.m-team.cc",
+                                             "apikey": "site-key", "cookie": "c=1"})
+                oper = type("FakeSiteOper", (), {"list_order_by_pri": lambda self: [site]})()
+                app_db = types.ModuleType("app.db.site_oper")
+                app_db.SiteOper = lambda: oper
+                original = sys.modules.get("app.db.site_oper")
+                sys.modules["app.db.site_oper"] = app_db
+                seen = {}
+
+                def fake_fetch(key, base=None, timeout=20):
+                    seen["key"] = key
+                    return module.parse_profile(ProfileTests.PAYLOAD), ""
+
+                original_login, original_fetch = module.keepalive_login, module.fetch_profile
+                module.keepalive_login = lambda *a, **k: (True, "登录成功")
+                module.fetch_profile = fake_fetch
+                try:
+                    record = plugin.keepalive()
+                finally:
+                    module.keepalive_login, module.fetch_profile = original_login, original_fetch
+                    if original is None:
+                        sys.modules.pop("app.db.site_oper", None)
+                    else:
+                        sys.modules["app.db.site_oper"] = original
+                self.assertEqual(seen.get("key"), "site-key")
+                self.assertTrue(record["ok"], record["message"])
+
     def test_keepalive_without_api_key_uses_login_result(self):
         # 没配 API Key 时只能信浏览器结果
         for module in PLUGINS:

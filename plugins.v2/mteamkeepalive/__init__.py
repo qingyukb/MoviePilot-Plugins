@@ -51,7 +51,7 @@ class MTeamKeepAlive(_PluginBase):
     plugin_name = "M-Team 保活"
     plugin_desc = "定时用真实浏览器登录 M-Team（账号密码 + TOTP），避免长期不登录被删号；顺带读取分享率与魔力。"
     plugin_icon = "signin.png"
-    plugin_version = "1.0.1"
+    plugin_version = "1.0.2"
     plugin_author = "qingyukb"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "mteamkeepalive_"
@@ -111,6 +111,31 @@ class MTeamKeepAlive(_PluginBase):
             "api_key": self._api_key, "api_base": self._api_base,
             "ratio_warn": self._ratio_warn, "verify_minutes": self._verify_minutes,
         })
+
+    @staticmethod
+    def site_apikey() -> str:
+        """从 MoviePilot 站点管理里找 M-Team 的 API Key（站点里填过就不用再单独配）。"""
+        try:
+            from app.db.site_oper import SiteOper
+        except Exception:
+            try:
+                from app.db.oper.site import SiteOper  # 兼容旧路径
+            except Exception:
+                return ""
+        try:
+            sites = SiteOper().list_order_by_pri()
+        except Exception:
+            return ""
+        for site in sites or []:
+            domain = str(getattr(site, "domain", "") or getattr(site, "url", "") or "").lower()
+            if "m-team" not in domain:
+                continue
+            # 只认「令牌（API Key）」；站点管理里的 Authorization 是网页 JWT，不能当 API Key 用
+            for attr in ("apikey", "api_key"):
+                value = str(getattr(site, attr, "") or "").strip()
+                if value:
+                    return value
+        return ""
 
     def get_state(self) -> bool:
         return self._enabled
@@ -186,8 +211,8 @@ class MTeamKeepAlive(_PluginBase):
                       hint="二次验证的 32 位密钥（去掉空格），用于自动填 2FA",
                       **{"persistent-hint": True})),
             row(field("VTextField", "api_key", "API Key（可选）", 12,
-                      hint="在 M-Team 控制台「实验室」生成；填了才能在详情页看到分享率 / 上传下载 / 魔力。"
-                           "不填也能保活，只是读不到统计",
+                      hint="留空则自动使用 MoviePilot 站点管理里 m-team 的 API Key；"
+                           "两处都没填也能保活，只是读不到分享率、也没法用「最近动向」二次确认",
                       **{"persistent-hint": True})),
             row({"component": "VCol", "props": {"cols": 12}, "content": [{
                 "component": "VAlert", "props": {"type": "warning", "variant": "tonal",
@@ -209,8 +234,11 @@ class MTeamKeepAlive(_PluginBase):
         ok, message = keepalive_login(self._username, self._password, self._totp_secret,
                                       site_url=self._site_url, logger=logger)
         profile: Dict[str, Any] = {}
-        if self._api_key:
-            profile, error = fetch_profile(self._api_key, self._api_base)
+        api_key = self._api_key or self.site_apikey()
+        if api_key and not self._api_key:
+            logger.info("M-Team 保活：使用 MoviePilot 站点管理里 m-team 的 API Key")
+        if api_key:
+            profile, error = fetch_profile(api_key, self._api_base)
             if error:
                 logger.warning("M-Team 保活：读取统计失败 - %s", error)
                 profile = {}
@@ -300,6 +328,8 @@ class MTeamKeepAlive(_PluginBase):
                 stat("下载", str(profile.get("downloaded") or "")),
             ]}]
         info = []
+        if not self._api_key and not profile:
+            info.append("未读到账号统计（站点管理里也没有 m-team 的 API Key）")
         if profile.get("username"):
             info.append(f"账号 {profile['username']}")
         if profile.get("last_browse"):
