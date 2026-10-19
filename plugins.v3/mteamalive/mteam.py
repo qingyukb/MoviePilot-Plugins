@@ -10,6 +10,7 @@ import base64
 import hashlib
 import hmac
 import json
+import re
 import struct
 import time
 from datetime import datetime, timezone
@@ -105,6 +106,8 @@ def parse_datetime(value: Any) -> Optional[datetime]:
         except (OverflowError, OSError, ValueError):
             return None
     text = str(value).strip().replace("Z", "+00:00")
+    # 站点可能带相对时间后缀：2026-10-19 17:31:48 (1 分鐘前)
+    text = re.sub(r"\s*[（(][^()（）]*[）)]\s*$", "", text).strip()
     try:
         parsed = datetime.fromisoformat(text)
     except ValueError:
@@ -131,6 +134,24 @@ def last_activity(profile: Mapping[str, Any]) -> Tuple[Optional[datetime], str]:
     if login is not None:
         return login, "最近登录"
     return None, ""
+
+
+def format_activity(profile: Mapping[str, Any]) -> str:
+    """按站点写法展示最近动向：2026-10-19 17:31:48（1 分鐘前）。"""
+    raw = str(profile.get("last_browse") or profile.get("last_login") or "").strip()
+    moments = parse_datetime(raw)
+    if moments is None:
+        return raw
+    minutes = int((datetime.now() - moments).total_seconds() // 60)
+    if minutes < 1:
+        relative = "剛剛"
+    elif minutes < 60:
+        relative = f"{minutes} 分鐘前"
+    elif minutes < 60 * 24:
+        relative = f"{minutes // 60} 小時前"
+    else:
+        relative = f"{minutes // (60 * 24)} 天前"
+    return f"{moments.strftime('%Y-%m-%d %H:%M:%S')}（{relative}）"
 
 
 def activity_minutes_ago(profile: Mapping[str, Any]) -> Optional[float]:

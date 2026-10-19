@@ -42,7 +42,8 @@ except ImportError:
 from app.schemas.types import NotificationType
 
 from .mteam import (DEFAULT_API_BASE, DEFAULT_SITE, activity_minutes_ago, fetch_profile,
-                    keepalive_login, last_activity, parse_profile, totp_now)
+                    format_activity, keepalive_login, last_activity, parse_profile,
+                    totp_now)
 
 HISTORY_LIMIT = 30
 PAGE_STYLE = (
@@ -74,7 +75,7 @@ class MTeamAlive(_PluginBase):
     plugin_name = "馒头保活"
     plugin_desc = "定时用真实浏览器登录 M-Team（账号密码 + TOTP），避免长期不登录被删号；顺带读取分享率与魔力。"
     plugin_icon = "mteamalive.png"
-    plugin_version = "1.2.5"
+    plugin_version = "1.2.6"
     plugin_author = "qingyukb"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "mteamalive_"
@@ -316,7 +317,7 @@ class MTeamAlive(_PluginBase):
         if profile:
             minutes = activity_minutes_ago(profile)
             moment, label = last_activity(profile)
-            shown = moment.strftime("%m-%d %H:%M") if moment else "未读到"
+            shown = format_activity(profile) if moment else "未读到"
             browser_message = message
             if minutes is None:
                 message = f"{browser_message}；读不到最近动向，无法二次确认"
@@ -350,8 +351,8 @@ class MTeamAlive(_PluginBase):
         lines = [("保活成功" if record.get("ok") else "保活失败") + f" · {record.get('time', '')[5:16]}"]
         if profile:
             detail = []
-            if profile.get("last_browse"):
-                detail.append(f"最近动向 {profile['last_browse']}")
+            if profile.get("last_browse") or profile.get("last_login"):
+                detail.append(f"最近动向 {format_activity(profile)}")
             if profile.get("ratio"):
                 detail.append(f"分享率 {profile['ratio']}")
             if profile.get("bonus"):
@@ -403,8 +404,8 @@ class MTeamAlive(_PluginBase):
             info.append("未读到账号统计（站点管理里也没有 m-team 的 API Key）")
         if profile.get("username"):
             info.append(f"账号 {profile['username']}")
-        if profile.get("last_browse"):
-            info.append(f"最近动向 {profile['last_browse']}")
+        if profile.get("last_browse") or profile.get("last_login"):
+            info.append(f"最近动向 {format_activity(profile)}")
         if profile.get("last_login"):
             info.append(f"上次登录 {profile['last_login']}")
         if profile.get("updated"):
