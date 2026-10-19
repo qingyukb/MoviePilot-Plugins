@@ -69,7 +69,9 @@ class RepoConsistencyTests(unittest.TestCase):
                 data = json.loads((ROOT / manifest).read_text(encoding="utf-8"))
                 self.assertIn(key, data, f"{key} 未写入 {manifest}")
                 icon = str(data[key].get("icon") or "")
-                self.assertIn("/icons/", icon, f"{key} @ {manifest} 缺少图标地址")
+                # 官方允许两种写法：完整 URL（含 /icons/）或 icons/ 下的裸文件名
+                self.assertTrue("/icons/" in icon or icon.endswith(".png"),
+                                f"{key} @ {manifest} 缺少图标地址")
                 self.assertTrue(icon.endswith(".png"), f"{key} @ {manifest} 图标应为 png")
                 icon_file = ROOT / "icons" / icon.rsplit("/", 1)[-1]
                 self.assertTrue(icon_file.is_file(), f"{icon_file} 缺失")

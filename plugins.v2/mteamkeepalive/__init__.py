@@ -74,7 +74,7 @@ class MTeamKeepAlive(_PluginBase):
     plugin_name = "M-Team 保活"
     plugin_desc = "定时用真实浏览器登录 M-Team（账号密码 + TOTP），避免长期不登录被删号；顺带读取分享率与魔力。"
     plugin_icon = "mteamkeepalive.png"
-    plugin_version = "1.1.3"
+    plugin_version = "1.1.4"
     plugin_author = "qingyukb"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "mteamkeepalive_"
