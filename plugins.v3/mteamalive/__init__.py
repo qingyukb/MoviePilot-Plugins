@@ -75,7 +75,7 @@ class MTeamAlive(_PluginBase):
     plugin_name = "馒头保活"
     plugin_desc = "定时用真实浏览器登录 M-Team（账号密码 + TOTP），避免长期不登录被删号；顺带读取分享率与魔力。"
     plugin_icon = "mteamalive.png"
-    plugin_version = "1.2.6"
+    plugin_version = "1.3.0"
     plugin_author = "qingyukb"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "mteamalive_"
@@ -95,6 +95,7 @@ class MTeamAlive(_PluginBase):
     _ratio_warn = 1.0
     _verify_minutes = 10
     _reuse_session = True
+    _interval_days = 20
     _api_verify = True
     _scheduler: Optional[BackgroundScheduler] = None
 
@@ -120,6 +121,10 @@ class MTeamAlive(_PluginBase):
             except (TypeError, ValueError):
                 self._verify_minutes = 10
             self._reuse_session = bool(config.get("reuse_session", True))
+            try:
+                self._interval_days = max(1, int(config.get("interval_days") or 20))
+            except (TypeError, ValueError):
+                self._interval_days = 20
             self._api_verify = bool(config.get("api_verify", True))
         if self._run_once:
             self._run_once = False
@@ -148,6 +153,7 @@ class MTeamAlive(_PluginBase):
             "api_key": self._api_key, "api_base": self._api_base,
             "ratio_warn": self._ratio_warn, "verify_minutes": self._verify_minutes,
             "reuse_session": self._reuse_session, "api_verify": self._api_verify,
+            "interval_days": self._interval_days,
         })
 
     @staticmethod
@@ -220,7 +226,7 @@ class MTeamAlive(_PluginBase):
             logger.error("M-Team 保活：Cron 表达式无效：%s", self._cron)
             return []
         return [{"id": "MTeamKeepAlive.Keepalive", "name": "M-Team 保活",
-                 "trigger": trigger, "func": self.keepalive, "kwargs": {}}]
+                 "trigger": trigger, "func": self.scheduled_keepalive, "kwargs": {}}]
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         def field(kind: str, model: str, label: str, md: int = 6, **props: Any) -> Dict[str, Any]:
@@ -243,6 +249,9 @@ class MTeamAlive(_PluginBase):
                      "保存后马上登录一次，验证账号密码与 TOTP 是否可用", 4)),
             row(field("VCronField", "cron", "执行周期",
                       placeholder="5 位 Cron；默认 0 9 * * *（每天 9 点）"),
+                hint("VTextField", "interval_days", "执行间隔（天）",
+                     "定时任务每天检查一次，距上次成功保活不满这么多天就跳过，默认 20 天",
+                     type="number", min=1, max=60),
                 hint("VTextField", "ratio_warn", "分享率提醒阈值",
                      "低于该值时通知里会带上提醒，默认 1.0", type="number", min=0, step=0.1)),
             row(hint("VSwitch", "api_verify", "用 API 校验最近浏览",
@@ -264,10 +273,11 @@ class MTeamAlive(_PluginBase):
                 field("VTextField", "totp_secret", "TOTP 密钥", 4,
                       hint="二次验证的 32 位密钥（去掉空格），用于自动填 2FA",
                       **{"persistent-hint": True})),
-            row(field("VTextField", "api_key", "API Key（可选）", 12,
-                      hint="留空则自动使用 MoviePilot 站点管理里 m-team 的 API Key；"
-                           "两处都没填也能保活，只是读不到分享率、也没法用「最近动向」二次确认",
-                      **{"persistent-hint": True})),
+            row({"component": "VCol", "props": {"cols": 12}, "content": [{
+                "component": "VAlert", "props": {"type": "info", "variant": "tonal",
+                                                 "density": "compact", "class": "mb-2"},
+                "text": "API Key 不用填：统计与「最近动向」校验自动使用 MoviePilot 站点管理里 "
+                        "m-team 站点的「令牌（API Key）」。"}]}),
             row({"component": "VCol", "props": {"cols": 12}, "content": [{
                 "component": "VAlert", "props": {"type": "warning", "variant": "tonal",
                                                  "density": "compact"},
@@ -280,9 +290,25 @@ class MTeamAlive(_PluginBase):
             "api_key": self._api_key, "api_base": self._api_base,
             "ratio_warn": self._ratio_warn, "verify_minutes": self._verify_minutes,
             "reuse_session": self._reuse_session, "api_verify": self._api_verify,
+            "interval_days": self._interval_days,
         }
 
     # ------------------------------------------------------------------ 保活
+    def scheduled_keepalive(self) -> Dict[str, Any]:
+        """定时入口：距上次成功保活不足「执行间隔（天）」就跳过。"""
+        last = self.get_data("last") or {}
+        if last.get("ok") and last.get("time"):
+            try:
+                done_at = datetime.strptime(str(last["time"]), "%Y-%m-%d %H:%M:%S")
+                gap = (datetime.now() - done_at).total_seconds() / 86400
+                if gap < self._interval_days:
+                    logger.info("M-Team 保活：距上次成功 %.1f 天，未满 %s 天，本次跳过",
+                                gap, self._interval_days)
+                    return dict(last)
+            except ValueError:
+                pass
+        return self.keepalive()
+
     def keepalive(self) -> Dict[str, Any]:
         """执行一次保活：浏览器登录 + 读统计 + 记历史 + 通知。"""
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -302,9 +328,11 @@ class MTeamAlive(_PluginBase):
             self.del_data("session")
         logger.info("M-Team 保活：浏览器登录结果 - %s", message)
         profile: Dict[str, Any] = {}
-        api_key = self._api_key or self.site_apikey()
-        if api_key and not self._api_key:
+        api_key = self.site_apikey()
+        if api_key:
             logger.info("M-Team 保活：使用 MoviePilot 站点管理里 m-team 的 API Key")
+        else:
+            logger.info("M-Team 保活：站点管理里没有 m-team 的 API Key，跳过统计与最近动向校验")
         if not self._api_verify:
             logger.info("M-Team 保活：已关闭 API 校验，仅按浏览器结果判定")
         if api_key and self._api_verify:

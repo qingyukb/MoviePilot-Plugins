@@ -249,6 +249,7 @@ class KeepaliveFlowTests(unittest.TestCase):
         for module in PLUGINS:
             with self.subTest(plugin=module.__name__):
                 plugin = self._plugin(module)
+                plugin.site_apikey = staticmethod(lambda: "site-key")
                 original_login, original_fetch = module.keepalive_login, module.fetch_profile
                 module.keepalive_login = lambda *a, **k: (True, "登录成功", {})
                 module.fetch_profile = lambda *a, **k: (module.parse_profile(ProfileTests.PAYLOAD), "")
@@ -271,6 +272,7 @@ class KeepaliveFlowTests(unittest.TestCase):
         for module in PLUGINS:
             with self.subTest(plugin=module.__name__):
                 plugin = self._plugin(module)
+                plugin.site_apikey = staticmethod(lambda: "site-key")
                 stale = {"code": 0, "data": {
                     "username": "fdfox",
                     "memberStatus": {"lastBrowse": _recent(60 * 24),
@@ -400,8 +402,8 @@ class FormTests(unittest.TestCase):
                 form, defaults = plugin.get_form()
                 text = str(form)
                 for model in ("enabled", "notify", "run_once", "cron", "site_url",
-                              "username", "password", "totp_secret", "api_key",
-                              "api_base", "ratio_warn", "verify_minutes"):
+                              "username", "password", "totp_secret",
+                              "api_base", "ratio_warn", "verify_minutes", "interval_days"):
                     self.assertIn(f"'model': '{model}'", text)
                 self.assertEqual(defaults["site_url"], module.DEFAULT_SITE)
                 self.assertEqual(defaults["cron"], "0 9 * * *")
