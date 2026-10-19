@@ -232,7 +232,7 @@ class KeepaliveFlowTests(unittest.TestCase):
             with self.subTest(plugin=module.__name__):
                 plugin = self._plugin(module)
                 original_login, original_fetch = module.keepalive_login, module.fetch_profile
-                module.keepalive_login = lambda *a, **k: (True, "登录成功")
+                module.keepalive_login = lambda *a, **k: (True, "登录成功", {})
                 module.fetch_profile = lambda *a, **k: (module.parse_profile(ProfileTests.PAYLOAD), "")
                 try:
                     record = plugin.keepalive()
@@ -259,7 +259,7 @@ class KeepaliveFlowTests(unittest.TestCase):
                                      "lastLogin": _recent(60 * 24)},
                     "memberCount": {"shareRate": 3.08}}}
                 original_login, original_fetch = module.keepalive_login, module.fetch_profile
-                module.keepalive_login = lambda *a, **k: (True, "登录成功")
+                module.keepalive_login = lambda *a, **k: (True, "登录成功", {})
                 module.fetch_profile = lambda *a, **k: (module.parse_profile(stale), "")
                 try:
                     record = plugin.keepalive()
@@ -288,7 +288,7 @@ class KeepaliveFlowTests(unittest.TestCase):
                     return module.parse_profile(ProfileTests.PAYLOAD), ""
 
                 original_login, original_fetch = module.keepalive_login, module.fetch_profile
-                module.keepalive_login = lambda *a, **k: (True, "登录成功")
+                module.keepalive_login = lambda *a, **k: (True, "登录成功", {})
                 module.fetch_profile = fake_fetch
                 try:
                     record = plugin.keepalive()
@@ -308,7 +308,7 @@ class KeepaliveFlowTests(unittest.TestCase):
                 plugin = self._plugin(module)
                 plugin._api_key = ""
                 original = module.keepalive_login
-                module.keepalive_login = lambda *a, **k: (True, "登录成功")
+                module.keepalive_login = lambda *a, **k: (True, "登录成功", {})
                 try:
                     record = plugin.keepalive()
                 finally:
@@ -321,7 +321,7 @@ class KeepaliveFlowTests(unittest.TestCase):
             with self.subTest(plugin=module.__name__):
                 plugin = self._plugin(module)
                 original = module.keepalive_login
-                module.keepalive_login = lambda *a, **k: (False, "需要 2FA 但没有配置 TOTP 密钥")
+                module.keepalive_login = lambda *a, **k: (False, "需要 2FA 但没有配置 TOTP 密钥", {})
                 try:
                     record = plugin.keepalive()
                 finally:
