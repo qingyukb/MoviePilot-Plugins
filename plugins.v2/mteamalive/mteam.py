@@ -392,10 +392,11 @@ def keepalive_login(username: str, password: str, totp_secret: str,
         except Exception as error:
             note.append(f"打开登录页失败：{error}")
 
-        # 等页面真正可用：要么已登录，要么出现登录表单；遇到 Cloudflare/雷池 检测页就等它放行
+        # M-Team 是纯前端 SPA：先出骨架，再从 static.m-team.cc 拉 JS 才渲染登录表单。
+        # 所以这里等选择器（最多 40 秒），期间遇到 CF/雷池 检测页就点一下勾选框继续等。
         ready = False
         waited_ms = 0
-        for _ in range(12):
+        for _ in range(20):
             try:
                 if page.evaluate(LOGGED_IN_JS):
                     ready = True
@@ -411,19 +412,30 @@ def keepalive_login(username: str, password: str, totp_secret: str,
             except Exception:
                 pass
             try:
-                page.wait_for_timeout(1500)
+                page.wait_for_timeout(2000)
             except Exception:
                 break
-            waited_ms += 1500
+            waited_ms += 2000
         if not ready:
-            snapshot = ""
+            snapshot = {}
             try:
-                snapshot = str(page.evaluate(PAGE_SNAPSHOT_JS) or "")
+                raw = page.evaluate(PAGE_SNAPSHOT_JS) or "{}"
+                snapshot = json.loads(raw) if isinstance(raw, str) else {}
             except Exception:
-                snapshot = ""
+                snapshot = {}
+            text_body = str(snapshot.get("text") or "")
+            title = str(snapshot.get("title") or "")
             note.append(f"等了 {waited_ms // 1000} 秒没等到登录表单")
+            if "資源檔載入失敗" in text_body or "资源档加载失败" in text_body or "Resource file loading failed" in text_body:
+                note.append("站点提示前端资源加载失败：容器访问 static.m-team.cc 不通，"
+                            "请在容器里放行该域名或配代理")
+            elif any(word in text_body.lower() for word in ("just a moment", "checking your browser",
+                                                            "安全检测", "verify you are human")):
+                note.append("页面停在 Cloudflare / 雷池 检测页，没能自动放行")
+            elif title and not snapshot.get("hasForm"):
+                note.append("页面停在 SPA 骨架（前端 JS 没跑起来）：容器访问 static.m-team.cc 可能超时")
             if snapshot:
-                note.append(f"页面现场：{snapshot[:400]}")
+                note.append(f"页面现场：{json.dumps(snapshot, ensure_ascii=False)[:400]}")
             return {"ok": False, "note": "；".join(note)}
         try:
             page.wait_for_timeout(1500)
