@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 import types
 import unittest
@@ -252,7 +253,16 @@ class KeepaliveFlowTests(unittest.TestCase):
                 plugin.site_apikey = staticmethod(lambda: "site-key")
                 original_login, original_fetch = module.keepalive_login, module.fetch_profile
                 module.keepalive_login = lambda *a, **k: (True, "登录成功", {})
-                module.fetch_profile = lambda *a, **k: (module.parse_profile(ProfileTests.PAYLOAD), "")
+                calls = {"n": 0}
+
+                def fetch_two(*args, **kwargs):
+                    calls["n"] += 1
+                    payload = json.loads(json.dumps(ProfileTests.PAYLOAD))
+                    payload["data"]["memberStatus"]["lastBrowse"] = (
+                        _recent(5) if calls["n"] == 1 else _recent(0))
+                    return module.parse_profile(payload), ""
+
+                module.fetch_profile = fetch_two
                 try:
                     record = plugin.keepalive()
                 finally:
@@ -303,9 +313,15 @@ class KeepaliveFlowTests(unittest.TestCase):
                 sys.modules["app.db.site_oper"] = app_db
                 seen = {}
 
+                calls = {"n": 0}
+
                 def fake_fetch(key, base=None, timeout=20):
                     seen["key"] = key
-                    return module.parse_profile(ProfileTests.PAYLOAD), ""
+                    calls["n"] += 1
+                    payload = json.loads(json.dumps(ProfileTests.PAYLOAD))
+                    payload["data"]["memberStatus"]["lastBrowse"] = (
+                        _recent(5) if calls["n"] == 1 else _recent(0))
+                    return module.parse_profile(payload), ""
 
                 original_login, original_fetch = module.keepalive_login, module.fetch_profile
                 module.keepalive_login = lambda *a, **k: (True, "登录成功", {})

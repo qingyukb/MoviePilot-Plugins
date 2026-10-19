@@ -42,8 +42,8 @@ except ImportError:
 from app.schemas.types import NotificationType
 
 from .mteam import (DEFAULT_API_BASE, DEFAULT_SITE, activity_minutes_ago, fetch_profile,
-                    format_activity, keepalive_login, last_activity, parse_profile,
-                    totp_now)
+                    format_activity, keepalive_login, last_activity, parse_datetime,
+                    parse_profile, totp_now)
 
 HISTORY_LIMIT = 30
 PAGE_STYLE = (
@@ -75,7 +75,7 @@ class MTeamAlive(_PluginBase):
     plugin_name = "馒头保活"
     plugin_desc = "定时用真实浏览器登录 M-Team（账号密码 + TOTP），避免长期不登录被删号；顺带读取分享率与魔力。"
     plugin_icon = "mteamalive.png"
-    plugin_version = "1.3.0"
+    plugin_version = "1.3.1"
     plugin_author = "qingyukb"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "mteamalive_"
@@ -315,6 +315,10 @@ class MTeamAlive(_PluginBase):
         logger.info("M-Team 保活：开始浏览器登录（账号 %s，%s）", self._username,
                     "复用登录态" if self._reuse_session else "每次重新登录")
         saved_session = self.get_data("session") if self._reuse_session else None
+        api_key = self.site_apikey()
+        before_profile: Dict[str, Any] = {}
+        if api_key:
+            before_profile, _ = fetch_profile(api_key, self._api_base)
         ok, message, session_out = keepalive_login(
             self._username, self._password, self._totp_secret,
             site_url=self._site_url, logger=logger, saved_session=saved_session)
@@ -328,7 +332,6 @@ class MTeamAlive(_PluginBase):
             self.del_data("session")
         logger.info("M-Team 保活：浏览器登录结果 - %s", message)
         profile: Dict[str, Any] = {}
-        api_key = self.site_apikey()
         if api_key:
             logger.info("M-Team 保活：使用 MoviePilot 站点管理里 m-team 的 API Key")
         else:
@@ -347,16 +350,26 @@ class MTeamAlive(_PluginBase):
             moment, label = last_activity(profile)
             shown = format_activity(profile) if moment else "未读到"
             browser_message = message
+            before_time = parse_datetime(str(before_profile.get("last_browse")
+                                            or before_profile.get("last_login") or ""))
+            after_time = moment
+            changed = (before_time is None and after_time is not None) or (
+                before_time is not None and after_time is not None and after_time > before_time)
             if minutes is None:
                 message = f"{browser_message}；读不到最近动向，无法二次确认"
-            elif minutes <= self._verify_minutes:
+            elif changed and minutes <= self._verify_minutes:
                 ok = True
                 message = f"登录成功（{label} {shown}）"
+            elif not changed:
+                # 站点时间没变 = 这次并没有真的产生新访问（可能被自己的手动浏览掩盖）
+                earlier = before_time.strftime("%Y-%m-%d %H:%M:%S") if before_time else "（未知）"
+                ok = False
+                message = (f"浏览器侧：{browser_message}｜站点侧：{label}没有变新"
+                           f"（执行前 {earlier}，执行后 {shown}），判定本次没真正登录")
             else:
                 ok = False
-                message = (f"浏览器侧：{browser_message}｜站点侧：{label}仍是 {shown}"
-                           f"（{minutes:.0f} 分钟前），超过 {self._verify_minutes} 分钟窗口，"
-                           f"判定本次没真正登录")
+                message = (f"浏览器侧：{browser_message}｜站点侧：{label}变成了 {shown}，"
+                           f"但距现在 {minutes:.0f} 分钟，超过 {self._verify_minutes} 分钟窗口")
         record = {"time": now, "ok": ok, "message": message,
                   "ratio": (profile or {}).get("ratio", ""),
                   "bonus": (profile or {}).get("bonus", "")}
