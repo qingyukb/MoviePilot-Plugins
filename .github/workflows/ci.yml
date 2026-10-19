@@ -23,7 +23,21 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Run unit tests
-        run: python -m unittest discover -s tests -t . -v
+        run: |
+          set +e
+          python -m unittest discover -s tests -t . -v 2>&1 | tee /tmp/test.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            {
+              echo "## unittest failed (python $MATRIX_PY)"
+              echo '```'
+              tail -n 120 /tmp/test.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$status"
+        env:
+          MATRIX_PY: ${{ matrix.python-version }}
       - name: Check V2/V3 byte-for-byte parity
         run: |
           for dir in plugins.v2/*/; do
