@@ -18,8 +18,8 @@ from app.log import logger
 from app.plugins import _PluginBase
 from app.schemas.types import NotificationType
 
-from .mteam import (DEFAULT_API_BASE, DEFAULT_SITE, fetch_profile, keepalive_login,
-                    parse_profile, totp_now)
+from .mteam import (DEFAULT_API_BASE, DEFAULT_SITE, activity_minutes_ago, fetch_profile,
+                    keepalive_login, last_activity, parse_profile, totp_now)
 
 HISTORY_LIMIT = 30
 PAGE_STYLE = (
@@ -51,7 +51,7 @@ class MTeamKeepAlive(_PluginBase):
     plugin_name = "M-Team 保活"
     plugin_desc = "定时用真实浏览器登录 M-Team（账号密码 + TOTP），避免长期不登录被删号；顺带读取分享率与魔力。"
     plugin_icon = "signin.png"
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.1"
     plugin_author = "qingyukb"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "mteamkeepalive_"
@@ -69,6 +69,7 @@ class MTeamKeepAlive(_PluginBase):
     _api_key = ""
     _api_base = DEFAULT_API_BASE
     _ratio_warn = 1.0
+    _verify_minutes = 10
     _scheduler: Optional[BackgroundScheduler] = None
 
     def init_plugin(self, config: dict = None):
@@ -88,6 +89,10 @@ class MTeamKeepAlive(_PluginBase):
                 self._ratio_warn = float(config.get("ratio_warn") or 1.0)
             except (TypeError, ValueError):
                 self._ratio_warn = 1.0
+            try:
+                self._verify_minutes = int(config.get("verify_minutes") or 10)
+            except (TypeError, ValueError):
+                self._verify_minutes = 10
         if self._run_once:
             self._run_once = False
             self._save_config()
@@ -104,7 +109,7 @@ class MTeamKeepAlive(_PluginBase):
             "cron": self._cron, "site_url": self._site_url, "username": self._username,
             "password": self._password, "totp_secret": self._totp_secret,
             "api_key": self._api_key, "api_base": self._api_base,
-            "ratio_warn": self._ratio_warn,
+            "ratio_warn": self._ratio_warn, "verify_minutes": self._verify_minutes,
         })
 
     def get_state(self) -> bool:
@@ -166,6 +171,9 @@ class MTeamKeepAlive(_PluginBase):
                       placeholder="5 位 Cron；默认 0 9 * * *（每天 9 点）"),
                 hint("VTextField", "ratio_warn", "分享率提醒阈值",
                      "低于该值时通知里会带上提醒，默认 1.0", type="number", min=0, step=0.1)),
+            row(hint("VTextField", "verify_minutes", "最近动向校验窗口（分钟）",
+                     "登录后用 API 读「最近动向」（lastBrowse），在这个时间窗内才算保活成功，默认 10 分钟",
+                     type="number", min=1, max=180)),
             row(field("VTextField", "site_url", "站点地址",
                       placeholder=DEFAULT_SITE,
                       hint="默认 https://kp.m-team.cc，也可填 m-team.io 镜像",
@@ -191,7 +199,7 @@ class MTeamKeepAlive(_PluginBase):
             "cron": self._cron, "site_url": self._site_url, "username": self._username,
             "password": self._password, "totp_secret": self._totp_secret,
             "api_key": self._api_key, "api_base": self._api_base,
-            "ratio_warn": self._ratio_warn,
+            "ratio_warn": self._ratio_warn, "verify_minutes": self._verify_minutes,
         }
 
     # ------------------------------------------------------------------ 保活
@@ -201,11 +209,26 @@ class MTeamKeepAlive(_PluginBase):
         ok, message = keepalive_login(self._username, self._password, self._totp_secret,
                                       site_url=self._site_url, logger=logger)
         profile: Dict[str, Any] = {}
-        if ok and self._api_key:
+        if self._api_key:
             profile, error = fetch_profile(self._api_key, self._api_base)
             if error:
                 logger.warning("M-Team 保活：读取统计失败 - %s", error)
                 profile = {}
+        # 配了 API Key 就以「最近动向」为准：登录完 lastBrowse 必须是刚刚。
+        # localStorage 里留着旧 token 也能被这一步揪出来（浏览器看着"登录成功"其实没真登录）。
+        if profile:
+            minutes = activity_minutes_ago(profile)
+            moment, label = last_activity(profile)
+            shown = moment.strftime("%m-%d %H:%M") if moment else "未读到"
+            if minutes is None:
+                message = f"{message}（读不到最近动向，无法二次确认）"
+            elif minutes <= self._verify_minutes:
+                ok = True
+                message = f"登录成功（{label} {shown}）"
+            else:
+                ok = False
+                message = (f"登录后{label}仍是 {shown}（{minutes:.0f} 分钟前），"
+                           f"超过 {self._verify_minutes} 分钟窗口，判定本次没真正登录")
         record = {"time": now, "ok": ok, "message": message,
                   "ratio": (profile or {}).get("ratio", ""),
                   "bonus": (profile or {}).get("bonus", "")}
@@ -228,6 +251,8 @@ class MTeamKeepAlive(_PluginBase):
         lines = [("保活成功" if record.get("ok") else "保活失败") + f" · {record.get('time', '')[5:16]}"]
         if profile:
             detail = []
+            if profile.get("last_browse"):
+                detail.append(f"最近动向 {profile['last_browse']}")
             if profile.get("ratio"):
                 detail.append(f"分享率 {profile['ratio']}")
             if profile.get("bonus"):
@@ -277,6 +302,8 @@ class MTeamKeepAlive(_PluginBase):
         info = []
         if profile.get("username"):
             info.append(f"账号 {profile['username']}")
+        if profile.get("last_browse"):
+            info.append(f"最近动向 {profile['last_browse']}")
         if profile.get("last_login"):
             info.append(f"上次登录 {profile['last_login']}")
         if profile.get("updated"):

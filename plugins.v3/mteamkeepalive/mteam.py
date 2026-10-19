@@ -89,6 +89,59 @@ def parse_profile(payload: Any) -> Dict[str, Any]:
     }
 
 
+# ------------------------------------------------------------------ 最近动向
+_TIME_FORMATS = ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M",
+                 "%Y/%m/%d %H:%M:%S", "%Y-%m-%d")
+
+
+def parse_datetime(value: Any) -> Optional[datetime]:
+    """把 M-Team 返回的时间（字符串 / 毫秒时间戳）解析成 datetime（无时区按本地时区）。"""
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        seconds = float(value) / (1000 if float(value) > 1e11 else 1)
+        try:
+            return datetime.fromtimestamp(seconds)
+        except (OverflowError, OSError, ValueError):
+            return None
+    text = str(value).strip().replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        parsed = None
+        for fmt in _TIME_FORMATS:
+            try:
+                parsed = datetime.strptime(text, fmt)
+                break
+            except ValueError:
+                continue
+        if parsed is None:
+            return None
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone().replace(tzinfo=None)
+    return parsed
+
+
+def last_activity(profile: Mapping[str, Any]) -> Tuple[Optional[datetime], str]:
+    """取「最近动向」：优先 lastBrowse（最近浏览），退回 lastLogin。"""
+    browse = parse_datetime(profile.get("last_browse"))
+    if browse is not None:
+        return browse, "最近浏览"
+    login = parse_datetime(profile.get("last_login"))
+    if login is not None:
+        return login, "最近登录"
+    return None, ""
+
+
+def activity_minutes_ago(profile: Mapping[str, Any]) -> Optional[float]:
+    """最近动向距今多少分钟；读不到返回 None。"""
+    moment, _ = last_activity(profile)
+    if moment is None:
+        return None
+    delta = datetime.now() - moment
+    return delta.total_seconds() / 60
+
+
 # ------------------------------------------------------------------ API 读取
 def fetch_profile(api_key: str, api_base: str = DEFAULT_API_BASE,
                   timeout: int = 20) -> Tuple[Optional[Dict[str, Any]], str]:

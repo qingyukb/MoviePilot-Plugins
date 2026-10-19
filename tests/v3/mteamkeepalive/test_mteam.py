@@ -119,11 +119,16 @@ class TotpTests(unittest.TestCase):
                 self.assertEqual(plugin.totp_now("", at=59), "")
 
 
+def _recent(minutes_ago: int = 0) -> str:
+    from datetime import datetime, timedelta
+    return (datetime.now() - timedelta(minutes=minutes_ago)).strftime("%Y-%m-%d %H:%M:%S")
+
+
 class ProfileTests(unittest.TestCase):
     PAYLOAD = {"code": 0, "message": "ok", "data": {
         "id": "46599", "username": "fdfox", "email": "a@b.c",
         "memberStatus": {"lastLogin": "2026-10-18 21:00:00",
-                         "lastBrowse": "2026-10-19 08:00:00"},
+                         "lastBrowse": _recent(0)},
         "memberCount": {"uploaded": "1099511627776", "downloaded": "356515840000",
                         "bonus": 123456.7, "shareRate": 3.0836, "warning": 0},
     }}
@@ -139,6 +144,7 @@ class ProfileTests(unittest.TestCase):
                 self.assertEqual(info["uploaded"], "1.00 TB")
                 self.assertEqual(info["bonus"], "123456.7")
                 self.assertEqual(info["last_login"], "2026-10-18 21:00:00")
+                self.assertTrue(info["last_browse"].startswith("20"))
 
     def test_parse_profile_tolerates_flat_shape(self):
         for plugin in PLUGINS:
@@ -232,13 +238,50 @@ class KeepaliveFlowTests(unittest.TestCase):
                     record = plugin.keepalive()
                 finally:
                     module.keepalive_login, module.fetch_profile = original_login, original_fetch
-                self.assertTrue(record["ok"])
+                self.assertTrue(record["ok"], record["message"])
+                self.assertIn("登录成功", record["message"])
                 self.assertEqual(record["ratio"], "3.084")
                 self.assertEqual(len(plugin.get_data("history")), 1)
                 self.assertEqual(plugin.get_data("last")["ok"], True)
                 message = plugin._last_message["text"]
                 self.assertIn("保活成功", message)
                 self.assertIn("分享率", message)
+                self.assertIn("最近动向", message)
+
+    def test_keepalive_rejects_stale_activity(self):
+        # 浏览器说登录成功，但 API 的最近动向还是 1 天前 → 判定本次没真正登录
+        for module in PLUGINS:
+            with self.subTest(plugin=module.__name__):
+                plugin = self._plugin(module)
+                stale = {"code": 0, "data": {
+                    "username": "fdfox",
+                    "memberStatus": {"lastBrowse": _recent(60 * 24),
+                                     "lastLogin": _recent(60 * 24)},
+                    "memberCount": {"shareRate": 3.08}}}
+                original_login, original_fetch = module.keepalive_login, module.fetch_profile
+                module.keepalive_login = lambda *a, **k: (True, "登录成功")
+                module.fetch_profile = lambda *a, **k: (module.parse_profile(stale), "")
+                try:
+                    record = plugin.keepalive()
+                finally:
+                    module.keepalive_login, module.fetch_profile = original_login, original_fetch
+                self.assertFalse(record["ok"], record["message"])
+                self.assertIn("判定本次没真正登录", record["message"])
+
+    def test_keepalive_without_api_key_uses_login_result(self):
+        # 没配 API Key 时只能信浏览器结果
+        for module in PLUGINS:
+            with self.subTest(plugin=module.__name__):
+                plugin = self._plugin(module)
+                plugin._api_key = ""
+                original = module.keepalive_login
+                module.keepalive_login = lambda *a, **k: (True, "登录成功")
+                try:
+                    record = plugin.keepalive()
+                finally:
+                    module.keepalive_login = original
+                self.assertTrue(record["ok"], record["message"])
+                self.assertIn("登录成功", record["message"])
 
     def test_keepalive_failure_notifies_reason(self):
         for module in PLUGINS:
@@ -304,7 +347,7 @@ class FormTests(unittest.TestCase):
                 text = str(form)
                 for model in ("enabled", "notify", "run_once", "cron", "site_url",
                               "username", "password", "totp_secret", "api_key",
-                              "api_base", "ratio_warn"):
+                              "api_base", "ratio_warn", "verify_minutes"):
                     self.assertIn(f"'model': '{model}'", text)
                 self.assertEqual(defaults["site_url"], module.DEFAULT_SITE)
                 self.assertEqual(defaults["cron"], "0 9 * * *")
