@@ -255,10 +255,10 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
     # 探测：所有路径对访客都返回 403「Just a moment...」，探不到真实路径，
     # 先按 /attendance.php + 「立即签到」配，若日志显示卡在挑战页或找不到按钮再调。
     "piggo.me": {
-        "engine": "browserless",
-        # 开站先过 Cloudflare「正在验证您是否是真人」的勾选，点签到后还会跳雷池检测
-        "mode": "cloudflare",
-        "cloudflare_wait": 40,
+        # 猪猪在站点侧有「异地登录」校验：Browserless 是美国机房 IP，会被判异常。
+        # 改用本机 Playwright（走你家网络），勾选级 CF 验证它也能自己点过。
+        "engine": "playwright",
+        "method": "GET",
         "path": "/index.php",
         "submit_method": "dom_click",
         "submit_selector": "a, input[type='submit'], button, [role='button'], span",
@@ -412,8 +412,9 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
     # 头像菜单里的「每日签到」只是跳这个页面，不用再点菜单；
     # 已签到时页面上是「今日签到已完成 … 已连续签到 N 天」，按钮变灰的「今日已签到」。
     "sunnypt.top": {
-        "engine": "browserless",
-        "mode": "open_page",
+        # 本机浏览器打开签到页：与手动操作同一 IP，避免站点侧异常校验
+        "engine": "playwright",
+        "method": "GET",
         "path": "/user/attendance",
         "submit_method": "dom_click",
         "submit_selector": "button, [role='button'], a",
@@ -579,10 +580,10 @@ def resolve_rule(site: Mapping[str, Any], custom_rules: Mapping[str, Mapping[str
     user_engine = str(custom.get("engine") or "").strip().lower()
     declared_engine = str(rule.get("engine") or "").strip().lower()
     rule["engine"] = declared_engine or str(default_engine or "http").lower()
-    if rule["engine"] not in {"http", "browserless"}:
-        raise ValueError("签到引擎只能是 http 或 browserless")
+    if rule["engine"] not in {"http", "browserless", "playwright"}:
+        raise ValueError("签到引擎只能是 http、browserless 或 playwright")
     rule["auto_fallback"] = not user_engine
-    if rule["engine"] == "http":
+    if rule["engine"] in {"http", "playwright"}:
         rule.setdefault("path", DEFAULT_HTTP_PATH)
         rule.setdefault("success", DEFAULT_SUCCESS_PATTERN)
         rule.setdefault("already", DEFAULT_ALREADY_PATTERN)
@@ -596,7 +597,7 @@ def resolve_rule(site: Mapping[str, Any], custom_rules: Mapping[str, Mapping[str
 
 def validate_rule(rule: Mapping[str, Any]) -> Dict[str, Any]:
     result = dict(rule)
-    if result["engine"] == "http":
+    if result["engine"] in {"http", "playwright"}:
         path = str(result.get("path") or "")
         if not path.startswith("/") or path.startswith("//"):
             raise ValueError("签到路径必须是以 / 开头的站内路径")
@@ -1069,6 +1070,112 @@ def discover_signin_target(html: str, base_url: str) -> Dict[str, Any]:
         return target
     found = discover_signin_path(body, base_url)
     return {"path": found, "method": "GET"} if found else {}
+
+
+# ---------------------------------------------------------------- 本地浏览器引擎
+# 用 MoviePilot 自带的 PlaywrightHelper 在**本机**开浏览器签到：
+# IP 就是运营商/家里的 IP，站点不会判「异地登录」，也不消耗 Browserless 额度。
+_PAGE_CLICK_JS = """
+(args) => {
+  const [selector, text] = args;
+  const nodes = Array.from(document.querySelectorAll(
+    selector || "button, a, [role='button'], [role='menuitem'], input[type='submit'], li, span"));
+  const hits = nodes
+    .filter((node) => {
+      const label = (node.value || node.textContent || "").trim();
+      const visible = node.offsetParent !== null || node.getClientRects().length > 0;
+      return visible && label.includes(text);
+    })
+    .sort((left, right) => {
+      const a = (left.value || left.textContent || "").trim().length;
+      const b = (right.value || right.textContent || "").trim().length;
+      return a - b;
+    });
+  if (!hits.length) return false;
+  const target = hits[0];
+  target.scrollIntoView({block: "center"});
+  target.click();
+  return true;
+}
+"""
+
+
+def playwright_available() -> bool:
+    """MoviePilot 是否带 PlaywrightHelper（官方镜像默认带）。"""
+    try:
+        from app.helper.browser import PlaywrightHelper  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def playwright_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: int = 90,
+                    proxies: Optional[Dict[str, str]] = None) -> Optional[SignResult]:
+    """用本机浏览器签到：打开页面 → 预检已签到 → 按文字点按钮 → 读结果判定。
+
+    返回 None 表示这台机器没有 PlaywrightHelper（交回上层用其它引擎）。
+    """
+    try:
+        from app.helper.browser import PlaywrightHelper
+    except Exception:
+        return None
+    # 老版本 MoviePilot 的 PlaywrightHelper 只有 get_page_source，没有 action：
+    # 这种情况返回 None，让上层退回 Browserless，而不是硬报错
+    if not hasattr(PlaywrightHelper, "action"):
+        return None
+
+    base_url = str(site.get("url") or "").rstrip("/")
+    cookie = str(site.get("cookie") or "").strip()
+    if not base_url:
+        return None
+    url = target_url(base_url, str(rule.get("path") or DEFAULT_HTTP_PATH))
+    selector = str(rule.get("submit_selector") or "")
+    submit_text = str(rule.get("submit_text") or "")
+    wait_ms = int(rule.get("wait") or 4000)
+
+    def callback(page: Any) -> Dict[str, Any]:
+        page.wait_for_load_state("domcontentloaded")
+        before = ""
+        try:
+            before = page.content() or ""
+        except Exception:
+            before = ""
+        clicked = False
+        if not before or classify(before, rule).status not in {"success", "already"}:
+            try:
+                clicked = bool(page.evaluate(_PAGE_CLICK_JS, [selector, submit_text]))
+            except Exception:
+                clicked = False
+            try:
+                page.wait_for_timeout(max(1000, wait_ms))
+            except Exception:
+                pass
+        after = ""
+        try:
+            after = page.content() or ""
+        except Exception:
+            after = ""
+        return {"before": before, "after": after, "clicked": clicked}
+
+    try:
+        outcome = PlaywrightHelper().action(url=url, callback=callback, cookies=cookie,
+                                            ua=str(site.get("ua") or "").strip() or None,
+                                            proxies=dict(proxies) if proxies else None,
+                                            headless=True,
+                                            timeout=max(60, int(timeout)))
+    except Exception as error:
+        return SignResult("failed", f"本地浏览器签到异常：{error}")
+    if not outcome:
+        return SignResult("failed", "本地浏览器没拿到页面（检查 MoviePilot 的浏览器依赖）")
+
+    after = str(outcome.get("after") or "")
+    judged = classify(after, rule)
+    if judged.status in {"success", "already"}:
+        prefix = "" if outcome.get("clicked") else "（页面已是签到完成状态）"
+        return SignResult(judged.status, f"{judged.message}{prefix}")
+    if not outcome.get("clicked"):
+        return SignResult("failed", "本地浏览器没找到可点的签到按钮")
+    return judged
 
 
 # ---------------------------------------------------------------- 站点模块

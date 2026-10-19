@@ -518,12 +518,25 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertEqual(result.status, "already")
         self.assertIn("获得405个憨豆", result.message)
 
+    def test_playwright_engine_presets(self):
+        # 猪猪有异地登录校验、SUNNYPT 是 Next.js：都改用本机 Playwright（IP 与家宽一致）
+        for url in ("https://piggo.me/", "https://sunnypt.top/"):
+            rule = self.core.resolve_rule({"url": url, "cookie": "c=1"}, {})
+            self.assertEqual(rule["engine"], "playwright", url)
+        piggo = self.core.resolve_rule({"url": "https://piggo.me/", "cookie": "c=1"}, {})
+        self.assertEqual(piggo["path"], "/index.php")
+        self.assertEqual(piggo["submit_text"], "签到")
+
+    def test_playwright_sign_without_helper(self):
+        # 本机没有 Playwright 时返回 None，交给上层换引擎（不报错、不误判）
+        self.assertIsNone(self.core.playwright_sign(
+            {"url": "https://piggo.me/", "cookie": "c=1"},
+            {"engine": "playwright", "path": "/index.php"}))
+
     def test_piggo_preset(self):
-        # Piggo 开站先过 Cloudflare 勾选验证，点签到后还有雷池检测；按钮按文字点击
+        # 猪猪有异地登录校验：改用本机 Playwright（家宽 IP），勾选级 CF 由本机浏览器点过
         rule = self.core.resolve_rule({"url": "https://piggo.me/", "cookie": "c=1"}, {})
-        self.assertEqual(rule["engine"], "browserless")
-        self.assertEqual(rule["mode"], "cloudflare")
-        self.assertEqual(rule["cloudflare_wait"], 40)
+        self.assertEqual(rule["engine"], "playwright")
         self.assertEqual(rule["path"], "/index.php")
         self.assertEqual(rule["submit_text"], "签到")
         self.assertEqual(rule["submit_method"], "dom_click")
@@ -575,7 +588,7 @@ class CoreRegressionTests(unittest.TestCase):
     def test_sunnypt_attendance_page_preset(self):
         # SUNNYPT：站点自带签到页 /user/attendance，不用再点头像菜单
         rule = self.core.resolve_rule({"url": "https://sunnypt.top/", "cookie": "c=1"}, {})
-        self.assertEqual(rule["engine"], "browserless")
+        self.assertEqual(rule["engine"], "playwright")
         self.assertEqual(rule["path"], "/user/attendance")
         self.assertEqual(rule["submit_text"], "立即签到")
         self.assertEqual(rule["submit_method"], "dom_click")

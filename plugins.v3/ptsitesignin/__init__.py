@@ -55,6 +55,7 @@ from .core import (
     discover_signin_target,
     fetch_page,
     http_sign_auto,
+    playwright_sign,
     run_site_module,
     is_login_record,
     is_signin_record,
@@ -167,7 +168,7 @@ class PTSiteSignIn(_PluginBase):
     plugin_name = "PT站点签到"
     plugin_desc = ("PT 站点自动签到，可登录刷新 Cookie 并读取最近动向；遇到验证码或 Cloudflare 会自动改用浏览器。")
     plugin_icon = "signin.png"
-    plugin_version = "1.6.11"
+    plugin_version = "1.6.12"
     plugin_author = "qingyukb"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "ptsignin_"
@@ -772,6 +773,18 @@ class PTSiteSignIn(_PluginBase):
                 outcome = module_outcome
                 engine = "module"
                 logger.info("PT站点签到：%s 使用站点模块", site_name)
+            elif engine == "playwright":
+                # 本机浏览器：IP 与家宽一致，站点不会判异地登录，也不消耗 Browserless 额度
+                outcome = playwright_sign(info, rule, timeout=max(90, self._timeout * 2),
+                                          proxies=self._proxies_for(info))
+                if outcome is None:
+                    logger.info("PT站点签到：%s 本机没有 Playwright，改用 Browserless", site_name)
+                    if signer is not None:
+                        outcome = signer.sign(dict(rule, engine="browserless"))
+                        engine = "browserless"
+                    else:
+                        outcome = SignResult("failed", "本机缺少 Playwright，且未配置 Browserless")
+                        engine = "playwright"
             elif engine == "browserless":
                 if signer is None:
                     outcome = SignResult("failed", "未配置 Browserless 地址或 Token")
