@@ -3,7 +3,7 @@
     "name": "PT站点签到",
     "description": "PT 站点自动签到，可登录刷新 Cookie 并读取最近动向；遇到验证码或 Cloudflare 会自动改用浏览器。",
     "labels": "站点,签到",
-    "version": "1.6.10",
+    "version": "1.6.11",
     "icon": "https://raw.githubusercontent.com/qingyukb/MoviePilot-Plugins/main/icons/ptsignin.png",
     "author": "qingyukb",
     "level": 2,
@@ -11,6 +11,7 @@
     "v2": true,
     "system_version": ">=2.0.0",
     "history": {
+      "v1.6.11": "按线上日志修判定：Sunny 去掉「点到就算成功」，已签到灰按钮不再误判成功，改成等 8 秒看「今日签到已完成」；海胆之家与学校第二段签到后回读首页确认；答题签到答错换选项重试；读超时自动加长重试一次；猪猪云盾等待 40 秒",
       "v1.6.10": "详情页手机端重排：统计改一行胶囊、整页加实底卡片、表格每行独立成卡片，窄屏不再换行错位",
       "v1.6.9": "参考 thsrite 的站点自动签到：TTG 走 signed.php、学校两步判定、SUNNYPT 用自带签到页、新增 HTTP 第二段签到与随机答题；补齐 10+4 个内置预设；新增站点模块机制（sites/ 目录，支持图片验证码 OCR：HDSky / TJUPT / M-Team）",
       "v1.6.8": "SUNNYPT 改用站点自带签到页 /user/attendance，已签到时按「今日签到已完成」判成功，不再误报失败",

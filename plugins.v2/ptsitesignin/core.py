@@ -258,7 +258,7 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "engine": "browserless",
         # 开站先过 Cloudflare「正在验证您是否是真人」的勾选，点签到后还会跳雷池检测
         "mode": "cloudflare",
-        "cloudflare_wait": 25,
+        "cloudflare_wait": 40,
         "path": "/index.php",
         "submit_method": "dom_click",
         "submit_selector": "a, input[type='submit'], button, [role='button'], span",
@@ -333,10 +333,12 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
     "haidan.video": {
         "engine": "http",
         "method": "GET",
-        "path": "/signin.php",
-        "signin_path": "/index.php",
-        "success_keywords": ["已经打卡"],
-        "already_keywords": ["今日已签到", "已签到"],
+        # 签到后首页按钮会变成「已经打卡」，所以先读首页判断，再去 signin.php，
+        # 拿不到结论时插件会自动回读首页确认（日志里「未匹配到签到成功标志」就是这么来的）
+        "path": "/index.php",
+        "already_keywords": ["已经打卡", "已打卡"],
+        "signin_path": "/signin.php",
+        "success_keywords": ["已经打卡", "已打卡", "签到成功"],
     },
     # ---- HDChina（hdchina.org）：首页取 x-csrf，POST plugin_sign-in.php?cmd=signin ----
     "hdchina.org": {
@@ -415,12 +417,17 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "path": "/user/attendance",
         "submit_method": "dom_click",
         "submit_selector": "button, [role='button'], a",
-        "submit_text": "签到",
-        "wait": 4000,
-        # 点完页面不弹 toast，但按钮会立刻变成「今日已签到」：点到就算成功
-        "success_on_click": True,
-        "success_keywords": ["签到成功", "簽到成功"],
-        "already_keywords": ["今日已签到", "已签到", "今日签到已完成"],
+        # 未签到时按钮是「立即签到」，已签到时是灰的「今日已签到」——用完整的四个字更精准
+        "submit_text": "立即签到",
+        # 站点是 Next.js + WebSocket 推状态：点完页面要等接口/推送回来才变成「今日签到已完成」，
+        # 所以多留一点时间再读快照（8 秒）
+        "wait": 8000,
+        # 不能用「点到就算成功」：已签到时按钮是灰的「今日已签到」，照样能被点到，
+        # 于是天天误报签到成功。这里改成看页面状态：
+        # 点之前就有「今日已签到」= 已签到（插件会先探一次，不会瞎点）；
+        # 点之后出现「今日签到已完成 / 已连续签到 N 天」= 本次签到成功。
+        "success_keywords": ["今日签到已完成", "本次获得", "已连续签到", "签到成功"],
+        "already_keywords": ["今日已签到", "已签到"],
     },
     # ---- 憨憨（hhanclub.net）：日历式签到页，点「签到」后当天按钮变成「已领取」 ----
     # 页面是 Vue 渲染的日历，签到要点击完成；判定不认日历里过去几天的「已领取」，
@@ -660,6 +667,16 @@ def fallback_rule(rule: Mapping[str, Any], challenge: str) -> Dict[str, Any]:
 
 # =============================================================== HTTP 引擎
 
+def _is_transient(error: Exception) -> bool:
+    """读超时 / 连接重置这类抖动错误：值得加长超时重试一次。"""
+    name = type(error).__name__.lower()
+    text_value = str(error).lower()
+    if "timeout" in name or "timed out" in text_value:
+        return True
+    return any(key in text_value for key in ("connection aborted", "connection reset",
+                                             "remotedisconnected", "remote end closed"))
+
+
 def http_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: int = 30,
               proxies: Optional[Dict[str, str]] = None) -> SignResult:
     """直接 HTTP 请求签到接口（NexusPHP attendance.php 等）。"""
@@ -690,7 +707,22 @@ def http_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: int = 3
             response = session.get(url, params=data, timeout=timeout,
                                    allow_redirects=True, proxies=proxies)
     except Exception as error:
-        return SignResult("failed", f"请求异常：{error}")
+        # 读超时 / 连接被重置大多是网络抖动，加长超时再试一次，别让站点整天算失败
+        if _is_transient(error):
+            try:
+                longer = max(15, int(timeout * 1.5))
+                session = requests.Session()
+                session.headers.update(headers)
+                if method == "POST":
+                    response = session.post(url, data=data, timeout=longer,
+                                            allow_redirects=True, proxies=proxies)
+                else:
+                    response = session.get(url, params=data, timeout=longer,
+                                           allow_redirects=True, proxies=proxies)
+            except Exception as retry_error:
+                return SignResult("failed", f"请求异常：{retry_error}")
+        else:
+            return SignResult("failed", f"请求异常：{error}")
     content = response.text or ""
     if response.status_code >= 400:
         return SignResult("failed", f"请求失败（HTTP {response.status_code}）",
@@ -851,8 +883,10 @@ def http_two_step(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: int
                 # 抓不到 token 就别盲目提交，交给上层继续报原始失败原因
                 return None
             data[str(name)] = match.group(1) if match.groups() else match.group(0)
+    picks: Optional[Dict[str, str]] = None
     if str(rule.get("signin_pick") or "").lower() == "random":
-        data.update(random_form_fields(first))
+        picks = random_form_fields(first)
+        data.update(picks)
 
     method = str(rule.get("signin_method") or ("POST" if data else "GET")).upper()
     url = target_url(base_url, signin_path)
@@ -891,6 +925,29 @@ def http_two_step(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: int
     judged = judge_http(response.text or "", probe)
     if judged.status in {"success", "already"}:
         return SignResult(judged.status, f"{judged.message}（{signin_path}）")
+    # 答题式签到（52PT / CHDBits / U2）：答错不算签到成功，换一个选项再来，最多试 3 次
+    if picks and str(rule.get("signin_pick") or "").lower() == "random":
+        for _ in range(2):
+            page = fetch_page(first_url, cookie, timeout, proxies, ua)
+            if not page:
+                break
+            retry_data = {key: value for key, value in data.items() if key not in picks}
+            retry_picks = random_form_fields(page)
+            if not retry_picks:
+                break
+            retry_data.update(retry_picks)
+            try:
+                session = requests.Session()
+                session.headers.update(headers)
+                retry = session.post(url, data=retry_data or None, timeout=timeout,
+                                     allow_redirects=True, proxies=proxies)
+            except Exception:
+                break
+            if retry.status_code >= 400:
+                break
+            judged = judge_http(retry.text or "", probe)
+            if judged.status in {"success", "already"}:
+                return SignResult(judged.status, f"{judged.message}（{signin_path}）")
     return None
 
 
@@ -1123,6 +1180,12 @@ def http_sign_auto(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: in
         two_step = http_two_step(site, rule, timeout=timeout, proxies=proxies)
         if two_step is not None:
             return two_step
+        # 第二段不认输时回读第一页再判一次：学校 addbonus 后首页入口消失、海胆之家首页变「已经打卡」
+        if str(rule.get("signin_path") or "").strip():
+            time.sleep(1.5)
+            confirmed = http_confirm(site, rule, timeout=timeout, proxies=proxies)
+            if confirmed is not None and confirmed.status in {"success", "already"}:
+                return SignResult(confirmed.status, f"{confirmed.message}（回读签到页确认）")
         posted = http_sign_form(site, rule, timeout=timeout, proxies=proxies)
         if posted is not None and posted.status in {"success", "already"}:
             return SignResult(posted.status, f"{posted.message}（按页面表单 POST 提交）")

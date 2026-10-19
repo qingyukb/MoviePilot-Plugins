@@ -337,6 +337,69 @@ class LoginCoreTests(unittest.TestCase):
                 self.assertEqual(posted[0][2], {"signin": "签到"})
                 self.assertEqual(posted[0][1], "https://pt.example/attendance.php")
 
+    def test_http_two_step_confirms_on_first_page(self):
+        # 学校：addbonus 返回的页面里「每日签到」还在（没判定出来），回读首页时入口已消失 → 已签到
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                state = {"page": 0}
+                with_entry = ('<html><body>首页 <a href="index.php?action=addbonus">每日签到</a>'
+                              '</body></html>')
+                # 签到页本身还是那句「每日签到」（拿不到结论），所以要看回读的首页
+                signed_bonus = ('<html><body>首页 <a href="index.php?action=addbonus">每日签到</a>'
+                                '</body></html>')
+                without_entry = '<html><body>首页 论坛 魔力值 100</body></html>'
+
+                def handler(session, url):
+                    method = session.calls[-1][0]
+                    if "action=addbonus" in url:
+                        # 签到页本身没给结论（正文既没成功词也没入口）
+                        return FakeResponse(url, signed_bonus)
+                    state["page"] += 1
+                    # 第一次读首页：入口在；之后回读：入口消失
+                    return FakeResponse(url, with_entry if state["page"] == 1 else without_entry)
+
+                session = FakeSession({"index.php": handler, "addbonus": handler})
+                rule = {"engine": "http", "method": "GET", "path": "/index.php",
+                        "absent_keywords": ["每日签到"], "absent_status": "already",
+                        "signin_path": "/index.php?action=addbonus",
+                        "signin_absent_status": "success"}
+                with mock.patch.dict(sys.modules, {"requests": fake_requests(session)}):
+                    result = core.http_sign_auto(
+                        {"url": "https://pt.btschool.club/", "cookie": "c=1", "ua": ""}, rule)
+                self.assertEqual(result.status, "already", result.message)
+                self.assertIn("回读签到页确认", result.message)
+
+    def test_random_choice_retries_other_options(self):
+        # 彩虹岛：第一次答错（没有「魔力值」），换一个选项再提交才成功
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                question = ('<html><body><form>'
+                            '<input type="hidden" name="questionid" value="450">'
+                            '<input type="checkbox" name="choice[]" value="8">'
+                            '<input type="checkbox" name="choice[]" value="4">'
+                            '</form></body></html>')
+                attempts = {"post": 0}
+
+                def handler(session, url):
+                    method = session.calls[-1][0]
+                    if method == "GET":
+                        return FakeResponse(url, question)
+                    attempts["post"] += 1
+                    body = ("<html><body>回答错误</body></html>" if attempts["post"] == 1
+                            else "<html><body>获得 60 点魔力值</body></html>")
+                    return FakeResponse(url, body)
+
+                session = FakeSession({"bakatest.php": handler})
+                rule = {"engine": "http", "method": "GET", "path": "/bakatest.php",
+                        "signin_path": "/bakatest.php", "signin_method": "POST",
+                        "signin_pick": "random", "success": r"\d+\s*点魔力值"}
+                with mock.patch.dict(sys.modules, {"requests": fake_requests(session)}):
+                    result = core.http_two_step(
+                        {"url": "https://ptchdbits.co/", "cookie": "c=1", "ua": ""}, rule)
+                self.assertIsNotNone(result, session.calls)
+                self.assertEqual(result.status, "success", result.message)
+                self.assertGreaterEqual(attempts["post"], 2, session.calls)
+
     def test_http_two_step_picks_random_choice(self):
         # 52pt 式：答题签到，随机挑一个 choice[] 提交，返回「获得 N 点魔力值」即成功
         for core in CORES:

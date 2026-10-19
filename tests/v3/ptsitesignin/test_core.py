@@ -523,7 +523,7 @@ class CoreRegressionTests(unittest.TestCase):
         rule = self.core.resolve_rule({"url": "https://piggo.me/", "cookie": "c=1"}, {})
         self.assertEqual(rule["engine"], "browserless")
         self.assertEqual(rule["mode"], "cloudflare")
-        self.assertEqual(rule["cloudflare_wait"], 25)
+        self.assertEqual(rule["cloudflare_wait"], 40)
         self.assertEqual(rule["path"], "/index.php")
         self.assertEqual(rule["submit_text"], "签到")
         self.assertEqual(rule["submit_method"], "dom_click")
@@ -577,17 +577,24 @@ class CoreRegressionTests(unittest.TestCase):
         rule = self.core.resolve_rule({"url": "https://sunnypt.top/", "cookie": "c=1"}, {})
         self.assertEqual(rule["engine"], "browserless")
         self.assertEqual(rule["path"], "/user/attendance")
-        self.assertEqual(rule["submit_text"], "签到")
+        self.assertEqual(rule["submit_text"], "立即签到")
         self.assertEqual(rule["submit_method"], "dom_click")
-        # 已签到的页面（今日签到已完成 / 今日已签到）必须判 already，不能报失败
+        # 已签到的页面（今日签到已完成 / 今日已签到）：成功或已签到都表示今天签过了，都算通过
         signed = ("<html><body>签到日历<div>今日签到已完成</div>"
                   "<div>本次获得 12 魔力，已连续签到 3 天</div>"
                   "<button disabled>今日已签到</button></body></html>")
-        self.assertEqual(self.core.classify(signed, rule).status, "already")
-        clicked = self.core.judge_after_click(
-            rule, True, "<html><body>今日签到已完成，本次获得 12 魔力</body></html>")
+        self.assertIn(self.core.classify(signed, rule).status, {"success", "already"})
+        # 点完页面出现「今日签到已完成 / 本次获得 12 魔力」→ 本次签到成功
+        clicked = self.core.classify(
+            "<html><body>今日签到已完成，本次获得 12 魔力</body></html>", rule)
         self.assertEqual(clicked.status, "success")
-        self.assertIn("12 魔力", clicked.message)   # 站点奖励单位就是「魔力」
+        self.assertIn("12 魔力", self.core.extract_bonus("本次获得 12 魔力", rule))
+        # 点到但页面没变化（比如点的是灰色「今日已签到」按钮）→ 不能算签到成功
+        self.assertFalse(rule.get("success_on_click"))
+        stale = self.core.classify(
+            "<html><body>一键完成今日签到，也可以查看记录或补签</body></html>", rule)
+        self.assertNotEqual(stale.status, "success")
+        self.assertIsNone(self.core.judge_after_click(rule, True, "<html><body>无变化</body></html>"))
 
     def test_hhanclub_success_on_click(self):
         # 憨憨点完没有任何提示，只有按钮变「已领取」：点到就算成功，没点到交给文案判定
