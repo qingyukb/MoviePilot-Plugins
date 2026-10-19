@@ -471,6 +471,18 @@ class CoreRegressionTests(unittest.TestCase):
         finally:
             self.core._SITE_MODULES = original
 
+    def test_hddolby_already_preset(self):
+        # 高清杜比：已签到时首页写「鲸币 [ 使用 ]: 131,943.3 (签到已得64)」
+        rule = self.core.resolve_rule({"url": "https://www.hddolby.com/", "cookie": "c=1"}, {})
+        self.assertEqual(rule["engine"], "http")
+        self.assertEqual(rule["path"], "/attendance.php")
+        signed = ('<html><body>HDDolby<br>鲸币 [ 使用 ]: 131,943.3 (签到已得64)'
+                  '<br>分享率： 3.080 上传量： 101.83 GB</body></html>')
+        self.assertEqual(self.core.classify(signed, rule).status, "already")
+        # 没签过的页面不能误判
+        pending = "<html><body>HDDolby 签到 鲸币 [ 使用 ]: 131,943.3</body></html>"
+        self.assertNotEqual(self.core.classify(pending, rule).status, "already")
+
     def test_find_signin_form(self):
         # 签到页里是「点按钮」触发的表单：要能取出 action / method / 字段
         html = ('<html><body><div>每日签到</div>'

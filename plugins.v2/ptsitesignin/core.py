@@ -27,7 +27,8 @@ DEFAULT_SUCCESS_PATTERN = (r"(state['\"]?\s*[:=]\s*['\"]?success|签到成功|�
 # 注意：不要在这里放「已连续签到」——TTG 用「您已连续签到 N 天」表示**签到成功**，
 # 憨憨那类站点需要它时在自己的 already_keywords 里单独声明。
 DEFAULT_ALREADY_PATTERN = (r"(今日已签|今天已签|已经签到|已签到过|已签到|已簽到|"
-                           r"不要重复签到|无需重复签到|already|signed in today)")
+                           # NexusPHP 常见写法：鲸币 [ 使用 ]: 131,943.3 (签到已得64)
+                           r"签到已得|已领取过|不要重复签到|无需重复签到|already|signed in today)")
 COOKIE_INVALID_PATTERN = r"(用户登录|會員登入|请先登录|请登录|login\.php)"
 # Cloudflare 挑战页特征（出现即说明请求未穿透盾，需改用 Browserless）
 CLOUDFLARE_PATTERN = r"(just a moment|cf-chl-widget|cf_chl_opt|challenge-platform)"
@@ -80,7 +81,7 @@ CAPTCHA_PATTERN = (
     r"|验证码|驗證碼)"
 )
 # 签到奖励：单位 / 数量 / 动词抽成常量共用，新增币种只改 BONUS_UNITS 一处
-BONUS_UNITS = "魔力值|魔力|爆米花|积分|做种积分|金币|憨豆|金贝|奖励"
+BONUS_UNITS = "魔力值|魔力|爆米花|积分|做种积分|金币|憨豆|金贝|鲸币|奖励"
 BONUS_AMOUNT = r"[\d,]+(?:\.\d+)?"
 BONUS_COUNTERS = "个|粒|枚|点|個|顆"
 BONUS_VERBS = "获得|獲得|獲取"
@@ -259,6 +260,8 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         # 改用本机 Playwright（走你家网络），勾选级 CF 验证它也能自己点过。
         "engine": "playwright",
         "method": "GET",
+        # 云盾 / 雷池检测页多等一会儿（Playwright 引擎按这个预算轮询放行）
+        "cloudflare_wait": 40,
         "path": "/index.php",
         "submit_method": "dom_click",
         "submit_selector": "a, input[type='submit'], button, [role='button'], span",
@@ -337,8 +340,12 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         # 拿不到结论时插件会自动回读首页确认（日志里「未匹配到签到成功标志」就是这么来的）
         "path": "/index.php",
         "already_keywords": ["已经打卡", "已打卡"],
+        # 站点首页那个 id=modalBtn 的按钮点下去是 jQuery AJAX 打 signin.php，
+        # 带 X-Requested-With 才认；不带会被跳到登录页（之前一直误报失败的原因）
         "signin_path": "/signin.php",
-        "success_keywords": ["已经打卡", "已打卡", "签到成功"],
+        "signin_method": "GET",
+        "signin_headers": {"X-Requested-With": "XMLHttpRequest"},
+        "success_keywords": ["已经打卡", "已打卡", "打卡成功", "签到成功"],
     },
     # ---- HDChina（hdchina.org）：首页取 x-csrf，POST plugin_sign-in.php?cmd=signin ----
     "hdchina.org": {
@@ -399,6 +406,14 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
                            "Content-Type": "application/json; charset=utf-8"},
         "signin_json_raw": "{\"all\": 1, \"resetModal\": \"true\"}",
         "success_keywords": ["\"status\":200", "FIRE_GENSHIN_CHARACTER_MAGIC_SUCCESS"],
+    },
+    # ---- 高清杜比（hddolby.com）：NexusPHP 签到页，已签到时首页显示「鲸币 (签到已得N)」 ----
+    "hddolby.com": {
+        "engine": "http",
+        "method": "GET",
+        "path": "/attendance.php",
+        "success_keywords": ["签到成功", "签到完成", "领取成功"],
+        "already_keywords": ["签到已得", "今日已签到", "已经签到", "请不要重复签到"],
     },
     # ---- 野马（yemapt.org）：GET api/consumer/checkIn，JSON success 即签到成功 ----
     "yemapt.org": {
@@ -1199,7 +1214,18 @@ def playwright_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: i
     wait_ms = max(wait_ms, 4000)
 
     def callback(page: Any) -> Dict[str, Any]:
-        page.wait_for_load_state("domcontentloaded")
+        # MoviePilot 的 action() 里是 page.goto(url) 等 load：Cloudflare/雷池盾页永远等不到
+        # load，30 秒必超时（日志里的 Page.goto: Timeout 30000ms 就是这个）。所以让它先打开
+        # about:blank，真正的导航放在这里，只等 domcontentloaded，再自己轮询盾页是否放行。
+        try:
+            page.goto(url, wait_until="domcontentloaded",
+                      timeout=max(15000, int(timeout * 1000)))
+        except Exception:
+            pass
+        try:
+            page.wait_for_load_state("domcontentloaded")
+        except Exception:
+            pass
         before = _wait_challenge_clear(page, challenge_budget)
         clicked = False
         if not before or classify(before, rule).status not in {"success", "already"}:
@@ -1222,7 +1248,7 @@ def playwright_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: i
         return {"before": before, "after": after, "clicked": clicked}
 
     try:
-        outcome = PlaywrightHelper().action(url=url, callback=callback, cookies=cookie,
+        outcome = PlaywrightHelper().action(url="about:blank", callback=callback, cookies=cookie,
                                             ua=str(site.get("ua") or "").strip() or None,
                                             proxies=dict(proxies) if proxies else None,
                                             headless=True,
