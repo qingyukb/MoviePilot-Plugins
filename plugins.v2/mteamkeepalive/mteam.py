@@ -220,6 +220,15 @@ OTP_JS_FILL = """
 }
 """
 
+# 登录失败时页面上的提示 → 给用户看得懂的结论
+_LOGIN_HINTS = (
+    (("郵箱驗證", "邮箱验证", "驗證碼已發送", "验证码已发送", "check your email",
+      "verification code has been sent"), "站点要求邮箱验证码（风控触发），插件无法自动完成"),
+    (("安全問題", "安全问题", "security question"), "站点要求回答安全问题，插件无法自动完成"),
+    (("密碼錯誤", "密码错误", "incorrect password", "帳號或密碼"), "账号或密码错误"),
+    (("帳號已被封", "账号已被封", "banned"), "账号被封禁"),
+)
+
 LOGGED_IN_JS = """
 () => {
   try {
@@ -301,6 +310,16 @@ def keepalive_login(username: str, password: str, totp_secret: str,
             title = page.title() or ""
         except Exception:
             pass
+        if not ok:
+            try:
+                body = page.evaluate("() => document.body ? document.body.innerText : ''") or ""
+            except Exception:
+                body = ""
+            lowered = str(body)
+            for keywords, reason in _LOGIN_HINTS:
+                if any(word in lowered for word in keywords):
+                    note.append(reason)
+                    break
         return {"ok": ok, "note": "；".join(note), "title": title,
                 "url": getattr(page, "url", "")}
 

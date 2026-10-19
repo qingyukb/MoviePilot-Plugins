@@ -17,12 +17,13 @@
     "name": "M-Team 保活",
     "description": "定时用真实浏览器登录 M-Team（账号密码 + TOTP），避免连续 40 天不登录被删号；顺带用 API Key 读取分享率、上传下载与魔力。",
     "labels": "站点,保活",
-    "version": "1.0.2",
+    "version": "1.0.3",
     "icon": "https://raw.githubusercontent.com/qingyukb/MoviePilot-Plugins/main/icons/ptsignin.png",
     "author": "qingyukb",
     "level": 1,
     "release": true,
     "history": {
+      "v1.0.3": "登录失败时识别站点提示（邮箱验证码 / 安全问题 / 密码错误 / 封号），给出明确原因",
       "v1.0.2": "API Key 可自动取用 MoviePilot 站点管理里 m-team 站点的配置，不用重复填",
       "v1.0.1": "保活结果改为用 API 的「最近动向」（lastBrowse/lastLogin）校验，登录后不是新访问就判失败；新增最近动向展示与校验窗口配置",
       "v1.0.0": "首版：浏览器登录保活 + TOTP 自动 2FA + API 读取账号统计 + 通知与记录页"
