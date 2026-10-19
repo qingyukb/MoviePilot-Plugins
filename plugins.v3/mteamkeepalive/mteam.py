@@ -1,0 +1,264 @@
+"""M-Team 保活与统计：TOTP 生成、浏览器登录、API 读取账号数据。
+
+保活必须是**真实浏览器登录**（M-Team 的「连续 40 天不登录删号」只有真实登录才重置），
+所以这里用 MoviePilot 自带的 PlaywrightHelper 在本机登录，不走 API ping。
+统计信息优先用 API Key 读（不需要浏览器）。
+"""
+from __future__ import annotations
+
+import base64
+import hashlib
+import hmac
+import json
+import struct
+import time
+from datetime import datetime, timezone
+from typing import Any, Dict, Mapping, Optional, Tuple
+
+DEFAULT_SITE = "https://kp.m-team.cc"
+DEFAULT_API_BASE = "https://api.m-team.cc"
+
+
+# ------------------------------------------------------------------ TOTP
+def totp_now(secret: str, at: Optional[float] = None, digits: int = 6,
+             period: int = 30) -> str:
+    """按 RFC 6238 生成 6 位动态验证码（base32 secret，兼容空格与大小写）。"""
+    key = "".join(str(secret or "").split()).upper()
+    if not key:
+        return ""
+    padding = "=" * ((8 - len(key) % 8) % 8)
+    try:
+        raw = base64.b32decode(key + padding, casefold=True)
+    except Exception:
+        return ""
+    counter = int((time.time() if at is None else at) // period)
+    digest = hmac.new(raw, struct.pack(">Q", counter), hashlib.sha1).digest()
+    offset = digest[-1] & 0x0F
+    code = struct.unpack(">I", digest[offset:offset + 4])[0] & 0x7FFFFFFF
+    return str(code % (10 ** digits)).zfill(digits)
+
+
+# ------------------------------------------------------------------ 统计解析
+def human_size(value: Any) -> str:
+    try:
+        size = float(value)
+    except (TypeError, ValueError):
+        return ""
+    for unit in ("B", "KB", "MB", "GB", "TB", "PB"):
+        if size < 1024 or unit == "PB":
+            return f"{size:.2f} {unit}" if unit != "B" else f"{int(size)} B"
+        size /= 1024
+    return ""
+
+
+def _first(data: Mapping[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in data and data[key] not in (None, ""):
+            return data[key]
+    return None
+
+
+def parse_profile(payload: Any) -> Dict[str, Any]:
+    """把 /api/member/profile 的返回解析成页面要用的字段（容错优先）。"""
+    body = payload if isinstance(payload, Mapping) else {}
+    data = body.get("data") if isinstance(body.get("data"), Mapping) else body
+    status = data.get("memberStatus") if isinstance(data.get("memberStatus"), Mapping) else {}
+    count = data.get("memberCount") if isinstance(data.get("memberCount"), Mapping) else {}
+
+    ratio = _first(count, "shareRate", "ratio", "shareRatio")
+    try:
+        ratio_value = float(ratio) if ratio is not None else None
+    except (TypeError, ValueError):
+        ratio_value = None
+    uploaded = _first(count, "uploaded", "upload")
+    downloaded = _first(count, "downloaded", "download")
+    bonus = _first(count, "bonus", "bonusValue")
+    return {
+        "id": str(_first(data, "id") or ""),
+        "username": str(_first(data, "username", "name") or ""),
+        "email": str(_first(data, "email") or ""),
+        "level": str(_first(data, "memberLevel", "level", "role") or ""),
+        "last_login": str(_first(status, "lastLogin", "last_login") or ""),
+        "last_browse": str(_first(status, "lastBrowse", "last_browse") or ""),
+        "uploaded": human_size(uploaded),
+        "downloaded": human_size(downloaded),
+        "bonus": str(bonus if bonus is not None else ""),
+        "ratio": (f"{ratio_value:.3f}" if ratio_value is not None else ""),
+        "ratio_value": ratio_value,
+        "warning": str(_first(count, "warning", "warnings") or ""),
+    }
+
+
+# ------------------------------------------------------------------ API 读取
+def fetch_profile(api_key: str, api_base: str = DEFAULT_API_BASE,
+                  timeout: int = 20) -> Tuple[Optional[Dict[str, Any]], str]:
+    """用 API Key 读账号详情，返回 (profile, 错误说明)。"""
+    import requests
+
+    key = str(api_key or "").strip()
+    if not key:
+        return None, "未配置 API Key"
+    url = str(api_base or DEFAULT_API_BASE).rstrip("/") + "/api/member/profile"
+    try:
+        response = requests.post(url, headers={"x-api-key": key,
+                                               "Content-Type": "application/json",
+                                               "Accept": "application/json"},
+                                 json={}, timeout=timeout)
+    except Exception as error:
+        return None, f"请求异常：{error}"
+    if response.status_code in {401, 403}:
+        return None, f"API Key 无效（HTTP {response.status_code}）"
+    if response.status_code >= 400:
+        return None, f"接口返回 HTTP {response.status_code}"
+    try:
+        payload = response.json()
+    except ValueError:
+        return None, "接口返回的不是 JSON"
+    code = payload.get("code") if isinstance(payload, dict) else None
+    if code not in (None, 0, "0"):
+        return None, f"接口返回异常：{payload.get('message') or code}"
+    parsed = parse_profile(payload)
+    if not parsed.get("username") and not parsed.get("id"):
+        return None, "接口没有返回账号信息"
+    return parsed, ""
+
+
+# ------------------------------------------------------------------ 浏览器保活
+LOGIN_JS_FILL = """
+(args) => {
+  const [username, password] = args;
+  const userInput = document.querySelector('input#username, input[name=username]');
+  const passInput = document.querySelector('input#password, input[name=password]');
+  if (!userInput || !passInput) return false;
+  const setValue = (node, value) => {
+    const setter = Object.getOwnPropertyDescriptor(
+      node.constructor.prototype, 'value').set;
+    setter.call(node, value);
+    node.dispatchEvent(new Event('input', { bubbles: true }));
+    node.dispatchEvent(new Event('change', { bubbles: true }));
+  };
+  setValue(userInput, username);
+  setValue(passInput, password);
+  const form = passInput.form || document;
+  const button = form.querySelector('button[type=submit]') ||
+                 document.querySelector('button[type=submit]');
+  if (button) { button.click(); return true; }
+  return false;
+}
+"""
+
+OTP_JS_FILL = """
+(code) => {
+  const input = document.querySelector(
+    'input#otp-code, input[name=otp-code], input[id*=otp], input[name*=otp]');
+  if (!input) return false;
+  const setter = Object.getOwnPropertyDescriptor(
+    input.constructor.prototype, 'value').set;
+  setter.call(input, code);
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  input.dispatchEvent(new Event('change', { bubbles: true }));
+  const form = input.form || document;
+  const button = form.querySelector('button[type=submit]') ||
+                 document.querySelector('button[type=submit]') ||
+                 [...document.querySelectorAll('button')].find((node) =>
+                    (node.textContent || '').includes('確認'));
+  if (button) { button.click(); return true; }
+  return false;
+}
+"""
+
+LOGGED_IN_JS = """
+() => {
+  try {
+    const auth = window.localStorage.getItem('auth');
+    return Boolean(auth) || location.pathname.startsWith('/index');
+  } catch (error) {
+    return location.pathname.startsWith('/index');
+  }
+}
+"""
+
+
+def keepalive_login(username: str, password: str, totp_secret: str,
+                    site_url: str = DEFAULT_SITE, timeout: int = 90,
+                    logger: Any = None) -> Tuple[bool, str]:
+    """用本机浏览器登录 M-Team 保活，返回 (是否成功, 说明)。"""
+    try:
+        from app.helper.browser import PlaywrightHelper
+    except Exception:
+        return False, "本机没有 Playwright（MoviePilot 浏览器依赖缺失），无法保活"
+    if not hasattr(PlaywrightHelper, "action"):
+        return False, "当前 MoviePilot 版本的 PlaywrightHelper 不支持 action()，无法保活"
+
+    base = str(site_url or DEFAULT_SITE).rstrip("/")
+    login_url = f"{base}/login"
+    user = str(username or "").strip()
+    if not user or not str(password or "").strip():
+        return False, "未配置 M-Team 账号或密码"
+
+    def callback(page: Any) -> Dict[str, Any]:
+        note = []
+        try:
+            page.goto(login_url, wait_until="domcontentloaded",
+                      timeout=max(20000, int(timeout * 1000)))
+        except Exception as error:
+            note.append(f"打开登录页失败：{error}")
+            return {"ok": False, "note": "；".join(note)}
+        try:
+            page.wait_for_timeout(1500)
+        except Exception:
+            pass
+        if not page.evaluate(LOGGED_IN_JS):
+            filled = False
+            try:
+                filled = bool(page.evaluate(LOGIN_JS_FILL, [user, str(password or "")]))
+            except Exception as error:
+                note.append(f"填写账号失败：{error}")
+            if not filled:
+                note.append("没找到账号密码输入框")
+                return {"ok": False, "note": "；".join(note)}
+            try:
+                page.wait_for_timeout(3000)
+            except Exception:
+                pass
+        # 2FA：需要时填 TOTP
+        for _ in range(2):
+            if page.evaluate(LOGGED_IN_JS):
+                break
+            code = totp_now(totp_secret)
+            if not code:
+                note.append("需要 2FA 但没有配置 TOTP 密钥")
+                break
+            try:
+                if page.evaluate(OTP_JS_FILL, code):
+                    note.append("已提交 TOTP")
+                    page.wait_for_timeout(4000)
+                else:
+                    page.wait_for_timeout(2000)
+            except Exception as error:
+                note.append(f"提交 2FA 失败：{error}")
+                break
+        ok = False
+        try:
+            ok = bool(page.evaluate(LOGGED_IN_JS))
+        except Exception:
+            ok = False
+        title = ""
+        try:
+            title = page.title() or ""
+        except Exception:
+            pass
+        return {"ok": ok, "note": "；".join(note), "title": title,
+                "url": getattr(page, "url", "")}
+
+    try:
+        outcome = PlaywrightHelper().action(url="about:blank", callback=callback,
+                                            headless=True, timeout=max(60, int(timeout)))
+    except Exception as error:
+        return False, f"启动本机浏览器失败：{error}"
+    if not outcome:
+        return False, "本机浏览器没有返回结果"
+    if outcome.get("ok"):
+        note = outcome.get("note") or ""
+        return True, f"登录成功（{datetime.now().strftime('%m-%d %H:%M')}）{('；' + note) if note else ''}"
+    return False, "登录未成功" + (f"：{outcome.get('note')}" if outcome.get("note") else "")

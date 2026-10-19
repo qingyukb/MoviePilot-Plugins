@@ -13,5 +13,19 @@
     "history": {
       "v1.7.0": "1.7 起：本机 Playwright 引擎（过 Cloudflare / 雷池、家宽 IP 不异地登录）；海胆之家按 XHR 调 signin.php；高清杜比认「签到已得」；答题签到答错换选项重试；第二段签到后回读确认；读超时自动重试；内置预设 31 个 + 3 个站点模块"
     }
+  },
+  "MTeamKeepAlive": {
+    "name": "M-Team 保活",
+    "description": "定时用真实浏览器登录 M-Team（账号密码 + TOTP），避免连续 40 天不登录被删号；顺带用 API Key 读取分享率、上传下载与魔力。",
+    "labels": "站点,保活",
+    "version": "1.0.0",
+    "icon": "https://raw.githubusercontent.com/qingyukb/MoviePilot-Plugins/main/icons/ptsignin.png",
+    "author": "qingyukb",
+    "level": 1,
+    "release": true,
+    "history": {
+      "v1.0.0": "首版：浏览器登录保活 + TOTP 自动 2FA + API 读取账号统计 + 通知与记录页"
+    },
+    "system_version": ">=2.0.0"
   }
 }
