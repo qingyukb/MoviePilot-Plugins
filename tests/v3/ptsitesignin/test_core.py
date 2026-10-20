@@ -1337,5 +1337,31 @@ class BrowserlessRequestTests(unittest.TestCase):
         self.assertIn("Field", result.message)
 
 
+class ZeroTimeActivityTests(unittest.TestCase):
+    """整零点时间是被补零的日期字段，不能当最近动向。"""
+
+    def test_zero_time_is_ignored(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                self.assertEqual(core.extract_activity(
+                    "<div>最近动向: 2026-05-06 00:00:00</div>"), {})
+                self.assertEqual(core.extract_activity(
+                    "<div>加入日期 2026-05-06 00:00:00</div>"), {})
+
+    def test_real_time_still_wins_over_zero_time(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                found = core.extract_activity(
+                    "<div>最近动向 2026-05-06 00:00:00</div><div>2026-10-20 19:02:11</div>")
+                self.assertTrue(found.get("last_seen", "").startswith("2026-10-20"))
+
+    def test_relative_suffix_kept(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                found = core.extract_activity(
+                    "<div>最近动向: 2026-10-20 20:31:12 ( 2分钟前 )</div>")
+                self.assertIn("2分钟前", found.get("last_seen", ""))
+
+
 if __name__ == "__main__":
     unittest.main()

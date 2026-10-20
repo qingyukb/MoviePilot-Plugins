@@ -1898,6 +1898,16 @@ def relative_suffix(text: str, start: int) -> str:
     return re.sub(r"\s+", " ", match.group(1)).strip() if match else ""
 
 
+def is_zero_time(value: str) -> bool:
+    """判断时间是不是被站点补成整零点（``2026-05-06 00:00:00``）。
+
+    这种值多半是「只有日期」的字段（注册日期、加入日期、模板默认值）被补了零，
+    不是真的最近动向；皇后那条假时间就是它。
+    """
+    moments = str(value or "").strip()
+    return moments.endswith("00:00:00") or moments.endswith("00:00")
+
+
 def activity_value(text: str, match: Any) -> str:
     """时间 + 站点自带的相对时间，例如「2026-10-16 23:44:21 ( < 1分前 )」。"""
     value = _normalize_time(match.group(1))
@@ -1930,6 +1940,10 @@ def extract_activity(html: str) -> Dict[str, str]:
                 continue
             # 站点自己写的「(40分钟前)」最可信：新闻、公告里的裸日期没有这个后缀
             has_suffix = 0 if relative_suffix(text, match.end()) else 1
+            # 被补成 00:00:00 的日期不是真实动向（皇后把注册日期补零当成了最近动向），
+            # 这种命中直接跳过，宁可这页返回空，交给下一个候选页
+            if is_zero_time(match.group(1)):
+                continue
             gap = match.start() - (index + len(keyword))
             candidate = (has_suffix, gap, order, index, keyword, match)
             if best is None or candidate[:3] < best[:3]:
@@ -1939,8 +1953,10 @@ def extract_activity(html: str) -> Dict[str, str]:
         snippet = text[max(0, index - 12):index + 140].strip()
         return {"keyword": keyword, "snippet": snippet,
                 "last_seen": activity_value(text, match)}
-    match = _ACTIVITY_TIME_RE.search(text)
-    if match:
+    for match in _ACTIVITY_TIME_RE.finditer(text):
+        # 没有关键词时只认带时分、且不是整零点的时间：宁可返回空，也不给假时间
+        if is_zero_time(match.group(1)):
+            continue
         snippet = text[max(0, match.start() - 40):match.end() + 60].strip()
         return {"keyword": "", "snippet": snippet, "last_seen": activity_value(text, match)}
     return {}
