@@ -1403,5 +1403,37 @@ class PtsBaoTests(unittest.TestCase):
                 self.assertEqual(core.classify("<div>今日已签到</div>", rule).status, "already")
 
 
+class HtptTests(unittest.TestCase):
+    """海棠PT（htpt.cc）：日历式每日签到。"""
+
+    def test_preset(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                rule = core.DEFAULT_RULES["htpt.cc"]
+                self.assertEqual(rule["path"], "/attendance.php")
+                self.assertEqual(rule["activity_path"], "/userdetails.php")
+                self.assertEqual(rule["submit_text"], "签到")
+
+    def test_already_signed_page(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                rule = core.DEFAULT_RULES["htpt.cc"]
+                page = "<span>今日已签到 ✓（连续 100 天，今日获得 350 魔力值）</span>"
+                result = core.classify(page, rule)
+                self.assertEqual(result.status, "already")
+                self.assertIn("350", core.extract_bonus(page, rule))
+
+    def test_success_keywords(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                rule = core.DEFAULT_RULES["htpt.cc"]
+                self.assertEqual(core.classify("<div>签到成功</div>", rule).status, "success")
+
+    def test_cookie_uid(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                self.assertEqual(core.cookie_uid("c_secure_uid=Njc2NjEz"), "676613")
+
+
 if __name__ == "__main__":
     unittest.main()

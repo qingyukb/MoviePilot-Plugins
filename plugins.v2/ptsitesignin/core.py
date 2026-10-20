@@ -466,6 +466,21 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "success_keywords": ["今日签到已完成", "本次获得", "已连续签到", "签到成功"],
         "already_keywords": ["今日已签到", "已签到"],
     },
+    # ---- 海棠PT（htpt.cc）：/attendance.php 的「每日签到」日历，点按钮签到 ----
+    # 已签到时页面直接写「今日已签到 ✓（连续 N 天，今日获得 X 魔力值）」，没有表单；
+    # 未签到时是按钮，按文字点。最近动向在 userdetails.php（id 从 Cookie 的 c_secure_uid 取）。
+    "htpt.cc": {
+        "engine": "browserless",
+        "mode": "open_page",
+        "path": "/attendance.php",
+        "activity_path": "/userdetails.php",
+        "submit_selector": "button, a[role='button'], input[type='submit'], a[href*='attendance']",
+        "submit_method": "dom_click",
+        "submit_text": "签到",
+        "success_keywords": ["签到成功", "簽到成功", "领取成功", "签到完成"],
+        "already_keywords": ["今日已签到", "今日已经签到", "今天已签到", "已连续签到"],
+        "bonus": r"(今日获得\s*[\d,]+\s*魔力值)",
+    },
     # ---- 憨憨（hhanclub.net）：日历式签到页，点「签到」后当天按钮变成「已领取」 ----
     # 页面是 Vue 渲染的日历，签到要点击完成；判定不认日历里过去几天的「已领取」，
     # 只认签到后的提示语（签到成功 / 领取成功），奖励取「本次签到获得 N 个憨豆」。
