@@ -117,17 +117,23 @@ DEFAULT_BROWSERLESS_URL = "https://production-sfo.browserless.io"
 DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
     # ---- 以下为需要浏览器交互的站点预设（来自 captchasignin 参考实现）----
     "open.cd": {
+        # 皇后：plugin_sign-in.php 的图片验证码表单，交给 Browserless 图片模式解。
+        # 签到成功后页面会出现「[查看簽到記錄]」，验证码表单消失，按这个判成功。
         "engine": "browserless",
         "mode": "image",
         "path": "/plugin_sign-in.php",
         "preflight_path": "/",
         "verify_success_path": "/",
+        # 最近动向在个人页；没有 id 会显示「选择用户」，read_activity 会用 Cookie 的
+        # c_secure_uid 拼 ?id= 打开自己的资料页
+        "activity_path": "/userdetails.php",
         "captcha_selector": "#frmSignin img",
         "captcha_input_selector": "#imagestring",
         "submit_selector": "#ok",
         "submit_method": "ajax",
         "success_json": {"field": "/state", "values": ["success"]},
-        "already_keywords": ["查看簽到記錄"],
+        "success_keywords": ["查看簽到記錄", "簽到成功", "签到成功"],
+        "already_keywords": ["查看簽到記錄", "已簽到", "已签到", "今日已签", "今日已簽"],
         "strict_status_keywords": True,
     },
     "p.t-baozi.cc": {
@@ -155,20 +161,6 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "captcha_input_selector": "form input[name='imagestring']",
         "submit_selector": "form input[type='submit'][value='立即签到']",
         "submit_method": "ajax",
-    },
-    "open.cd": {
-        # 皇后：签到是 plugin_sign-in.php 的图片验证码表单（sites/opencd.py 专门处理）。
-        # 签到成功后页面里会出现「[查看簽到記錄]」，验证码表单则消失——按这两点判定。
-        # userdetails.php 上有「最近動向」；没有 id 会显示「选择用户」表单，
-        # 所以 read_activity 用 Cookie 里的 c_secure_uid 拼 ?id= 打开自己的资料页。
-        "engine": "browserless",
-        "mode": "open_page",
-        "path": "/index.php",
-        "activity_path": "/userdetails.php",
-        "submit_method": "dom_click",
-        "submit_text": "簽到",
-        "success_keywords": ["查看簽到記錄", "簽到成功", "签到成功"],
-        "already_keywords": ["已簽到", "已签到", "今天已簽到", "今天已签到"],
     },
     "pt.luckpt.de": {
         # 只做日常签到：/attendance.php。之前走 /medal_collection.php 领「纪念套装」的
