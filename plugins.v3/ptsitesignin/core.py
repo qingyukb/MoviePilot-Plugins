@@ -1174,13 +1174,23 @@ def _wait_challenge_clear(page: Any, budget_ms: int) -> str:
     return html
 
 
+def _load_playwright_helper():
+    """取宿主浏览器助手：V3 优先稳定 SDK，V2 回退旧路径；都没有返回 None。"""
+    try:  # MoviePilot V3
+        from app.sdk.browser import PlaywrightHelper
+        return PlaywrightHelper
+    except ImportError:
+        pass
+    try:  # MoviePilot V2
+        from app.helper.browser import PlaywrightHelper
+        return PlaywrightHelper
+    except ImportError:
+        return None
+
+
 def playwright_available() -> bool:
     """MoviePilot 是否带 PlaywrightHelper（官方镜像默认带）。"""
-    try:
-        from app.helper.browser import PlaywrightHelper  # noqa: F401
-        return True
-    except Exception:
-        return False
+    return _load_playwright_helper() is not None
 
 
 def playwright_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: int = 90,
@@ -1189,9 +1199,8 @@ def playwright_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: i
 
     返回 None 表示这台机器没有 PlaywrightHelper（交回上层用其它引擎）。
     """
-    try:
-        from app.helper.browser import PlaywrightHelper
-    except Exception:
+    PlaywrightHelper = _load_playwright_helper()
+    if PlaywrightHelper is None:
         return None
     # 老版本 MoviePilot 的 PlaywrightHelper 只有 get_page_source，没有 action：
     # 这种情况返回 None，让上层退回 Browserless，而不是硬报错

@@ -29,7 +29,10 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
-from app.plugins import _PluginBase
+try:  # MoviePilot V3 稳定 SDK
+    from app.sdk.plugin import _PluginBase  # type: ignore[no-redef]
+except ImportError:  # MoviePilot V2
+    from app.plugins import _PluginBase
 
 try:  # MoviePilot V3
     from app.db.oper.site import SiteOper
@@ -40,6 +43,11 @@ try:  # MoviePilot V3 日志门面
     from app.sdk.logging import logger
 except ImportError:  # MoviePilot V2
     from app.log import logger
+
+try:  # V3：一次性 / 延迟任务交给宿主调度器，避免自建常驻线程
+    from app.sdk import scheduler as scheduler_sdk
+except ImportError:  # V2 没有这个门面
+    scheduler_sdk = None
 
 from app.schemas import NotificationType
 
@@ -169,7 +177,7 @@ class PTSiteSignIn(_PluginBase):
     plugin_name = "PT站点签到"
     plugin_desc = ("PT 站点自动签到，可登录刷新 Cookie 并读取最近动向；遇到验证码或 Cloudflare 会自动改用浏览器。")
     plugin_icon = "signin.png"
-    plugin_version = "1.8.2"
+    plugin_version = "1.8.3"
     plugin_author = "qingyukb"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "ptsignin_"
@@ -250,6 +258,15 @@ class PTSiteSignIn(_PluginBase):
         与官方插件（alidnsddns、hdbluesignin）做法一致——不在 init_plugin 里同步跑长任务，
         否则 MP 保存配置的请求会被签到（尤其是失败重试的等待）一直占住，表现为设置页卡死。
         """
+        add_once = getattr(scheduler_sdk, "add_plugin_once_job", None) if scheduler_sdk else None
+        if callable(add_once):
+            try:
+                add_once(self.__class__.__name__, "signin_once", self._run_once_task,
+                         "PT站点签到 立即执行一次", delay_seconds=3)
+                logger.info("PT站点签到：保存后立即执行一次，将在 3 秒后于后台开始")
+                return
+            except Exception:
+                logger.exception("PT站点签到：登记一次性任务失败，改用本地调度器")
         try:
             scheduler = BackgroundScheduler()
             scheduler.add_job(func=self._run_once_task, trigger="date",
@@ -1120,6 +1137,20 @@ class PTSiteSignIn(_PluginBase):
         delay = max(1, self._retry_delay_minutes) * 60
         logger.info("PT站点签到：失败站点将在 %s 分钟后重试（第 %s/%s 次）",
                     self._retry_delay_minutes, attempt, self._retry_count)
+        add_once = getattr(scheduler_sdk, "add_plugin_once_job", None) if scheduler_sdk else None
+        if callable(add_once):
+            try:
+                add_once(self.__class__.__name__, f"retry_{attempt}", self._retry_task,
+                         f"PT站点签到 失败重试（第 {attempt} 轮）", delay_seconds=int(delay),
+                         kwargs={"attempt": attempt, "run_id": run_id, "infos": infos,
+                                 "rules": rules, "signer": signer,
+                                 "result_by_key": result_by_key})
+                return
+            except TypeError:
+                # 老版本接口不接受 kwargs：退回本进程 Timer
+                pass
+            except Exception:
+                logger.exception("PT站点签到：登记重试任务失败，改用本地 Timer")
         timer = Timer(delay, self._retry_task,
                       args=(attempt, run_id, infos, rules, signer, result_by_key))
         timer.daemon = True

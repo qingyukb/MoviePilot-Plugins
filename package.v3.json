@@ -3,15 +3,15 @@
     "name": "PT站点签到",
     "description": "PT 站点自动签到，可登录刷新 Cookie 并读取最近动向；遇到验证码或 Cloudflare 会自动改用浏览器。",
     "labels": "站点,签到",
-    "version": "1.8.2",
+    "version": "1.8.3",
     "icon": "https://raw.githubusercontent.com/qingyukb/MoviePilot-Plugins/main/icons/ptsignin.png",
     "author": "qingyukb",
     "level": 2,
     "release": true,
     "system_version": ">=3.0.0",
     "history": {
-      "v1.8.2": "同大版本历史只保留最近两条；Browserless 4 个 Token 轮换 + LuckPT 普通签到保持不变",
-      "v1.8.1": "Browserless 支持 4 个 Token（额度不足 429 / 鉴权失败 401·403 自动切换）；LuckPT 改回 /attendance.php 普通签到"
+      "v1.8.3": "按官方 V3 规范整改：优先从 app.sdk 导入；「立即执行一次」与失败重试改用宿主调度器，不再自建 BackgroundScheduler",
+      "v1.8.2": "Browserless 支持 4 个 Token（额度不足 429 / 鉴权失败 401·403 自动切换）；LuckPT 改回 /attendance.php 普通签到"
     }
   },
   "MTeamAlive": {
