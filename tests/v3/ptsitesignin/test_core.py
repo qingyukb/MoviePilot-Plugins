@@ -1374,5 +1374,34 @@ class ZeroTimeActivityTests(unittest.TestCase):
 
 
 
+class PtsBaoTests(unittest.TestCase):
+    """烧包（ptsbao.club）：图片验证码签到预设 + JWT 形式 cookie 的 uid 解析。"""
+
+    COOKIE = ('c_secure_pass=eyJ1c2VyX2lkIjo5MDAzMjAsImV4cGlyZXMiOjE4MjQwNDMzNTd9'
+              'LjhkMDQyMzBjNDU3MDYxYzI2ZTdiNzNiZjRmODNmYWE0ZTEwNjYwMzFmMTY1MjMz'
+              'Y2ZjYmM2MjFhYTU4ZWVmYzk%3D')
+
+    def test_preset(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                rule = core.DEFAULT_RULES["ptsbao.club"]
+                self.assertEqual(rule["path"], "/attendance.php")
+                self.assertEqual(rule["mode"], "image")
+                self.assertEqual(rule["captcha_input_selector"], "form input[name='imagestring']")
+
+    def test_cookie_uid_from_jwt(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                self.assertEqual(core.cookie_uid(self.COOKIE), "900320")
+                self.assertEqual(core.cookie_uid("c_secure_uid=ODQ2NTY%3D"), "84656")
+
+    def test_classify_states(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                rule = core.DEFAULT_RULES["ptsbao.club"]
+                self.assertEqual(core.classify("<div>签到成功，获得 100 魔力值</div>", rule).status, "success")
+                self.assertEqual(core.classify("<div>今日已签到</div>", rule).status, "already")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -162,6 +162,18 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "submit_selector": "form input[type='submit'][value='立即签到']",
         "submit_method": "ajax",
     },
+    "ptsbao.club": {
+        # 烧包：attendance.php 的图片验证码签到（和 oshen.win 同款 NexusPHP 表单）
+        "engine": "browserless",
+        "mode": "image",
+        "path": "/attendance.php",
+        "captcha_selector": "form:has(input[name='imagestring']) img[alt='CAPTCHA']",
+        "captcha_input_selector": "form input[name='imagestring']",
+        "submit_selector": "form input[type='submit'][value='立即签到']",
+        "submit_method": "ajax",
+        "success_keywords": ["签到成功", "簽到成功", "本次获得", "本次獲得"],
+        "already_keywords": ["已经签到", "已經簽到", "已签到", "已簽到", "今日已签到"],
+    },
     "pt.luckpt.de": {
         # 只做日常签到：/attendance.php。之前走 /medal_collection.php 领「纪念套装」的
         # 幸运星，勋章凑齐后按钮消失，反而把签到判成失败。若站点首页就是签到页，
@@ -1967,6 +1979,29 @@ def extract_activity(html: str) -> Dict[str, str]:
     return {}
 
 
+def _uid_from_jwt(value: str) -> str:
+    """从 JWT 或 `base64(payload.签名)` 这类凭据里取 user_id（烧包的 c_secure_pass 是后者）。"""
+    token = str(value or '').strip()
+    if not token:
+        return ''
+    candidates = [token.split('.')[0], token]
+    for candidate in candidates:
+        candidate = candidate.strip()
+        if len(candidate) < 8:
+            continue
+        for decoder in (base64.b64decode, base64.urlsafe_b64decode):
+            try:
+                decoded = decoder(candidate + '=' * (-len(candidate) % 4)).decode('utf-8', 'ignore')
+            except Exception:
+                continue
+            match = re.search(r'"?user_?id"?\s*[:=]\s*"?(\d+)', decoded, re.IGNORECASE)
+            if match:
+                return match.group(1)
+            if decoded.strip().isdigit():
+                return decoded.strip()
+    return ''
+
+
 def cookie_uid(cookie: str) -> str:
     """从 Cookie 里解出自己的用户 ID（NexusPHP 惯例：``c_secure_uid`` 是 base64 过的 uid）。
 
@@ -1976,7 +2011,7 @@ def cookie_uid(cookie: str) -> str:
     值可能是 base64（带或不带 ``=``、可能被 URL 编码一到两次），也可能直接是数字。
     """
     text = str(cookie or "")
-    for name in ("c_secure_uid", "uid", "c_uid", "userid", "user_id"):
+    for name in ("c_secure_uid", "uid", "c_uid", "userid", "user_id", "c_secure_pass"):
         match = re.search(rf"(?:^|;\s*){name}=([^;]+)", text, re.IGNORECASE)
         if not match:
             continue
@@ -1989,6 +2024,10 @@ def cookie_uid(cookie: str) -> str:
             value = unquoted
         if value.isdigit():
             return value
+        # 烧包的 c_secure_pass 是 "base64(payload).签名" 的 JWT 变体，payload 里有 user_id
+        jwt_uid = _uid_from_jwt(value)
+        if jwt_uid:
+            return jwt_uid
         for decoder in (base64.b64decode, base64.urlsafe_b64decode):
             try:
                 decoded = decoder(value + "=" * (-len(value) % 4)).decode("utf-8", "ignore")
@@ -1997,6 +2036,9 @@ def cookie_uid(cookie: str) -> str:
             decoded = decoded.strip()
             if decoded.isdigit():
                 return decoded
+            jwt_uid = _uid_from_jwt(decoded)
+            if jwt_uid:
+                return jwt_uid
     return ""
 
 

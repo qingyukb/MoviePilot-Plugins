@@ -3,7 +3,7 @@
     "name": "PT站点签到",
     "description": "PT 站点自动签到，可登录刷新 Cookie 并读取最近动向；遇到验证码或 Cloudflare 会自动改用浏览器。",
     "labels": "站点,签到",
-    "version": "1.8.6",
+    "version": "1.8.7",
     "icon": "https://raw.githubusercontent.com/qingyukb/MoviePilot-Plugins/main/icons/ptsignin.png",
     "author": "qingyukb",
     "level": 2,
@@ -11,11 +11,11 @@
     "v2": true,
     "system_version": ">=2.0.0",
     "history": {
+      "v1.8.7": "新增烧包（ptsbao.club）内置预设：attendance.php 图片验证码签到；Cookie 里的 c_secure_pass 是 JWT 变体，插件会从中解析 uid 以读取「最近动向」",
       "v1.8.6": "图标改用完整 URL（与其它第三方仓库一致）：由 MP 图片代理抓取，配合「安全图片域名」白名单即可显示",
       "v1.8.5": "皇后（open.cd）签到判定修正：成功后页面出现「[查看簽到記錄]」即判成功，并把 activity_path 合并进原预设；图标改为文件名写法；最近动向排除补零时间与公告日期",
       "v1.8.4": "最近动向排除补零时间与公告日期；新增 open.cd 预设读个人页「最近動向」",
-      "v1.8.3": "按官方 V3 规范整改：优先从 app.sdk 导入；立即执行与失败重试改用宿主调度器",
-      "v1.8.2": "Browserless 支持 4 个 Token（额度不足 429 / 鉴权失败 401·403 自动切换）；LuckPT 改回 /attendance.php 普通签到"
+      "v1.8.3": "按官方 V3 规范整改：优先从 app.sdk 导入；立即执行与失败重试改用宿主调度器"
     }
   },
   "MTeamAlive": {
