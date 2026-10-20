@@ -133,3 +133,16 @@ M-Team 登录页改版了。把页面截图发我，我更新选择器（`#usern
 - 保活必须真实登录，插件不会用 API 访问来「假装」登录；
 - 登录态存在 MoviePilot 的插件数据里，属于凭据，导出备份时注意；
 - 参考实现：[KnowsWlf/MTeam-CLI](https://github.com/KnowsWlf/MTeam-CLI)（登录流程与 localStorage 复用思路一致）。
+
+## 图标不显示怎么办
+
+图标用文件名（如 `mteamalive.png`）时，MP 前端是从容器里的 `/public/plugin_icon/` 直接读的，
+所以把插件目录里的同名 png 拷过去即可（拷一次，重启容器后仍在）：
+
+```bash
+docker cp mteamalive.png moviepilot-v3:/public/plugin_icon/
+```
+
+如果填的是完整 URL，则走 MP 的图片代理（`/api/v1/system/img/…`），**由容器出网去抓**；
+容器访问不了 GitHub 时就会回退成默认的拼图图标，作者头像同理。
+

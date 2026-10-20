@@ -450,8 +450,9 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertIsNotNone(self.core.site_module_for("https://hdsky.me/"))
         self.assertIsNotNone(self.core.site_module_for("https://www.tjupt.org/"))
         self.assertIsNotNone(self.core.site_module_for("https://kp.m-team.cc/"))
+        self.assertIsNotNone(self.core.site_module_for("https://open.cd/"))
         # 没有模块的站点返回 None，交给规则引擎
-        self.assertIsNone(self.core.site_module_for("https://open.cd/"))
+        self.assertIsNone(self.core.site_module_for("https://pt.example.com/"))
 
     def test_run_site_module_dispatch(self):
         fake = type("FakeModule", (), {
@@ -1371,6 +1372,75 @@ class ZeroTimeActivityTests(unittest.TestCase):
                 found = core.extract_activity(
                     "<div>最近动向: 2026-10-20 20:31:12 ( 2分钟前 )</div>")
                 self.assertIn("2分钟前", found.get("last_seen", ""))
+
+
+
+class OpenCDModuleTests(unittest.TestCase):
+    """皇后：验证码签到模块。"""
+
+    def setUp(self):
+        import importlib.util
+        import sys
+        path = ROOT / "plugins.v2" / "ptsitesignin" / "sites" / "opencd.py"
+        if not path.is_file():
+            path = ROOT / "plugins.v3" / "ptsitesignin" / "sites" / "opencd.py"
+        spec = importlib.util.spec_from_file_location("opencd_module", path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["opencd_module"] = module
+        spec.loader.exec_module(module)
+        self.module = module
+
+    class _Ctx:
+        def __init__(self, pages, responses, code="abc123"):
+            self.pages = list(pages)
+            self.responses = list(responses)
+            self.code = code
+            self.posts = []
+
+        def page(self, url, **kwargs):
+            if not self.pages:
+                return ""
+            return self.pages[0] if len(self.pages) == 1 else self.pages.pop(0)
+
+        def ocr(self, url):
+            return self.code
+
+        def post(self, url, data=None, headers=None, **kwargs):
+            self.posts.append((url, dict(data or {})))
+
+            class _Resp:
+                status_code = 200
+
+                def __init__(self, text):
+                    self.text = text
+
+            return _Resp(self.responses.pop(0) if self.responses else '{"state":"false","msg":""}')
+
+    PAGE = '<input type="hidden" name="imagehash" value="76f411f797e772cb11ee046097931ddf"/>'
+
+    def test_success(self):
+        ctx = self._Ctx([self.PAGE], ['{"state":"true","msg":"签到成功，获得 5 个魔力值"}'])
+        ok, message = self.module.OpenCD().signin({}, ctx)
+        self.assertTrue(ok)
+        self.assertIn("签到成功", message)
+        self.assertEqual(ctx.posts[0][1]["imagestring"], "abc123")
+
+    def test_already_signed(self):
+        ctx = self._Ctx([self.PAGE], ['{"state":"false","msg":"今天已经签到过了"}'])
+        ok, message = self.module.OpenCD().signin({}, ctx)
+        self.assertTrue(ok)
+        self.assertIn("已签到", message)
+
+    def test_captcha_retry_then_give_up(self):
+        ctx = self._Ctx([self.PAGE], ['{"state":"false","msg":"验证码错误"}'] * 4)
+        ok, message = self.module.OpenCD().signin({}, ctx)
+        self.assertFalse(ok)
+        self.assertIn("验证码", message)
+
+    def test_no_form_means_already(self):
+        ctx = self._Ctx(["<html>今日已签到</html>"], [])
+        ok, message = self.module.OpenCD().signin({}, ctx)
+        self.assertTrue(ok)
 
 
 if __name__ == "__main__":

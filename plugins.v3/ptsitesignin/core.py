@@ -157,14 +157,18 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "submit_method": "ajax",
     },
     "open.cd": {
-        # 皇后：userdetails.php 上有「最近動向」；没有 id 会显示「选择用户」表单，
-        # 所以让 read_activity 用 Cookie 里的 c_secure_uid 拼 ?id= 打开自己的资料页
+        # 皇后：签到是 plugin_sign-in.php 的图片验证码表单（sites/opencd.py 专门处理）。
+        # 签到成功后页面里会出现「[查看簽到記錄]」，验证码表单则消失——按这两点判定。
+        # userdetails.php 上有「最近動向」；没有 id 会显示「选择用户」表单，
+        # 所以 read_activity 用 Cookie 里的 c_secure_uid 拼 ?id= 打开自己的资料页。
         "engine": "browserless",
         "mode": "open_page",
         "path": "/index.php",
         "activity_path": "/userdetails.php",
         "submit_method": "dom_click",
         "submit_text": "簽到",
+        "success_keywords": ["查看簽到記錄", "簽到成功", "签到成功"],
+        "already_keywords": ["已簽到", "已签到", "今天已簽到", "今天已签到"],
     },
     "pt.luckpt.de": {
         # 只做日常签到：/attendance.php。之前走 /medal_collection.php 领「纪念套装」的

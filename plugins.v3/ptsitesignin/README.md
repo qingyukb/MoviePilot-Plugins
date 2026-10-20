@@ -77,3 +77,16 @@ class Example:
 - **卡在 Cloudflare**：填写 Browserless 地址与 Token
 - **最近动向未读取到**：提示里会列出试过的页面，可用 `activity_path` 指定
 - **想重新签到**：打开「清理本日缓存」保存一次
+
+## 图标不显示怎么办
+
+图标用文件名（如 `ptsignin.png`）时，MP 前端是从容器里的 `/public/plugin_icon/` 直接读的，
+所以把插件目录里的同名 png 拷过去即可（拷一次，重启容器后仍在）：
+
+```bash
+docker cp ptsignin.png moviepilot-v3:/public/plugin_icon/
+```
+
+如果填的是完整 URL，则走 MP 的图片代理（`/api/v1/system/img/…`），**由容器出网去抓**；
+容器访问不了 GitHub 时就会回退成默认的拼图图标，作者头像同理。
+
