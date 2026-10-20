@@ -45,6 +45,7 @@ from app.schemas import NotificationType
 
 from .core import (
     DEFAULT_BROWSERLESS_URL,
+    BrowserlessPool,
     BrowserlessSigner,
     SignResult,
     account_from_site,
@@ -168,7 +169,7 @@ class PTSiteSignIn(_PluginBase):
     plugin_name = "PT站点签到"
     plugin_desc = ("PT 站点自动签到，可登录刷新 Cookie 并读取最近动向；遇到验证码或 Cloudflare 会自动改用浏览器。")
     plugin_icon = "signin.png"
-    plugin_version = "1.7.0"
+    plugin_version = "1.8.0"
     plugin_author = "qingyukb"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "ptsignin_"
@@ -189,6 +190,9 @@ class PTSiteSignIn(_PluginBase):
     _retry_count = 1
     _browserless_url = DEFAULT_BROWSERLESS_URL
     _browserless_token = ""
+    _browserless_token2 = ""
+    _browserless_token3 = ""
+    _browserless_token4 = ""
     _browserless_timeout = 100
     _site_rules = ""
     _read_activity = True
@@ -228,6 +232,9 @@ class PTSiteSignIn(_PluginBase):
         self._retry_delay_minutes = max(1, min(int(config.get("retry_delay_minutes") or 10), 1440))
         self._browserless_url = str(config.get("browserless_url") or DEFAULT_BROWSERLESS_URL).strip()
         self._browserless_token = str(config.get("browserless_token") or "").strip()
+        self._browserless_token2 = str(config.get("browserless_token2") or "").strip()
+        self._browserless_token3 = str(config.get("browserless_token3") or "").strip()
+        self._browserless_token4 = str(config.get("browserless_token4") or "").strip()
         self._browserless_timeout = max(15, min(int(config.get("browserless_timeout") or 100), 300))
         self._site_rules = str(config.get("site_rules") or "")
         self._read_activity = bool(config.get("read_activity", True))
@@ -291,11 +298,24 @@ class PTSiteSignIn(_PluginBase):
             "retry_delay_minutes": self._retry_delay_minutes,
             "browserless_url": self._browserless_url,
             "browserless_token": self._browserless_token,
+            "browserless_token2": self._browserless_token2,
+            "browserless_token3": self._browserless_token3,
+            "browserless_token4": self._browserless_token4,
             "browserless_timeout": self._browserless_timeout,
             "site_rules": self._site_rules,
             "read_activity": self._read_activity,
             "run_once": self._run_once,
         }
+
+    def _browserless_tokens(self) -> List[str]:
+        """收集配置里的 Browserless Token（最多 4 个，去空去重）。"""
+        tokens: List[str] = []
+        for value in (self._browserless_token, self._browserless_token2,
+                      self._browserless_token3, self._browserless_token4):
+            token = str(value or "").strip()
+            if token and token not in tokens:
+                tokens.append(token)
+        return tokens
 
     def _clear_today_cache(self) -> None:
         """清空「今天」的签到记录：latest 里今天的行 + 当天的 history 一起删。
@@ -450,8 +470,15 @@ class PTSiteSignIn(_PluginBase):
             row(field("VTextField", "browserless_url", "Browserless 地址", 4,
                       placeholder=DEFAULT_BROWSERLESS_URL, hint="根地址或完整 /stealth/bql 地址",
                       **{"persistent-hint": True}),
-                field("VTextField", "browserless_token", "Browserless Token", 4, type="password",
+                field("VTextField", "browserless_token", "Browserless Token 1", 6,
+                      type="password",
                       hint="仅 Browserless 引擎需要，不会写入日志", **{"persistent-hint": True}),
+                field("VTextField", "browserless_token2", "Token 2（可选）", 6,
+                      type="password", hint="额度用完自动换下一个", **{"persistent-hint": True}),
+                field("VTextField", "browserless_token3", "Token 3（可选）", 6,
+                      type="password", hint="额度用完自动换下一个", **{"persistent-hint": True}),
+                field("VTextField", "browserless_token4", "Token 4（可选）", 6,
+                      type="password", hint="额度用完自动换下一个", **{"persistent-hint": True}),
                 field("VTextField", "browserless_timeout", "Browserless 超时（秒）", 4,
                       type="number", min=15, max=300,
                       hint="自动不低于页面内等待预算，建议 120–180", **{"persistent-hint": True})),
@@ -1047,12 +1074,16 @@ class PTSiteSignIn(_PluginBase):
         login_infos = [self._site_dict(site) for site in login_selected]
         signer: Optional[BrowserlessSigner] = None
         if self._should_init_signer(infos, rules):
-            if not self._browserless_token or not self._browserless_url:
+            tokens = self._browserless_tokens()
+            if not tokens or not self._browserless_url:
                 logger.warning("PT站点签到：未配置 Browserless 地址或 Token，相关站点将失败")
             else:
                 try:
-                    signer = BrowserlessSigner(self._browserless_url, self._browserless_token,
-                                               self._browserless_timeout)
+                    signer = BrowserlessPool(self._browserless_url, tokens,
+                                             self._browserless_timeout, logger=logger)
+                    if len(tokens) > 1:
+                        logger.info("PT站点签到：已配置 %s 个 Browserless Token，额度用尽时自动切换",
+                                    len(tokens))
                 except ValueError as error:
                     self._finish([{"site": "配置", "status": "failed", "engine": "-",
                                    "message": str(error), "ran_at": self._now()}])

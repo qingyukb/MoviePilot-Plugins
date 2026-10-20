@@ -157,14 +157,17 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "submit_method": "ajax",
     },
     "pt.luckpt.de": {
+        # 只做日常签到：/attendance.php。之前走 /medal_collection.php 领「纪念套装」的
+        # 幸运星，勋章凑齐后按钮消失，反而把签到判成失败。若站点首页就是签到页，
+        # fallback_rule / discover 会再兜底。
         "engine": "browserless",
         "mode": "open_page",
-        "path": "/medal_collection.php",
-        "submit_selector": ".claim-bar button.claim-reward[data-type='bonus_daily']",
-        "submit_method": "confirm_click",
-        "submit_text": "领取 幸运星 ×1000",
-        "success_keywords": ["奖励领取成功"],
-        "already_keywords": ["今日已领取", "已经领取", "已领取"],
+        "path": "/attendance.php",
+        "submit_selector": "input[type='submit'], button[type='submit'], a[href*='attendance']",
+        "submit_method": "dom_click",
+        "submit_text": "签到",
+        "success_keywords": ["签到成功", "已获得", "本次获得"],
+        "already_keywords": ["已签到", "今天已签到", "今日已签到"],
     },
     "yemapt.org": {
         "engine": "browserless",
@@ -3154,6 +3157,72 @@ def classify_ajax_response(value: Any, rule: Mapping[str, Any]) -> Optional[Sign
         except (KeyError, TypeError, ValueError):
             pass
     return classify(text, rule)
+
+
+# 额度 / 鉴权类失败：换下一个 Token 再试，其它失败（站点本身的问题）不轮换
+_TOKEN_SWITCH_HINTS = ("鉴权失败", "额度不足", "HTTP 401", "HTTP 403", "HTTP 429")
+
+
+def _needs_token_switch(result: SignResult) -> bool:
+    """判断这次失败是不是「换 Token 就能解决」的那种。"""
+    if result.status != "failed":
+        return False
+    message = str(result.message or "")
+    return any(hint in message for hint in _TOKEN_SWITCH_HINTS)
+
+
+class BrowserlessPool:
+    """多个 Browserless Token 轮换使用：前一个额度用尽或鉴权失败时自动换下一个。
+
+    只暴露 ``sign()``：调用方把池子当成单个 signer 用，内部记住上次成功的序号，
+    下一轮从它开始，避免每次都从第一个（已耗尽）重试。
+    """
+
+    def __init__(self, address: str, tokens: Sequence[str], timeout: int = 100,
+                 logger: Any = None):
+        cleaned: List[str] = []
+        for token in tokens:
+            value = str(token or "").strip()
+            if value and value not in cleaned:
+                cleaned.append(value)
+        self.tokens = cleaned
+        self._logger = logger
+        self._index = 0
+        self._signers = [(token, BrowserlessSigner(address, token, timeout))
+                         for token in cleaned]
+
+    def __bool__(self) -> bool:
+        return bool(self._signers)
+
+    def __len__(self) -> int:
+        return len(self._signers)
+
+    @property
+    def active_index(self) -> int:
+        """当前正在用的 Token 序号（从 1 开始，给日志用）。"""
+        return self._index + 1
+
+    def _log(self, message: str, *args: Any) -> None:
+        if self._logger is not None:
+            self._logger.info(message, *args)
+
+    def sign(self, site: Mapping[str, Any], rule: Mapping[str, Any]) -> SignResult:
+        if not self._signers:
+            return SignResult("failed", "没有可用的 Browserless Token")
+        total = len(self._signers)
+        last: Optional[SignResult] = None
+        for offset in range(total):
+            index = (self._index + offset) % total
+            token, signer = self._signers[index]
+            result = signer.sign(site, rule)
+            if not _needs_token_switch(result):
+                self._index = index
+                return result
+            last = result
+            if total > 1:
+                self._log("PT站点签到：Browserless Token %s/%s 不可用（%s），换下一个",
+                          index + 1, total, result.message)
+        return last or SignResult("failed", "Browserless Token 全部不可用")
 
 
 def _browserless_error_message(operation: str, exc: BaseException, elapsed: float,

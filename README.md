@@ -53,6 +53,10 @@ TOTP 密钥是一串 32 位字符（如 `JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP`），
 
 配置项与更多常见问题见 [插件 README](plugins.v2/mteamalive/README.md)。
 
+**免费额度只有 1000 次/月**，可以几个账号轮着用：插件里有 Token 1～4 四个输入框，
+当前 Token 返回「额度不足（HTTP 429）」或「鉴权失败（401/403）」时会自动换下一个继续签，
+并记住这次能用的那个，下一轮从它开始。
+
 ## 安装
 
 插件市场添加 `https://github.com/qingyukb/MoviePilot-Plugins`，刷新后搜索插件名；或把插件目录复制到 `/config/plugins/` 重启。
