@@ -17,6 +17,9 @@ PT 站点自动签到，支持 V2 / V3。签到走 HTTP 直连，遇验证码或
 ### Browserless Token
 
 不配置也能签普通站点。需要时：<https://browserless.io/signup/email?plan=free> 注册 → 打开 <https://browserless.io/account/> 复制 API Key → 填入插件设置，地址留 `https://production-sfo.browserless.io`。
+**免费额度只有 1000 次/月**，可以几个账号轮着用：插件里有 Token 1～4 四个输入框，
+当前 Token 返回「额度不足（HTTP 429）」或「鉴权失败（401/403）」时会自动换下一个继续签，
+并记住这次能用的那个，下一轮从它开始。
 
 ## 馒头保活（M-Team）
 
@@ -53,9 +56,6 @@ TOTP 密钥是一串 32 位字符（如 `JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP`），
 
 配置项与更多常见问题见 [插件 README](plugins.v2/mteamalive/README.md)。
 
-**免费额度只有 1000 次/月**，可以几个账号轮着用：插件里有 Token 1～4 四个输入框，
-当前 Token 返回「额度不足（HTTP 429）」或「鉴权失败（401/403）」时会自动换下一个继续签，
-并记住这次能用的那个，下一轮从它开始。
 
 ## 安装
 
