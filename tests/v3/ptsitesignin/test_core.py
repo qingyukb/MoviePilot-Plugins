@@ -1435,5 +1435,25 @@ class HtptTests(unittest.TestCase):
                 self.assertEqual(core.cookie_uid("c_secure_uid=Njc2NjEz"), "676613")
 
 
+class SecondFactorTests(unittest.TestCase):
+    """站点要求二级验证时要说清楚原因（猪猪的异地登录验证页）。"""
+
+    def test_piggo_second_factor_page(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                rule = core.DEFAULT_RULES["piggo.me"]
+                page = ("<title>猪猪 :: 异地登录安全验证</title>"
+                        "<div>安全 验证 2FA 忘记二级验证? 点击这里自助解绑 立即提交</div>")
+                result = core.classify(page, rule)
+                self.assertEqual(result.status, "failed")
+                self.assertIn("二级验证", result.message)
+
+    def test_normal_page_still_works(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                rule = core.DEFAULT_RULES["piggo.me"]
+                self.assertEqual(core.classify("<div>签到成功</div>", rule).status, "success")
+
+
 if __name__ == "__main__":
     unittest.main()

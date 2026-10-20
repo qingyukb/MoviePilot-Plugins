@@ -35,6 +35,9 @@ CLOUDFLARE_PATTERN = r"(just a moment|cf-chl-widget|cf_chl_opt|challenge-platfor
 # 雷池（SafeLine）WAF 的安全检测页：hdkyl.in、piggo.me 这类站点点签到后会先跳这里，
 # 由页面自己的 JS 跑几秒后自动放行，行为和 Cloudflare 交互挑战一样，只是文案不同。
 WAF_PATTERN = r"(正在进行安全检测|安全检测能力由|雷池\s*WAF|SafeLine)"
+# 站点要求「二级验证 / 异地登录验证」：猪猪（piggo.me）在非常用网络或新浏览器上会先出这一页，
+# 必须输入 2FA 动态码才能继续——插件没法自动完成，要明确提示而不是报「找不到签到按钮」。
+SECOND_FACTOR_PATTERN = r"(异地登录安全验证|異地登錄安全驗證|二级验证|二級驗證|两步验证|兩步驗證|忘记二级验证|忘記二級驗證|2FA)"
 # Cloudflare「Just a moment...」交互挑战的专属特征：这类挑战会在真实浏览器里自动执行 JS
 # 并放行，只要留够等待时间即可，无需人工点击。注意不能用 challenge-platform /
 # cf-chl-widget 判断——正常的 Turnstile 组件页也会带这些标记；挑战放行后页面会换成新
@@ -51,7 +54,9 @@ TURNSTILE_TOKEN_SELECTOR = 'input[name="cf-turnstile-response"], textarea[name="
 # 该选择器必然等不到元素，所以观众预设不再使用它，改用官方 solve（支持 iframe / shadow DOM）。
 TURNSTILE_CHECKBOX_SELECTOR = "< *challenges.cloudflare.com* input[type='checkbox']"
 # 站点把签到页踢回登录页的特征（NexusPHP login.php?returnto=... / takelogin.php）
-LOGIN_PAGE_PATTERN = r"(takelogin\.php|login\.php\?returnto)"
+LOGIN_PAGE_PATTERN = (r"(takelogin\.php|login\.php\?returnto|"
+                      r"auth/sign-in|auth/login|shouldClearAuth|"
+                      r"/login\?redirect|请先登录|請先登入|session expired)")
 # 等待 Cloudflare 交互挑战自动放行的默认秒数，可用站点规则字段 cloudflare_wait 覆盖。
 DEFAULT_CLOUDFLARE_WAIT = 10
 # 「验证通过后由页面 JS 自己提交」的提交方式：Browserless 的 solve 只负责生成 token，
@@ -456,6 +461,8 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "submit_selector": "button, [role='button'], a",
         # 未签到时按钮是「立即签到」，已签到时是灰的「今日已签到」——用完整的四个字更精准
         "submit_text": "立即签到",
+        # Cookie 失效时站点会 302 到 /auth/sign-in?shouldClearAuth=true：
+        # core 的 login_page() 已能识别，会直接报「Cookie 可能失效」而不是误报签到失败
         # 站点是 Next.js + WebSocket 推状态：点完页面要等接口/推送回来才变成「今日签到已完成」，
         # 所以多留一点时间再读快照（8 秒）
         "wait": 8000,
@@ -463,8 +470,8 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         # 于是天天误报签到成功。这里改成看页面状态：
         # 点之前就有「今日已签到」= 已签到（插件会先探一次，不会瞎点）；
         # 点之后出现「今日签到已完成 / 已连续签到 N 天」= 本次签到成功。
-        "success_keywords": ["今日签到已完成", "本次获得", "已连续签到", "签到成功"],
-        "already_keywords": ["今日已签到", "已签到"],
+        "success_keywords": ["本次获得", "签到成功"],
+        "already_keywords": ["今日已签到", "今日签到已完成", "已连续签到", "已签到"],
     },
     # ---- 海棠PT（htpt.cc）：/attendance.php 的「每日签到」日历，点按钮签到 ----
     # 已签到时页面直接写「今日已签到 ✓（连续 N 天，今日获得 X 魔力值）」，没有表单；
@@ -3179,6 +3186,10 @@ def auto_submit_hint(value: Any) -> str:
 def classify(html: str, rule: Mapping[str, Any]) -> SignResult:
     full_text = page_text(html)
     lower = full_text.lower()
+    if re.search(SECOND_FACTOR_PATTERN, full_text, re.IGNORECASE):
+        return SignResult("failed",
+                          "站点要求二级验证（异地登录验证）：请在常用网络下打开站点完成一次验证，"
+                          "或换一份完整的 Cookie（含 cf_clearance / 会话）再试")
     if any(word.lower() in lower for word in LOGIN_WORDS) and "logout" not in lower:
         return SignResult("failed", "Cookie 无效或已过期")
     if any(word.lower() in lower for word in rule.get("success_keywords", [])):
