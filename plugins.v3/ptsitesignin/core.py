@@ -156,6 +156,16 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "submit_selector": "form input[type='submit'][value='立即签到']",
         "submit_method": "ajax",
     },
+    "open.cd": {
+        # 皇后：userdetails.php 上有「最近動向」；没有 id 会显示「选择用户」表单，
+        # 所以让 read_activity 用 Cookie 里的 c_secure_uid 拼 ?id= 打开自己的资料页
+        "engine": "browserless",
+        "mode": "open_page",
+        "path": "/index.php",
+        "activity_path": "/userdetails.php",
+        "submit_method": "dom_click",
+        "submit_text": "簽到",
+    },
     "pt.luckpt.de": {
         # 只做日常签到：/attendance.php。之前走 /medal_collection.php 领「纪念套装」的
         # 幸运星，勋章凑齐后按钮消失，反而把签到判成失败。若站点首页就是签到页，
@@ -1922,8 +1932,9 @@ def extract_activity(html: str) -> Dict[str, str]:
 
     1. 关键词后面必须紧跟时间才算命中。以前关键词附近没时间时会退回「全页第一个日期」，
        而种子列表 / 公告里的裸日期到处都是，于是「最近动向」被填成 `2026-09-18` 这种假值；
-    2. 没有关键词命中时，只接受**带时分**的时间。裸日期一律不认——宁可返回空（页面会提示
-       未读取到、可以配 activity_path），也不要给一个看起来像那么回事的错误时间。
+    2. 没有关键词命中就直接返回空，宁可页面提示「未读取到」（可以配 activity_path），
+       也不把公告 / 活动通知里的日期当成最近动向；整零点时间同样不算——那是被补零的
+       日期字段（注册日期、模板默认值）。
     """
     text = plain_text(html or "")
     best: Any = None
@@ -1953,12 +1964,10 @@ def extract_activity(html: str) -> Dict[str, str]:
         snippet = text[max(0, index - 12):index + 140].strip()
         return {"keyword": keyword, "snippet": snippet,
                 "last_seen": activity_value(text, match)}
-    for match in _ACTIVITY_TIME_RE.finditer(text):
-        # 没有关键词时只认带时分、且不是整零点的时间：宁可返回空，也不给假时间
-        if is_zero_time(match.group(1)):
-            continue
-        snippet = text[max(0, match.start() - 40):match.end() + 60].strip()
-        return {"keyword": "", "snippet": snippet, "last_seen": activity_value(text, match)}
+    # 没有关键词命中时**不再退化成「全页第一个时间」**：站点首页的公告 / 活動通知里到处是
+    # 日期——皇后的 index.php 就有「北京时间2026-05-06 00:00:00 至 2026-05-10 23:59:59
+    # 开启全站Free」，被当成最近动向显示成了 2026-05-06 00:00:00。宁可返回空，让调用方
+    # 换下一个候选页（userdetails.php 上有真正的「最近動向」）。
     return {}
 
 

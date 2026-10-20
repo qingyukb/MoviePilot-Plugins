@@ -1348,12 +1348,22 @@ class ZeroTimeActivityTests(unittest.TestCase):
                 self.assertEqual(core.extract_activity(
                     "<div>加入日期 2026-05-06 00:00:00</div>"), {})
 
-    def test_real_time_still_wins_over_zero_time(self):
+    def test_announcement_date_is_not_activity(self):
+        # 皇后 index.php 的「开启全站Free」公告：没有「最近动向」字样，不能当动向
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                self.assertEqual(core.extract_activity(
+                    "<div>北京时间2026-05-06 00:00:00 至 2026-05-10 23:59:59 开启全站Free。</div>"), {})
+
+    def test_open_cd_profile_row(self):
+        # 皇后的真实资料页片段：最近動向 + span 里的相对时间
         for core in CORES:
             with self.subTest(core=core.__name__):
                 found = core.extract_activity(
-                    "<div>最近动向 2026-05-06 00:00:00</div><div>2026-10-20 19:02:11</div>")
-                self.assertTrue(found.get("last_seen", "").startswith("2026-10-20"))
+                    '<tr><td class="rowhead">最近動向</td><td class="rowfollow">'
+                    '2026-10-20 21:00:49 (<span title="2026-10-20 21:00:49">1分前</span>)</td></tr>')
+                self.assertTrue(found.get("last_seen", "").startswith("2026-10-20 21:00:49"))
+                self.assertIn("1分前", found.get("last_seen", ""))
 
     def test_relative_suffix_kept(self):
         for core in CORES:
