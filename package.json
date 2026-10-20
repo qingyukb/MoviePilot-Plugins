@@ -3,7 +3,7 @@
     "name": "PT站点签到",
     "description": "PT 站点自动签到，可登录刷新 Cookie 并读取最近动向；遇到验证码或 Cloudflare 会自动改用浏览器。",
     "labels": "站点,签到",
-    "version": "1.8.5",
+    "version": "1.8.4",
     "icon": "https://raw.githubusercontent.com/qingyukb/MoviePilot-Plugins/main/icons/ptsignin.png",
     "author": "qingyukb",
     "level": 2,
@@ -11,8 +11,8 @@
     "v2": true,
     "system_version": ">=2.0.0",
     "history": {
-      "v1.8.5": "最近动向修准：去掉「全页第一个时间」兜底（皇后把全站 Free 公告里的 2026-05-06 00:00:00 当成了动向）；新增 open.cd（皇后）预设，直接读个人页「最近動向」",
-      "v1.8.4": "最近动向排除 00:00:00 假时间；没有关键词时只认带时分且非整零点的时间"
+      "v1.8.4": "最近动向修准：排除补零的 00:00:00 假时间、去掉「全页第一个时间」兜底（皇后把全站 Free 公告里的日期当成了动向），新增 open.cd（皇后）预设直接读个人页「最近動向」",
+      "v1.8.3": "按官方 V3 规范整改：优先从 app.sdk 导入；立即执行与失败重试改用宿主调度器"
     }
   },
   "MTeamAlive": {
