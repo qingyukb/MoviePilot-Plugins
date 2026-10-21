@@ -477,15 +477,14 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
     # 已签到时页面直接写「今日已签到 ✓（连续 N 天，今日获得 X 魔力值）」，没有表单；
     # 未签到时是按钮，按文字点。最近动向在 userdetails.php（id 从 Cookie 的 c_secure_uid 取）。
     "htpt.cc": {
-        "engine": "browserless",
-        "mode": "open_page",
+        # 签到交给 sites/htpt.py：GET 签到页 → POST action=sign → 回读确认。
+        # 实测这条路直接可用（表单无验证码），不必再开浏览器。
+        "engine": "http",
+        "method": "GET",
         "path": "/attendance.php",
         "activity_path": "/userdetails.php",
-        "submit_selector": "button, a[role='button'], input[type='submit'], a[href*='attendance']",
-        "submit_method": "dom_click",
-        "submit_text": "签到",
-        "success_keywords": ["签到成功", "簽到成功", "领取成功", "签到完成"],
-        "already_keywords": ["今日已签到", "今日已经签到", "今天已签到", "已连续签到"],
+        "already_keywords": ["今日已签到", "今日已经签到", "今天已签到"],
+        "success_keywords": ["签到成功", "簽到成功"],
         "bonus": r"(今日获得\s*[\d,]+\s*魔力值)",
     },
     # ---- 憨憨（hhanclub.net）：日历式签到页，点「签到」后当天按钮变成「已领取」 ----

@@ -1412,7 +1412,7 @@ class HtptTests(unittest.TestCase):
                 rule = core.DEFAULT_RULES["htpt.cc"]
                 self.assertEqual(rule["path"], "/attendance.php")
                 self.assertEqual(rule["activity_path"], "/userdetails.php")
-                self.assertEqual(rule["submit_text"], "签到")
+                self.assertEqual(rule["engine"], "http")
 
     def test_already_signed_page(self):
         for core in CORES:
@@ -1453,6 +1453,62 @@ class SecondFactorTests(unittest.TestCase):
             with self.subTest(core=core.__name__):
                 rule = core.DEFAULT_RULES["piggo.me"]
                 self.assertEqual(core.classify("<div>签到成功</div>", rule).status, "success")
+
+
+class HtptModuleTests(unittest.TestCase):
+    """海棠PT 站点模块：GET 判断 → POST action=sign → 回读确认。"""
+
+    def _module(self):
+        import importlib.util
+        import sys
+        path = ROOT / "plugins.v2" / "ptsitesignin" / "sites" / "htpt.py"
+        if not path.is_file():
+            path = ROOT / "plugins.v3" / "ptsitesignin" / "sites" / "htpt.py"
+        spec = importlib.util.spec_from_file_location("htpt_module", path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["htpt_module"] = module
+        spec.loader.exec_module(module)
+        return module
+
+    class _Ctx:
+        def __init__(self, pages, status=200):
+            self.pages = list(pages)
+            self.status = status
+            self.posts = []
+
+        def page(self, url, **kwargs):
+            return self.pages.pop(0) if len(self.pages) > 1 else (self.pages[0] if self.pages else "")
+
+        def post(self, url, data=None, headers=None, **kwargs):
+            self.posts.append((url, dict(data or {})))
+
+            class _Resp:
+                status_code = 200
+
+            return _Resp()
+
+    UNSIGNED = "<form method='post' action='attendance.php'><input type='hidden' name='action' value='sign' /><button>立即签到（连续第 101 天，可获得 50 魔力值）</button></form>"
+    SIGNED = "<span>今日已签到 \u2713（连续 101 天，今日获得 50 魔力值）</span>"
+
+    def test_sign_flow(self):
+        module = self._module()
+        ctx = self._Ctx([self.UNSIGNED, self.SIGNED])
+        ok, message = module.Htpt().signin({"url": "https://www.htpt.cc"}, ctx)
+        self.assertTrue(ok)
+        self.assertIn("50", message)
+        self.assertEqual(ctx.posts[0][1], {"action": "sign"})
+
+    def test_already_signed(self):
+        module = self._module()
+        ok, message = module.Htpt().signin({"url": "https://www.htpt.cc"}, self._Ctx([self.SIGNED]))
+        self.assertTrue(ok)
+        self.assertIn("已签到", message)
+
+    def test_no_entry(self):
+        module = self._module()
+        ok, message = module.Htpt().signin({"url": "https://www.htpt.cc"}, self._Ctx(["<html>无内容</html>"]))
+        self.assertFalse(ok)
+        self.assertIn("立即签到", message)
 
 
 if __name__ == "__main__":
