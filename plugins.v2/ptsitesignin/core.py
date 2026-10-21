@@ -294,8 +294,10 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "submit_text": "签到",
         "wait": 15000,
         "pending_keywords": ["正在进行安全检测", "安全检测", "正在验证您是否是真人"],
-        "success_keywords": ["签到成功", "簽到成功", "签到完成", "已签到", "本次签到"],
-        "already_keywords": ["今日已签到", "今天已签到", "已签到", "已簽到", "已领取"],
+        # 照 tmzg 的做法：按钮消失不算成功，只认站点给的明确文字；
+        # 已签到只看这几个（「已领取」是别的站点文案，容易误判）
+        "success_keywords": ["签到成功", "簽到成功", "签到完成", "本次签到"],
+        "already_keywords": ["今日已签到", "今天已签到", "已簽到"],
     },
     # ---- 以下站点流程参考 thsrite「站点自动签到」的 sites/ 模块 ----
     # 只收录能用规则表达的：POST 固定字段、首页抓 CSRF、JSON 返回判定这几种。
@@ -2356,7 +2358,7 @@ def pre_click_script(selector: str = "", text: str = "", wait_ms: int = 800) -> 
         const hits = nodes
           .map((item) => ({
             node: item,
-            text: ((item.value || item.textContent || '') + '').replace(/\s+/g, ' ').trim(),
+            text: ((item.value || item.textContent || '') + '').replace(/\\s+/g, ' ').trim(),
           }))
           .filter((item) => item.text && item.text.includes(wanted) && item.text.length <= 40);
         if (hits.length) {
@@ -2386,7 +2388,7 @@ def _submit_script(selector: str, method: str, captcha_input: Optional[str] = No
         const hits = nodes
           .map((node) => ({
             node,
-            text: ((node.value || node.textContent || '') + '').replace(/\s+/g, ' ').trim(),
+            text: ((node.value || node.textContent || '') + '').replace(/\\s+/g, ' ').trim(),
           }))
           .filter((item) => item.text && item.text.includes(wanted) && item.text.length <= 40);
         if (hits.length) {

@@ -1608,5 +1608,49 @@ class YemaAltchaTests(unittest.TestCase):
                 self.assertIsNotNone(core.site_module_for("https://pt.0ff.cc/"))
 
 
+
+class ModuleFallbackTests(unittest.TestCase):
+    """模块失败时不能挡住规则引擎（天空 HDSky 的 HTTP/OCR → Browserless 兜底）。"""
+
+    def _plugin(self):
+        """复用 test_plugin_page 里已经搭好 MoviePilot 桩的插件模块。"""
+        from tests.v3.ptsitesignin import test_plugin_page
+        return test_plugin_page.PLUGINS[0]
+
+    def test_failed_module_falls_back_to_engine(self):
+        module = self._plugin()
+        plugin = module.PTSiteSignIn.__new__(module.PTSiteSignIn)
+        plugin._timeout = 30
+        plugin._proxies_for = lambda info: None            # type: ignore[method-assign]
+        plugin._should_fallback = lambda rule, outcome: False  # type: ignore[method-assign]
+
+        calls = {}
+
+        def fake_sign(info, rule):
+            calls["engine"] = rule.get("engine")
+            return module.SignResult("success", "签到成功")
+
+        class _Signer:
+            def sign(self, info, rule):
+                return fake_sign(info, rule)
+
+        outcome = plugin._sign_with_engine(
+            {"url": "https://hdsky.me"}, {"engine": "browserless", "path": "/index.php"},
+            "browserless", _Signer(), "天空")
+        self.assertIsNotNone(outcome)
+        self.assertEqual(outcome.status, "success")
+        self.assertEqual(calls["engine"], "browserless")
+
+    def test_missing_signer_reports_reason(self):
+        module = self._plugin()
+        plugin = module.PTSiteSignIn.__new__(module.PTSiteSignIn)
+        plugin._timeout = 30
+        plugin._proxies_for = lambda info: None            # type: ignore[method-assign]
+        outcome = plugin._sign_with_engine(
+            {"url": "https://hdsky.me"}, {"engine": "browserless"}, "browserless", None, "天空")
+        self.assertEqual(outcome.status, "failed")
+        self.assertIn("Browserless", outcome.message)
+
+
 if __name__ == "__main__":
     unittest.main()

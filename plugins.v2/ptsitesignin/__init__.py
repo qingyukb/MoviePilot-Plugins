@@ -748,6 +748,32 @@ class PTSiteSignIn(_PluginBase):
                             "apikey", "token", "note", "timeout",
                             "username", "user", "account", "password", "passwd", "pwd")}
 
+    def _sign_with_engine(self, info: Dict[str, Any], rule: Dict[str, Any], engine: str,
+                          signer: Optional[BrowserlessSigner],
+                          site_name: str) -> Optional[SignResult]:
+        """按规则里的 engine 执行一次签到（站点模块失败后的回落路径）。"""
+        try:
+            if engine == "playwright":
+                outcome = playwright_sign(info, rule, timeout=max(90, self._timeout * 2),
+                                          proxies=self._proxies_for(info))
+                if outcome is not None:
+                    return outcome
+                if signer is not None:
+                    logger.info("PT站点签到：%s 本机没有 Playwright，改用 Browserless", site_name)
+                    return signer.sign(dict(rule, engine="browserless"))
+                return SignResult("failed", "本机缺少 Playwright，且未配置 Browserless")
+            if engine == "browserless":
+                if signer is None:
+                    return SignResult("failed", "未配置 Browserless 地址或 Token")
+                return signer.sign(info, rule)
+            outcome = http_sign_auto(info, rule, timeout=self._timeout,
+                                     proxies=self._proxies_for(info))
+            if outcome.status == "failed" and self._should_fallback(rule, outcome):
+                outcome, _ = self._maybe_fallback(info, rule, outcome, signer)
+            return outcome
+        except ValueError as error:
+            return SignResult("failed", str(error))
+
     def _should_init_signer(self, infos: List[Dict[str, Any]],
                            rules: Dict[str, Dict[str, Any]]) -> bool:
         """按最终生效的站点规则判断是否需要初始化 Browserless 引擎。
@@ -813,10 +839,28 @@ class PTSiteSignIn(_PluginBase):
             # 放在插件目录 sites/ 下，优先于规则执行。
             module_outcome = run_site_module(info, timeout=self._timeout,
                                              proxies=self._proxies_for(info), logger=logger)
-            if module_outcome is not None:
+            if module_outcome is not None and module_outcome.status != "failed":
                 outcome = module_outcome
                 engine = "module"
                 logger.info("PT站点签到：%s 使用站点模块", site_name)
+            elif module_outcome is not None:
+                # 站点模块失败时不能被它挡住：按规则引擎再走一遍（天空就是这样：
+                # 先 HTTP + OCR，失败才用 Browserless 弹窗流程），两边的说明都保留
+                module_note = f"模块：{module_outcome.message}"
+                logger.info("PT站点签到：%s 站点模块失败（%s），改用规则引擎重试",
+                            site_name, module_outcome.message)
+                outcome = self._sign_with_engine(info, rule, engine, signer, site_name)
+                if outcome is None:
+                    outcome = module_outcome
+                    engine = "module"
+                elif outcome.status in {"success", "already"}:
+                    outcome = SignResult(outcome.status,
+                                         f"{outcome.message}（{module_note} 后由规则引擎完成）")
+                    engine = str(rule["engine"])
+                else:
+                    outcome = SignResult(outcome.status,
+                                         f"{module_note}；规则引擎：{outcome.message}")
+                    engine = str(rule["engine"])
             elif engine == "playwright":
                 # 本机浏览器：IP 与家宽一致，站点不会判异地登录，也不消耗 Browserless 额度
                 outcome = playwright_sign(info, rule, timeout=max(90, self._timeout * 2),
