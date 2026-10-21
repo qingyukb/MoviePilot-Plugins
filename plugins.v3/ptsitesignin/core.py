@@ -443,11 +443,19 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
     },
     # ---- 野马（yemapt.org）：GET api/consumer/checkIn，JSON success 即签到成功 ----
     "yemapt.org": {
-        "engine": "http",
-        "method": "GET",
-        "path": "/api/consumer/checkIn",
-        "success_keywords": ["\"success\":true"],
-        "already_keywords": ["已经签到", "已签到"],
+        # 站点是 Ant Design 前端的单页应用，签到要点 altcha 人机验证后按钮才可用
+        "engine": "browserless",
+        "mode": "altcha",
+        "path": "/",
+        "route_fragment": "#/user/growth?tab=checkIn",
+        "altcha_checkbox_selector": "altcha-widget input[type='checkbox']",
+        "altcha_payload_selector": "altcha-widget .altcha[data-state='verified'] input[name='altchaPayload']",
+        "submit_selector": "button.ant-btn-primary.ant-btn-lg.ant-btn-block:not([disabled])",
+        "submit_method": "altcha_click",
+        "submit_text": "立即签到",
+        "already_keywords": ["已签到，明日继续", "你的今日状态：已签到"],
+        "preflight_wait": 8000,
+        "wait": 5000,
     },
     # ---- SUNNYPT（sunnypt.top）：站点自带签到页 /user/attendance（Next.js + JSON API） ----
     # 头像菜单里的「每日签到」只是跳这个页面，不用再点菜单；
@@ -476,6 +484,21 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
     # ---- 海棠PT（htpt.cc）：/attendance.php 的「每日签到」日历，点按钮签到 ----
     # 已签到时页面直接写「今日已签到 ✓（连续 N 天，今日获得 X 魔力值）」，没有表单；
     # 未签到时是按钮，按文字点。最近动向在 userdetails.php（id 从 Cookie 的 c_secure_uid 取）。
+    # ---- 自由农场（0ff.cc / pt.0ff.cc）：滑块接口直连，签到逻辑在 sites/farm.py ----
+    "0ff.cc": {
+        "engine": "http",
+        "method": "GET",
+        "path": "/attendance.php",
+        "already_keywords": ["今日已签到", "已签到"],
+        "success_keywords": ["签到成功", "已簽到"],
+    },
+    "pt.0ff.cc": {
+        "engine": "http",
+        "method": "GET",
+        "path": "/attendance.php",
+        "already_keywords": ["今日已签到", "已签到"],
+        "success_keywords": ["签到成功", "已簽到"],
+    },
     "htpt.cc": {
         # 签到交给 sites/htpt.py：GET 签到页 → POST action=sign → 回读确认。
         # 实测这条路直接可用（表单无验证码），不必再开浏览器。

@@ -3,18 +3,18 @@
     "name": "PT站点签到",
     "description": "PT 站点自动签到，可登录刷新 Cookie 并读取最近动向；遇到验证码或 Cloudflare 会自动改用浏览器。",
     "labels": "站点,签到",
-    "version": "1.8.10",
+    "version": "1.8.11",
     "icon": "https://raw.githubusercontent.com/qingyukb/MoviePilot-Plugins/main/icons/ptsignin.png",
     "author": "qingyukb",
     "level": 2,
     "release": true,
     "system_version": ">=3.0.0",
     "history": {
+      "v1.8.11": "对齐 tmzg0000 的验证码签到：新增自由农场 0ff.cc / pt.0ff.cc（滑块接口直连，不耗 Browserless），YemaPT 改为 altcha 模式",
       "v1.8.10": "海棠PT（htpt.cc）改用站点模块 + HTTP 表单签到（POST action=sign 后回读确认），不再依赖浏览器；顺手验证过真实签到流程",
       "v1.8.9": "登录失效判定补全：识别 /auth/sign-in、shouldClearAuth 等 Next.js 站点跳转，Cookie 过期时直接提示失效（SUNNYPT 就是这种）",
       "v1.8.8": "新增海棠PT（htpt.cc）预设：/attendance.php 每日签到按钮 + 个人页「最近动向」",
-      "v1.8.7": "新增烧包（ptsbao.club）内置预设：attendance.php 图片验证码签到；Cookie 里的 c_secure_pass 是 JWT 变体，插件会从中解析 uid 以读取「最近动向」",
-      "v1.8.6": "图标改用完整 URL（与其它第三方仓库一致）：由 MP 图片代理抓取，配合「安全图片域名」白名单即可显示"
+      "v1.8.7": "新增烧包（ptsbao.club）内置预设：attendance.php 图片验证码签到；Cookie 里的 c_secure_pass 是 JWT 变体，插件会从中解析 uid 以读取「最近动向」"
     }
   },
   "MTeamAlive": {

@@ -1511,5 +1511,102 @@ class HtptModuleTests(unittest.TestCase):
         self.assertIn("立即签到", message)
 
 
+
+class FarmModuleTests(unittest.TestCase):
+    """自由农场（0ff.cc / pt.0ff.cc）：滑块接口直连签到。"""
+
+    def _module(self):
+        import importlib.util
+        import sys
+        path = ROOT / "plugins.v2" / "ptsitesignin" / "sites" / "farm.py"
+        if not path.is_file():
+            path = ROOT / "plugins.v3" / "ptsitesignin" / "sites" / "farm.py"
+        spec = importlib.util.spec_from_file_location("farm_module", path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["farm_module"] = module
+        spec.loader.exec_module(module)
+        return module
+
+    class _Ctx:
+        def __init__(self, pages, status=200):
+            self.pages = pages          # dict: url 片段 -> 内容
+            self.status = status
+            self.hits = []
+
+        def page(self, url, **kwargs):
+            self.hits.append(url)
+            for key, value in self.pages.items():
+                if key in url:
+                    return value
+            return ""
+
+        def get(self, url, headers=None, **kwargs):
+            self.hits.append(url)
+
+            class _Resp:
+                status_code = self.status
+
+            return _Resp()
+
+    UNSIGNED = ("<html><script src=\"/static/js/slide_check_9f2a.js\"></script>"
+                "<div>拖动滑块验证</div></html>")
+    SCRIPT = "const url = '/api/v1/set_access_token-abc123?x=1';"
+    SIGNED = "<html><div>今日已签到</div></html>"
+
+    def test_match_domains(self):
+        module = self._module()
+        self.assertTrue(module.Farm.match("https://0ff.cc/"))
+        self.assertTrue(module.Farm.match("https://pt.0ff.cc/attendance.php"))
+        self.assertFalse(module.Farm.match("https://other.example/"))
+
+    def test_sign_flow(self):
+        module = self._module()
+        ctx = self._Ctx({
+            "attendance.php": self.UNSIGNED,
+            "slide_check_9f2a.js": self.SCRIPT,
+        })
+        # 第三次读签到页返回已签到
+        calls = {"n": 0}
+        original = ctx.page
+
+        def page(url, **kwargs):
+            if "attendance.php" in url:
+                calls["n"] += 1
+                return self.UNSIGNED if calls["n"] == 1 else self.SIGNED
+            return original(url, **kwargs)
+
+        ctx.page = page
+        ok, message = module.Farm().signin({"url": "https://pt.0ff.cc"}, ctx)
+        self.assertTrue(ok, message)
+        self.assertIn("签到成功", message)
+        self.assertTrue(any("set_access_token" in hit for hit in ctx.hits))
+
+    def test_no_slide_script(self):
+        module = self._module()
+        ctx = self._Ctx({"attendance.php": "<html>普通页面</html>"})
+        ok, message = module.Farm().signin({"url": "https://0ff.cc"}, ctx)
+        self.assertFalse(ok)
+        self.assertIn("滑块", message)
+
+
+class YemaAltchaTests(unittest.TestCase):
+    """YemaPT 改成 altcha 模式（原来是直连旧接口，早失效）。"""
+
+    def test_rule_fields(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                rule = core.DEFAULT_RULES["yemapt.org"]
+                self.assertEqual(rule["mode"], "altcha")
+                self.assertEqual(rule["route_fragment"], "#/user/growth?tab=checkIn")
+                self.assertIn("已签到，明日继续", rule["already_keywords"])
+
+    def test_farm_presets(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                for domain in ("0ff.cc", "pt.0ff.cc"):
+                    self.assertEqual(core.DEFAULT_RULES[domain]["path"], "/attendance.php")
+                self.assertIsNotNone(core.site_module_for("https://pt.0ff.cc/"))
+
+
 if __name__ == "__main__":
     unittest.main()
