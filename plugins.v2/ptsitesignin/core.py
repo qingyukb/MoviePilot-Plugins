@@ -284,7 +284,10 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
     "piggo.me": {
         # 猪猪在站点侧有「异地登录」校验：Browserless 是美国机房 IP，会被判异常。
         # 改用本机 Playwright（走你家网络），勾选级 CF 验证它也能自己点过。
+        # cookie_mode=browser：账号 Cookie 写进浏览器 Cookie 存储（add_cookies），
+        # 验证过程中新下发的 cf_clearance / sl_* 才能随后续请求发出——照 tmzg 2.0.2 的做法。
         "engine": "playwright",
+        "cookie_mode": "browser",
         "method": "GET",
         # 云盾 / 雷池检测页多等一会儿（Playwright 引擎按这个预算轮询放行）
         "cloudflare_wait": 40,
@@ -1241,6 +1244,31 @@ def playwright_available() -> bool:
     return _load_playwright_helper() is not None
 
 
+def cookie_list_for_context(cookie: str, url: str) -> List[Dict[str, Any]]:
+    """把 "a=1; b=2" 转成 Playwright ``context.add_cookies`` 需要的列表。
+
+    猪猪这类双盾站点在验证过程中会下发新的 cf_clearance / sl_* Cookie：只有把账号 Cookie
+    写进浏览器 Cookie 存储，这些新 Cookie 才能随后续请求一起发出去；用 MP 的固定
+    ``extra_http_headers`` 注入则永远只带旧值，验证会一直循环。
+    """
+    from urllib.parse import urlparse
+
+    parsed = urlparse(str(url or ""))
+    if not parsed.scheme or not parsed.netloc:
+        return []
+    items: List[Dict[str, Any]] = []
+    for chunk in str(cookie or "").split(";"):
+        chunk = chunk.strip()
+        if not chunk or "=" not in chunk:
+            continue
+        name, value = chunk.split("=", 1)
+        name = name.strip()
+        if not name:
+            continue
+        items.append({"name": name, "value": value.strip(), "url": f"{parsed.scheme}://{parsed.netloc}/"})
+    return items
+
+
 def playwright_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: int = 90,
                     proxies: Optional[Dict[str, str]] = None) -> Optional[SignResult]:
     """用本机浏览器签到：打开页面 → 预检已签到 → 按文字点按钮 → 读结果判定。
@@ -1273,7 +1301,18 @@ def playwright_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: i
     # 挑战页本身也要能点勾选，给足超时
     wait_ms = max(wait_ms, 4000)
 
+    cookie_mode = str(rule.get("cookie_mode") or "header").lower()
+
     def callback(page: Any) -> Dict[str, Any]:
+        # 有的站点（猪猪）必须把 Cookie 写进浏览器存储：验证过程中新下发的
+        # cf_clearance / sl_* 才能随后续请求发出，否则验证会一直循环。
+        if cookie_mode == "browser" and cookie:
+            try:
+                items = cookie_list_for_context(cookie, base_url)
+                if items:
+                    page.context.add_cookies(items)
+            except Exception:
+                pass
         # MoviePilot 的 action() 里是 page.goto(url) 等 load：Cloudflare/雷池盾页永远等不到
         # load，30 秒必超时（日志里的 Page.goto: Timeout 30000ms 就是这个）。所以让它先打开
         # about:blank，真正的导航放在这里，只等 domcontentloaded，再自己轮询盾页是否放行。
@@ -1308,7 +1347,8 @@ def playwright_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: i
         return {"before": before, "after": after, "clicked": clicked}
 
     try:
-        outcome = PlaywrightHelper().action(url="about:blank", callback=callback, cookies=cookie,
+        outcome = PlaywrightHelper().action(url="about:blank", callback=callback,
+                                            cookies=None if cookie_mode == "browser" else cookie,
                                             ua=str(site.get("ua") or "").strip() or None,
                                             proxies=dict(proxies) if proxies else None,
                                             headless=True,

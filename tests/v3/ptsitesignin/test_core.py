@@ -1678,5 +1678,34 @@ class RuleKeyUniquenessTests(unittest.TestCase):
                 self.assertEqual(duplicated, [], f"重复的站点规则：{duplicated}")
 
 
+class PiggoCookieModeTests(unittest.TestCase):
+    """猪猪：Cookie 要写进浏览器 Cookie 存储（add_cookies），而不是固定请求头。"""
+
+    COOKIE = ("cf_clearance=abc; pigo_np_web_session=xyz; sl-session=qq==; "
+              "sl-challenge-server=cloud")
+
+    def test_cookie_list(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                items = core.cookie_list_for_context(self.COOKIE, "https://piggo.me/index.php")
+                names = [item["name"] for item in items]
+                self.assertIn("cf_clearance", names)
+                self.assertIn("sl-session", names)
+                self.assertTrue(all(item["url"] == "https://piggo.me/" for item in items))
+
+    def test_bad_url_returns_empty(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                self.assertEqual(core.cookie_list_for_context(self.COOKIE, ""), [])
+
+    def test_piggo_rule_uses_browser_cookie(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                rule = core.DEFAULT_RULES["piggo.me"]
+                self.assertEqual(rule["engine"], "playwright")
+                self.assertEqual(rule["cookie_mode"], "browser")
+                self.assertEqual(rule["submit_text"], "签到")
+
+
 if __name__ == "__main__":
     unittest.main()
