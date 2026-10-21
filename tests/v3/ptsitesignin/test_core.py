@@ -1652,5 +1652,31 @@ class ModuleFallbackTests(unittest.TestCase):
         self.assertIn("Browserless", outcome.message)
 
 
+class RuleKeyUniquenessTests(unittest.TestCase):
+    """DEFAULT_RULES 里不能有重复键（重复时后一份会静默覆盖前一份）。"""
+
+    def test_no_duplicate_domains(self):
+        import re
+        from collections import Counter
+        for directory in PLUGIN_DIRS:
+            with self.subTest(plugin=directory.name):
+                text = (directory / "core.py").read_text(encoding="utf-8")
+                start = text.index("DEFAULT_RULES")
+                brace = text.index("{", start)
+                depth = 0
+                end = None
+                for i in range(brace, len(text)):
+                    if text[i] == "{":
+                        depth += 1
+                    elif text[i] == "}":
+                        depth -= 1
+                        if depth == 0:
+                            end = i + 1
+                            break
+                keys = re.findall(r'^    "([^"]+)": \{', text[brace:end], re.M)
+                duplicated = [k for k, c in Counter(keys).items() if c > 1]
+                self.assertEqual(duplicated, [], f"重复的站点规则：{duplicated}")
+
+
 if __name__ == "__main__":
     unittest.main()

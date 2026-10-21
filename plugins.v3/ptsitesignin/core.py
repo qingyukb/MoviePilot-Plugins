@@ -443,22 +443,6 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "success_keywords": ["签到成功", "签到完成", "领取成功"],
         "already_keywords": ["签到已得", "今日已签到", "已经签到", "请不要重复签到"],
     },
-    # ---- 野马（yemapt.org）：GET api/consumer/checkIn，JSON success 即签到成功 ----
-    "yemapt.org": {
-        # 站点是 Ant Design 前端的单页应用，签到要点 altcha 人机验证后按钮才可用
-        "engine": "browserless",
-        "mode": "altcha",
-        "path": "/",
-        "route_fragment": "#/user/growth?tab=checkIn",
-        "altcha_checkbox_selector": "altcha-widget input[type='checkbox']",
-        "altcha_payload_selector": "altcha-widget .altcha[data-state='verified'] input[name='altchaPayload']",
-        "submit_selector": "button.ant-btn-primary.ant-btn-lg.ant-btn-block:not([disabled])",
-        "submit_method": "altcha_click",
-        "submit_text": "立即签到",
-        "already_keywords": ["已签到，明日继续", "你的今日状态：已签到"],
-        "preflight_wait": 8000,
-        "wait": 5000,
-    },
     # ---- SUNNYPT（sunnypt.top）：站点自带签到页 /user/attendance（Next.js + JSON API） ----
     # 头像菜单里的「每日签到」只是跳这个页面，不用再点菜单；
     # 已签到时页面上是「今日签到已完成 … 已连续签到 N 天」，按钮变灰的「今日已签到」。
