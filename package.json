@@ -11,11 +11,11 @@
     "v2": true,
     "system_version": ">=2.0.0",
     "history": {
-      "v1.9.7": "本机浏览器签到改为 Playwright 真实点击（照 tmzg 的 captchasignin）；卡在雷池/Cloudflare 或异地验证页时明确报错，不再误报「找不到签到按钮」",
+      "v1.9.7": "本机浏览器签到改用真实点击；卡在雷池/Cloudflare 或异地验证页时明确报错，不再误报「找不到签到按钮」",
       "v1.9.6": "高清杜比换域名：新增域名别名机制，uhddolby.com（含 www）沿用原规则；实测旧域名 hddolby.com 已无法访问",
       "v1.9.5": "修猪猪「找不到签到按钮」：首页只有 [签到已得…] 链接，真正的签到页是 attendance.php；本机浏览器引擎新增 retry_paths 备用页面机制",
       "v1.9.4": "支持私有部署的 Browserless：地址可填根地址或完整端点（/bql 结尾原样保留），Token 可留空（自建实例无鉴权）",
-      "v1.9.3": "关闭 release 标记：仓库没有 GitHub Release 包，MP 之前会去 Release 列表找PTSiteSignIn_vX 包，找不到就让「更新到最新版」按钮闪一下消失"
+      "v1.9.3": "关闭 release 标记：仓库没有 GitHub Release 包，MP 之前会去 Release 列表找 PTSiteSignIn_vX 包，找不到就让「更新到最新版」按钮闪一下消失"
     }
   },
   "MTeamAlive": {
