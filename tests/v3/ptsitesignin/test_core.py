@@ -244,6 +244,16 @@ class CoreRegressionTests(unittest.TestCase):
                          "https://example.com/stealth/bql?token=tok")
         with self.assertRaises(ValueError):
             self.core.bql_endpoint("", "tok")
+        # 私有部署：根地址自动补 /stealth/bql；完整端点原样保留；Token 可留空
+        self.assertEqual(self.core.bql_endpoint("http://192.168.1.10:3000"),
+                         "http://192.168.1.10:3000/stealth/bql")
+        self.assertEqual(self.core.bql_endpoint("http://192.168.1.10:3000/chromium/bql", "k"),
+                         "http://192.168.1.10:3000/chromium/bql?token=k")
+        self.assertEqual(self.core.bql_endpoint("https://self.host:3000/stealth"),
+                         "https://self.host:3000/stealth/bql")
+        # 自建无鉴权：会话地址原样返回，不追加空 token
+        self.assertEqual(self.core.session_endpoint("http://192.168.1.10:3000/e/abc/bql", ""),
+                         "http://192.168.1.10:3000/e/abc/bql")
 
     def test_parse_rules(self):
         rules = self.core.parse_rules('{"Audiences.ME": {"path": "/x"}}')

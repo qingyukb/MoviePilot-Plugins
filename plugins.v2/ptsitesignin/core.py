@@ -2328,10 +2328,16 @@ def cookie_objects(cookie_header: str, target: str) -> List[Dict[str, Any]]:
     return cookies
 
 
-def bql_endpoint(address: str, token: str) -> str:
-    address, token = address.strip(), token.strip()
-    if not address or not token:
-        raise ValueError("Browserless 地址和 Token 都不能为空")
+def bql_endpoint(address: str, token: str = "") -> str:
+    """把配置的地址规范成 BrowserQL 端点。
+
+    支持私有部署：地址写根地址（如 ``http://192.168.1.10:3000``）会自动补
+    ``/stealth/bql``；已经以 ``/bql`` 结尾的完整端点原样保留（自建实例常用
+    ``/chromium/bql``、``/stealth/bql`` 等路径）。Token 可留空——自建实例常关掉鉴权。
+    """
+    address, token = str(address or "").strip(), str(token or "").strip()
+    if not address:
+        raise ValueError("Browserless 地址不能为空")
     parsed = urllib.parse.urlparse(address)
     if parsed.scheme not in {"http", "https"}:
         raise ValueError("Browserless 地址必须以 http:// 或 https:// 开头")
@@ -2339,7 +2345,8 @@ def bql_endpoint(address: str, token: str) -> str:
     if not path.endswith("/bql"):
         path = (path + "/bql") if path.endswith("/stealth") else (path + "/stealth/bql")
     query = dict(urllib.parse.parse_qsl(parsed.query, keep_blank_values=True))
-    query["token"] = token
+    if token:
+        query["token"] = token
     return urllib.parse.urlunparse((parsed.scheme, parsed.netloc, path, "",
                                     urllib.parse.urlencode(query), ""))
 
@@ -2350,8 +2357,11 @@ def session_endpoint(address: str, token: str) -> str:
     只补查询参数、不改路径：会话地址自带 ``/e/<uuid>/...`` 前缀，重写路径会让它失效。
     """
     address, token = str(address or "").strip(), str(token or "").strip()
-    if not address or not token:
+    if not address:
         return ""
+    # 自建 Browserless 没配 token：会话地址原样用，不追加空参数
+    if not token:
+        return address
     parsed = urllib.parse.urlparse(address)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         return ""
@@ -3331,6 +3341,9 @@ class BrowserlessPool:
             value = str(token or "").strip()
             if value and value not in cleaned:
                 cleaned.append(value)
+        # 自建 Browserless 常常不开鉴权：只给了地址、没给 Token 时也要能建出实例
+        if not cleaned and str(address or "").strip():
+            cleaned = [""]
         self.tokens = cleaned
         self._logger = logger
         self._index = 0

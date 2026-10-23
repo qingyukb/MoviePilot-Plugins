@@ -177,7 +177,7 @@ class PTSiteSignIn(_PluginBase):
     plugin_name = "PT站点签到"
     plugin_desc = ("PT 站点自动签到，可登录刷新 Cookie 并读取最近动向；遇到验证码或 Cloudflare 会自动改用浏览器。")
     plugin_icon = "signin.png"
-    plugin_version = "1.9.3"
+    plugin_version = "1.9.4"
     plugin_author = "qingyukb"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "ptsignin_"
@@ -1136,8 +1136,11 @@ class PTSiteSignIn(_PluginBase):
         signer: Optional[BrowserlessSigner] = None
         if self._should_init_signer(infos, rules):
             tokens = self._browserless_tokens()
-            if not tokens or not self._browserless_url:
-                logger.warning("PT站点签到：未配置 Browserless 地址或 Token，相关站点将失败")
+            if not self._browserless_url:
+                logger.warning("PT站点签到：未配置 Browserless 地址，相关站点将失败")
+            elif not tokens:
+                # 自建 Browserless 常关掉鉴权：留空 Token 也照常走，只是不能多 Key 轮换
+                logger.info("PT站点签到：Browserless 未填 Token，按自建无鉴权实例处理")
             else:
                 try:
                     signer = BrowserlessPool(self._browserless_url, tokens,

@@ -76,11 +76,20 @@ class BrowserlessPoolTests(unittest.TestCase):
                 self.assertIn("401", result.message)
 
     def test_empty_tokens_gracefully_fail(self):
+        # 没有地址也没有 Token：池子为空，sign 直接失败
         for core in CORES:
             with self.subTest(core=core.__name__):
-                pool = core.BrowserlessPool("https://example.test", ["", "  "], 60)
+                pool = core.BrowserlessPool("", ["", "  "], 60)
                 self.assertFalse(pool)
                 self.assertEqual(pool.sign({}, {}).status, "failed")
+
+    def test_address_without_token_is_allowed(self):
+        # 私有部署常关鉴权：只给地址（不给 Token）也要能建出实例，且只能有一个「空 Token」
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                pool = core.BrowserlessPool("http://192.168.1.10:3000", [], 60)
+                self.assertTrue(pool)
+                self.assertEqual(pool.tokens, [""])
 
     def test_token_dedup(self):
         for core in CORES:
