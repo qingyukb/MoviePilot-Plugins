@@ -546,7 +546,7 @@ class CoreRegressionTests(unittest.TestCase):
             rule = self.core.resolve_rule({"url": url, "cookie": "c=1"}, {})
             self.assertEqual(rule["engine"], "playwright", url)
         piggo = self.core.resolve_rule({"url": "https://piggo.me/", "cookie": "c=1"}, {})
-        self.assertEqual(piggo["path"], "/index.php")
+        self.assertEqual(piggo["path"], "/attendance.php")
         self.assertEqual(piggo["submit_text"], "签到")
 
     def test_playwright_sign_without_helper(self):
@@ -559,7 +559,8 @@ class CoreRegressionTests(unittest.TestCase):
         # 猪猪有异地登录校验：改用本机 Playwright（家宽 IP），勾选级 CF 由本机浏览器点过
         rule = self.core.resolve_rule({"url": "https://piggo.me/", "cookie": "c=1"}, {})
         self.assertEqual(rule["engine"], "playwright")
-        self.assertEqual(rule["path"], "/index.php")
+        self.assertEqual(rule["path"], "/attendance.php")   # 首页没有签到按钮，真正入口在签到页
+        self.assertEqual(rule["retry_paths"], ["/index.php"])
         self.assertEqual(rule["submit_text"], "签到")
         self.assertEqual(rule["submit_method"], "dom_click")
         self.assertEqual(rule["wait"], 15000)
@@ -1686,6 +1687,25 @@ class RuleKeyUniquenessTests(unittest.TestCase):
                 keys = re.findall(r'^    "([^"]+)": \{', text[brace:end], re.M)
                 duplicated = [k for k, c in Counter(keys).items() if c > 1]
                 self.assertEqual(duplicated, [], f"重复的站点规则：{duplicated}")
+
+
+class PlaywrightPathsTests(unittest.TestCase):
+    """本机浏览器引擎的页面顺序：主 path 在前，retry_paths 兜底。"""
+
+    def test_paths_order_and_dedup(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                self.assertEqual(core.playwright_paths({"path": "/a", "retry_paths": ["/b", "/a"]}),
+                                 ["/a", "/b"])
+                self.assertEqual(core.playwright_paths({"retry_paths": ["/x"]}),
+                                 [core.DEFAULT_HTTP_PATH, "/x"])
+                self.assertEqual(core.playwright_paths({}), [core.DEFAULT_HTTP_PATH])
+
+    def test_piggo_rule_declares_retry(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                rule = core.DEFAULT_RULES["piggo.me"]
+                self.assertEqual(core.playwright_paths(rule), ["/attendance.php", "/index.php"])
 
 
 class PiggoCookieModeTests(unittest.TestCase):

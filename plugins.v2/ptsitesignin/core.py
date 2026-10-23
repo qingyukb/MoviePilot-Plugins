@@ -286,12 +286,15 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         # 改用本机 Playwright（走你家网络），勾选级 CF 验证它也能自己点过。
         # cookie_mode=browser：账号 Cookie 写进浏览器 Cookie 存储（add_cookies），
         # 验证过程中新下发的 cf_clearance / sl_* 才能随后续请求发出——照 tmzg 2.0.2 的做法。
+        # 实测首页 /index.php 没有签到按钮，只有一个 [签到已得…] 链接指向 attendance.php，
+        # 所以主路径改成 attendance.php，首页作兜底。
         "engine": "playwright",
         "cookie_mode": "browser",
         "method": "GET",
         # 云盾 / 雷池检测页多等一会儿（Playwright 引擎按这个预算轮询放行）
         "cloudflare_wait": 40,
-        "path": "/index.php",
+        "path": "/attendance.php",
+        "retry_paths": ["/index.php"],
         "submit_method": "dom_click",
         "submit_selector": "a, input[type='submit'], button, [role='button'], span",
         "submit_text": "签到",
@@ -1269,6 +1272,22 @@ def cookie_list_for_context(cookie: str, url: str) -> List[Dict[str, Any]]:
     return items
 
 
+def playwright_paths(rule: Mapping[str, Any]) -> List[str]:
+    """本机浏览器要依次尝试的页面：主 path 在前，retry_paths 依次兜底。
+
+    有的站点（猪猪）首页只有「[签到已得…]」链接，真正的签到表单在 attendance.php，
+    所以允许规则再给几个备用页面，找不到按钮就换下一个。
+    """
+    paths: List[str] = []
+    primary = str(rule.get("path") or DEFAULT_HTTP_PATH).strip()
+    candidates = [primary] + list(rule.get("retry_paths") or [])
+    for value in candidates:
+        item = str(value or "").strip()
+        if item and item not in paths:
+            paths.append(item)
+    return paths or [DEFAULT_HTTP_PATH]
+
+
 def playwright_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: int = 90,
                     proxies: Optional[Dict[str, str]] = None) -> Optional[SignResult]:
     """用本机浏览器签到：打开页面 → 预检已签到 → 按文字点按钮 → 读结果判定。
@@ -1287,7 +1306,7 @@ def playwright_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: i
     cookie = str(site.get("cookie") or "").strip()
     if not base_url:
         return None
-    url = target_url(base_url, str(rule.get("path") or DEFAULT_HTTP_PATH))
+    paths = playwright_paths(rule)
     selector = str(rule.get("submit_selector") or "")
     submit_text = str(rule.get("submit_text") or "")
     wait_ms = int(rule.get("wait") or 4000)
@@ -1316,35 +1335,46 @@ def playwright_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: i
         # MoviePilot 的 action() 里是 page.goto(url) 等 load：Cloudflare/雷池盾页永远等不到
         # load，30 秒必超时（日志里的 Page.goto: Timeout 30000ms 就是这个）。所以让它先打开
         # about:blank，真正的导航放在这里，只等 domcontentloaded，再自己轮询盾页是否放行。
-        try:
-            page.goto(url, wait_until="domcontentloaded",
-                      timeout=max(15000, int(timeout * 1000)))
-        except Exception:
-            pass
-        try:
-            page.wait_for_load_state("domcontentloaded")
-        except Exception:
-            pass
-        before = _wait_challenge_clear(page, challenge_budget)
-        clicked = False
-        if not before or classify(before, rule).status not in {"success", "already"}:
+        tried: List[str] = []
+        last: Dict[str, Any] = {}
+        for path in paths:
+            url = target_url(base_url, path)
+            tried.append(path)
             try:
-                clicked = bool(page.evaluate(_PAGE_CLICK_JS, [selector, submit_text]))
-            except Exception:
-                clicked = False
-            try:
-                page.wait_for_timeout(max(1000, wait_ms))
+                page.goto(url, wait_until="domcontentloaded",
+                          timeout=max(15000, int(timeout * 1000)))
             except Exception:
                 pass
-            # 点完签到可能被踢到雷池 / Cloudflare 检测页，再等一次放行
-            after = _wait_challenge_clear(page, challenge_budget)
-        else:
-            after = before
             try:
-                after = page.content() or after
+                page.wait_for_load_state("domcontentloaded")
             except Exception:
                 pass
-        return {"before": before, "after": after, "clicked": clicked}
+            before = _wait_challenge_clear(page, challenge_budget)
+            clicked = False
+            if not before or classify(before, rule).status not in {"success", "already"}:
+                try:
+                    clicked = bool(page.evaluate(_PAGE_CLICK_JS, [selector, submit_text]))
+                except Exception:
+                    clicked = False
+                try:
+                    page.wait_for_timeout(max(1000, wait_ms))
+                except Exception:
+                    pass
+                # 点完签到可能被踢到雷池 / Cloudflare 检测页，再等一次放行
+                after = _wait_challenge_clear(page, challenge_budget)
+            else:
+                after = before
+                try:
+                    after = page.content() or after
+                except Exception:
+                    pass
+            last = {"before": before, "after": after, "clicked": clicked, "path": path}
+            if clicked or classify(after, rule).status in {"success", "already"}:
+                break
+            # 这一页既没点成也不像已签到：换下一个备用页面
+        last["tried"] = tried
+        last["paths"] = paths
+        return last
 
     try:
         outcome = PlaywrightHelper().action(url="about:blank", callback=callback,
@@ -1364,7 +1394,10 @@ def playwright_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: i
         prefix = "" if outcome.get("clicked") else "（页面已是签到完成状态）"
         return SignResult(judged.status, f"{judged.message}{prefix}")
     if not outcome.get("clicked"):
-        return SignResult("failed", "本地浏览器没找到可点的签到按钮")
+        tried = "、".join(str(item) for item in (outcome.get("tried") or []))
+        return SignResult("failed",
+                          f"本地浏览器没找到可点的签到按钮（已试：{tried or '默认页面'}；"
+                          f"可在这条规则的 retry_paths 里补页面）")
     return judged
 
 
