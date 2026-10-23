@@ -1186,6 +1186,36 @@ _PAGE_CLICK_JS = """
 """
 
 
+# 先给最合适的签到按钮打标记，再用 Playwright 的真实 click 点它。
+# 用 JS 直接 node.click() 只是派发 DOM 事件，部分站点的原生提交 / 跳转不认
+# （tmzg 的 captchasignin 也是用 page.click 才在猪猪上点成功的）。
+_MARK_CLICK_JS = """
+(args) => {
+  const [selector, text] = args;
+  const nodes = Array.from(document.querySelectorAll(
+    selector || "input[type='submit'], button, a, [role='button']"));
+  const wanted = (text || "").trim();
+  const hits = nodes.filter((node) => {
+    if (node.disabled) return false;
+    const label = ((node.value || node.textContent || "") + " " + (node.getAttribute("aria-label") || "")
+                   + " " + (node.getAttribute("title") || "")).trim();
+    const visible = node.offsetParent !== null || node.getClientRects().length > 0;
+    return visible && (!wanted || label.includes(wanted));
+  });
+  if (!hits.length) return false;
+  hits.sort((left, right) => {
+    const a = (left.value || left.textContent || "").trim();
+    const b = (right.value || right.textContent || "").trim();
+    return Number(b === wanted) - Number(a === wanted) || a.length - b.length;
+  });
+  hits[0].setAttribute("data-ptsignin-target", "1");
+  hits[0].scrollIntoView({block: "center"});
+  return true;
+}
+"""
+
+_CLICK_MARKED_SELECTOR = '[data-ptsignin-target="1"]'
+
 _CHALLENGE_PATTERN = re.compile(r"(just a moment|cf-chl|_cf_chl_opt|chl_page|"
                                 r"正在进行安全检测|安全检测能力由|雷池\s*WAF|SafeLine|"
                                 r"正在验证您是否是真人|verify you are human|checking your browser)",
@@ -1365,17 +1395,51 @@ def playwright_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: i
                 pass
             before = _wait_challenge_clear(page, challenge_budget)
             clicked = False
-            if not before or classify(before, rule).status not in {"success", "already"}:
-                try:
-                    clicked = bool(page.evaluate(_PAGE_CLICK_JS, [selector, submit_text]))
-                except Exception:
-                    clicked = False
-                try:
-                    page.wait_for_timeout(max(1000, wait_ms))
-                except Exception:
-                    pass
-                # 点完签到可能被踢到雷池 / Cloudflare 检测页，再等一次放行
-                after = _wait_challenge_clear(page, challenge_budget)
+            stuck = ""
+            judged_before = classify(before, rule)
+            if before and _page_has_challenge(before):
+                # 还停在雷池 / Cloudflare 检测页：这时候页面上根本没有签到按钮，
+                # 直接去点只会得到「没找到按钮」的误导性结论。
+                stuck = "challenge"
+                last = {"before": before, "after": before, "clicked": False,
+                        "path": path, "stuck": stuck}
+                continue
+            if judged_before.status == "failed" and "二级验证" in str(judged_before.message or ""):
+                # 异地登录验证页：需要人工/2FA，点按钮没用
+                return {"before": before, "after": before, "clicked": False,
+                        "path": path, "stuck": "second_factor",
+                        "message": judged_before.message}
+            if judged_before.status not in {"success", "already"}:
+                after = before
+                # 最多点两轮：猪猪首页点「[签到已得…]」只是跳到 attendance.php，
+                # 真正提交要在签到页再点一次（tmzg 的实现同样只点一次，所以这里更稳一点）。
+                for _attempt in range(2):
+                    try:
+                        marked = bool(page.evaluate(_MARK_CLICK_JS, [selector, submit_text]))
+                    except Exception:
+                        marked = False
+                    if not marked:
+                        break
+                    try:
+                        page.click(_CLICK_MARKED_SELECTOR, timeout=10000)
+                        clicked = True
+                    except Exception:
+                        # 真实点击失败（遮罩/动画挡住）时退回 JS 点击
+                        try:
+                            clicked = bool(page.evaluate(_PAGE_CLICK_JS, [selector, submit_text]))
+                        except Exception:
+                            clicked = False
+                    try:
+                        page.wait_for_timeout(max(1000, wait_ms))
+                    except Exception:
+                        pass
+                    # 点完签到可能被踢到雷池 / Cloudflare 检测页，再等一次放行
+                    after = _wait_challenge_clear(page, challenge_budget)
+                    if classify(after, rule).status in {"success", "already"}:
+                        break
+                    if after and _page_has_challenge(after):
+                        stuck = "challenge"
+                        break
             else:
                 after = before
                 try:
@@ -1408,7 +1472,14 @@ def playwright_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: i
         prefix = "" if outcome.get("clicked") else "（页面已是签到完成状态）"
         return SignResult(judged.status, f"{judged.message}{prefix}")
     if not outcome.get("clicked"):
+        if outcome.get("stuck") == "second_factor":
+            return SignResult("failed", str(outcome.get("message")
+                                            or "站点要求二级验证（异地登录验证）"))
         tried = "、".join(str(item) for item in (outcome.get("tried") or []))
+        if outcome.get("stuck") == "challenge":
+            return SignResult("failed",
+                              f"本地浏览器仍卡在安全验证页面（已试：{tried or '默认页面'}）："
+                              f"检查 Cookie 里是否带 cf_clearance / sl-*，或把 cloudflare_wait 调大")
         return SignResult("failed",
                           f"本地浏览器没找到可点的签到按钮（已试：{tried or '默认页面'}；"
                           f"可在这条规则的 retry_paths 里补页面）")
