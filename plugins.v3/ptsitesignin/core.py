@@ -441,7 +441,8 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "signin_json_raw": "{\"all\": 1, \"resetModal\": \"true\"}",
         "success_keywords": ["\"status\":200", "FIRE_GENSHIN_CHARACTER_MAGIC_SUCCESS"],
     },
-    # ---- 高清杜比（hddolby.com）：NexusPHP 签到页，已签到时首页显示「鲸币 (签到已得N)」 ----
+    # ---- 高清杜比（hddolby.com，2026-10 起换到 uhddolby.com）：NexusPHP 签到页，
+    # 已签到时首页显示「鲸币 (签到已得N)」。新域名通过 DOMAIN_ALIASES 指到这条规则。 ----
     "hddolby.com": {
         "engine": "http",
         "method": "GET",
@@ -624,6 +625,13 @@ def parse_rules(raw: Any) -> Dict[str, Dict[str, Any]]:
     return result
 
 
+# 站点换域名时把新域名指到已有规则的键，避免同一条规则维护两份。
+# 实测 2026-10：hddolby.com 已无法访问（URLError），新域名 www.uhddolby.com 正常。
+DOMAIN_ALIASES = {
+    "uhddolby.com": "hddolby.com",      # 高清杜比换域名
+}
+
+
 def preset_for_host(host: str) -> Optional[Dict[str, Any]]:
     """按域名取内置预设：先精确匹配，再按「以 .<预设域名> 结尾」兜底。
 
@@ -633,9 +641,15 @@ def preset_for_host(host: str) -> Optional[Dict[str, Any]]:
     preset = DEFAULT_RULES.get(host)
     if preset is not None:
         return preset
+    target = DOMAIN_ALIASES.get(host)
+    if target and target in DEFAULT_RULES:
+        return DEFAULT_RULES[target]
     for key, value in DEFAULT_RULES.items():
         if host.endswith("." + key):
             return value
+    for alias, target_key in DOMAIN_ALIASES.items():
+        if host.endswith("." + alias) and target_key in DEFAULT_RULES:
+            return DEFAULT_RULES[target_key]
     return None
 
 

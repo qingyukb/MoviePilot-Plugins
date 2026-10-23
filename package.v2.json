@@ -3,7 +3,7 @@
     "name": "PT站点签到",
     "description": "PT 站点自动签到，可登录刷新 Cookie 并读取最近动向；遇到验证码或 Cloudflare 会自动改用浏览器。",
     "labels": "站点,签到",
-    "version": "1.9.5",
+    "version": "1.9.6",
     "icon": "https://raw.githubusercontent.com/qingyukb/MoviePilot-Plugins/main/icons/ptsignin.png",
     "author": "qingyukb",
     "level": 2,
@@ -12,11 +12,11 @@
     "v2": true,
     "system_version": ">=2.0.0,<3.0.0",
     "history": {
+      "v1.9.6": "高清杜比换域名：新增域名别名机制，uhddolby.com（含 www）沿用原规则；实测旧域名 hddolby.com 已无法访问",
       "v1.9.5": "修猪猪「找不到签到按钮」：首页只有 [签到已得…] 链接，真正的签到页是 attendance.php；本机浏览器引擎新增 retry_paths 备用页面机制",
       "v1.9.4": "支持私有部署的 Browserless：地址可填根地址或完整端点（/bql 结尾原样保留），Token 可留空（自建实例无鉴权）",
       "v1.9.3": "关闭 release 标记：仓库没有 GitHub Release 包，MP 之前会去 Release 列表找PTSiteSignIn_vX 包，找不到就让「更新到最新版」按钮闪一下消失",
-      "v1.9.2": "猪猪改用「Cookie 写进浏览器存储」（add_cookies）：验证过程中新下发的 cf_clearance / sl_* 能随后续请求发出，不再被 MP 固定请求头挡住",
-      "v1.9.1": "修默认规则里的重复键：yemapt.org 有两份（后一份覆盖前一份），删掉多余那份"
+      "v1.9.2": "猪猪改用「Cookie 写进浏览器存储」（add_cookies）：验证过程中新下发的 cf_clearance / sl_* 能随后续请求发出，不再被 MP 固定请求头挡住"
     }
   },
   "MTeamAlive": {

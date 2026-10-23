@@ -1708,6 +1708,26 @@ class PlaywrightPathsTests(unittest.TestCase):
                 self.assertEqual(core.playwright_paths(rule), ["/attendance.php", "/index.php"])
 
 
+class DomainAliasTests(unittest.TestCase):
+    """站点换域名：通过别名映射沿用原规则（杜比 hddolby.com → uhddolby.com）。"""
+
+    def test_new_domain_uses_same_rule(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                old = core.preset_for_host("hddolby.com")
+                self.assertIsNotNone(old)
+                for host in ("uhddolby.com", "www.uhddolby.com", "pt.uhddolby.com"):
+                    rule = core.preset_for_host(host)
+                    self.assertIsNotNone(rule, host)
+                    self.assertEqual(rule["path"], old["path"])
+                    self.assertIn("签到已得", rule["already_keywords"])
+
+    def test_unknown_subdomain_still_none(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                self.assertIsNone(core.preset_for_host("unknown.example.invalid"))
+
+
 class PiggoCookieModeTests(unittest.TestCase):
     """猪猪：Cookie 要写进浏览器 Cookie 存储（add_cookies），而不是固定请求头。"""
 
