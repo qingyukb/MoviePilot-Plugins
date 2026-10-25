@@ -3,18 +3,18 @@
     "name": "PT站点签到",
     "description": "PT 站点自动签到，可登录刷新 Cookie 并读取最近动向；遇到验证码或 Cloudflare 会自动改用浏览器。",
     "labels": "站点,签到",
-    "version": "1.9.8",
+    "version": "1.9.9",
     "icon": "https://raw.githubusercontent.com/qingyukb/MoviePilot-Plugins/main/icons/ptsignin.png",
     "author": "qingyukb",
     "level": 2,
     "release": false,
     "system_version": ">=3.0.0",
     "history": {
+      "v1.9.9": "补删残留的 sites/mteam.py（1.9.8 只删了本地文件，仓库里还留着）",
       "v1.9.8": "新增可撸（our.kelu.one）、自然（naturept.top）签到规则；移除本站的馒头站点模块（馒头保活插件已负责）",
       "v1.9.7": "本机浏览器签到改用真实点击；卡在雷池/Cloudflare 或异地验证页时明确报错，不再误报「找不到签到按钮」",
       "v1.9.6": "高清杜比换域名：新增域名别名机制，uhddolby.com（含 www）沿用原规则；实测旧域名 hddolby.com 已无法访问",
-      "v1.9.5": "修猪猪「找不到签到按钮」：首页只有 [签到已得…] 链接，真正的签到页是 attendance.php；本机浏览器引擎新增 retry_paths 备用页面机制",
-      "v1.9.4": "支持私有部署的 Browserless：地址可填根地址或完整端点（/bql 结尾原样保留），Token 可留空（自建实例无鉴权）"
+      "v1.9.5": "修猪猪「找不到签到按钮」：首页只有 [签到已得…] 链接，真正的签到页是 attendance.php；本机浏览器引擎新增 retry_paths 备用页面机制"
     }
   },
   "MTeamAlive": {
