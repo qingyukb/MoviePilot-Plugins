@@ -45,9 +45,9 @@ MoviePilot 的 PT 站点自动签到插件，支持 V2 / V3。
 
 ## 站点模块
 
-图片验证码、答题选海报、API Token 这类规则写不了的站点，用插件目录里的 \sites/\ 放一个 Python 模块（一个站一个文件），
-插件会按域名自动加载并优先于规则执行。内置三个：\hdsky.py\（OCR 验证码）、\	jupt.py\（豆瓣海报比对）、
-\mteam.py\（API Token）。
+图片验证码、答题选海报这类规则写不了的站点，用插件目录里的 sites/ 放一个 Python 模块（一个站一个文件），
+插件会按域名自动加载并优先于规则执行。内置四个：hdsky.py（OCR 验证码）、tjupt.py（豆瓣海报比对）、
+htpt.py（海棠PT 表单签到）、farm.py（自由农场滑块直连）。
 
 `python
 class Example:

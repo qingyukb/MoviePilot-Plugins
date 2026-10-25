@@ -456,10 +456,12 @@ class CoreRegressionTests(unittest.TestCase):
         names = {getattr(module, "site_url", "") for module in modules}
         self.assertIn("hdsky.me", names)
         self.assertIn("tjupt.org", names)
-        self.assertIn("m-team", names)
+        self.assertIn("htpt.cc", names)
+        self.assertIn("0ff.cc", names)
+        self.assertNotIn("m-team", names)   # 馒头交给「馒头保活」插件，这里不再处理
         self.assertIsNotNone(self.core.site_module_for("https://hdsky.me/"))
         self.assertIsNotNone(self.core.site_module_for("https://www.tjupt.org/"))
-        self.assertIsNotNone(self.core.site_module_for("https://kp.m-team.cc/"))
+        self.assertIsNone(self.core.site_module_for("https://kp.m-team.cc/"))
         # 没有模块的站点返回 None，交给规则引擎
         self.assertIsNone(self.core.site_module_for("https://open.cd/"))
 

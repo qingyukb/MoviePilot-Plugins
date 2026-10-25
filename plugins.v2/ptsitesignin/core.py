@@ -281,6 +281,33 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
     # ---- Piggo（piggo.me）：整站在 Cloudflare 后面，按 NexusPHP 通用签到页处理 ----
     # 探测：所有路径对访客都返回 403「Just a moment...」，探不到真实路径，
     # 先按 /attendance.php + 「立即签到」配，若日志显示卡在挑战页或找不到按钮再调。
+    # ---- 可撸（our.kelu.one）/ 自然（naturept.top）：NexusPHP 日历式签到页 ----
+    # 已签到时 /attendance.php 直接显示「签到成功 … 本次签到获得 X 个魔力值」+ 日历；
+    # 未签到时页面上是按钮，按文字点即可。两站都是 GBK 页面，交给本机浏览器处理最稳。
+    "our.kelu.one": {
+        "engine": "playwright",
+        "path": "/attendance.php",
+        "cloudflare_wait": 25,
+        "submit_method": "dom_click",
+        "submit_selector": "button, input[type='submit'], a, [role='button']",
+        "submit_text": "签到",
+        "wait": 6000,
+        "success_keywords": ["签到成功", "本次签到获得"],
+        "already_keywords": ["今天已经签到", "今日已签到", "已经签到"],
+        "bonus": r"(本次签到获得\s*[\d,]+\s*个魔力值)",
+    },
+    "naturept.top": {
+        "engine": "playwright",
+        "path": "/attendance.php",
+        "cloudflare_wait": 25,
+        "submit_method": "dom_click",
+        "submit_selector": "button, input[type='submit'], a, [role='button']",
+        "submit_text": "签到",
+        "wait": 6000,
+        "success_keywords": ["签到成功", "本次签到获得"],
+        "already_keywords": ["今天已经签到", "今日已签到", "已经签到"],
+        "bonus": r"(本次签到获得\s*[\d,]+\s*个魔力值)",
+    },
     "piggo.me": {
         # 猪猪在站点侧有「异地登录」校验：Browserless 是美国机房 IP，会被判异常。
         # 改用本机 Playwright（走你家网络），勾选级 CF 验证它也能自己点过。
