@@ -1840,6 +1840,27 @@ class NexusCaptchaModuleTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("验证码", message)
 
+    def test_form_from_screenshot(self):
+        """按用户截图（验证图片 / 验证码 / 立即签到）还原的表单也要能解析。"""
+        module = self._module()
+        page = (
+            '<table><tr><td>验证图片：</td><td>'
+            '<img src="/image.php?action=regimage&imagehash=deadbeef&secret=" border=0></td></tr>'
+            '<tr><td>验证码：</td><td>'
+            '<form method="post" action="attendance.php">'
+            '<input type="hidden" name="imagehash" value="deadbeef">'
+            '<input type="text" name="imagestring" autocomplete="off">'
+            '<input type="submit" value="立即签到"></form>'
+            '</td></tr></table>'
+        )
+        form, fields, captcha, image = module.NexusCaptcha._parse_form(
+            page, "https://our.kelu.one/attendance.php")
+        self.assertEqual(form, "https://our.kelu.one/attendance.php")
+        self.assertEqual(captcha, "imagestring")
+        self.assertEqual(fields.get("imagehash"), "deadbeef")
+        self.assertIn("image.php", image)
+        self.assertIn("imagehash=deadbeef", image)
+
     def test_ajax_fallback(self):
         # 页面没有验证码表单，但内联脚本里有签到 action → 直接 POST ajax.php
         module = self._module()
