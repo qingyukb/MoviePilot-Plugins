@@ -1759,5 +1759,94 @@ class PiggoCookieModeTests(unittest.TestCase):
                 self.assertEqual(rule["submit_text"], "签到")
 
 
+class NexusCaptchaModuleTests(unittest.TestCase):
+    """可撸/自然：NexusPHP 图片验证码签到模块。"""
+
+    def _module(self):
+        import importlib.util
+        import sys
+        path = ROOT / "plugins.v2" / "ptsitesignin" / "sites" / "nexuscaptcha.py"
+        if not path.is_file():
+            path = ROOT / "plugins.v3" / "ptsitesignin" / "sites" / "nexuscaptcha.py"
+        spec = importlib.util.spec_from_file_location("nexuscaptcha_module", path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["nexuscaptcha_module"] = module
+        spec.loader.exec_module(module)
+        return module
+
+    FORM = (
+        "<form method='post' action='attendance.php'>"
+        "<input type='hidden' name='imagehash' value='abc123'/>"
+        "<img src='image.php?action=regimage&amp;imagehash=abc123'/>"
+        "<input type='text' name='imagestring'/>"
+        "<input type='submit' value='签到'/></form>"
+    )
+    SIGNED = "<h2>签到成功</h2><p>本次签到获得 45 个魔力值</p>"
+
+    class _Resp:
+        def __init__(self, text, status=200):
+            self.text = text
+            self.content = text.encode("utf-8")
+            self.status_code = status
+
+    class _Ctx:
+        def __init__(self, pages, posts, code="1234"):
+            self.pages = list(pages)
+            self.posts = list(posts)
+            self.code = code
+            self.calls = []
+
+        def get(self, url, **kwargs):
+            self.calls.append(("GET", url))
+            page = self.pages.pop(0) if len(self.pages) > 1 else (self.pages[0] if self.pages else "")
+            return NexusCaptchaModuleTests._Resp(page)
+
+        def ocr(self, url):
+            self.calls.append(("OCR", url))
+            return self.code
+
+        def post(self, url, data=None, headers=None, **kwargs):
+            self.calls.append(("POST", url, dict(data or {})))
+            body = self.posts.pop(0) if self.posts else ""
+            return NexusCaptchaModuleTests._Resp(body)
+
+    def test_match(self):
+        module = self._module()
+        self.assertTrue(module.NexusCaptcha.match("https://our.kelu.one/"))
+        self.assertTrue(module.NexusCaptcha.match("https://naturept.top/attendance.php"))
+        self.assertFalse(module.NexusCaptcha.match("https://other.example/"))
+
+    def test_already_signed(self):
+        module = self._module()
+        ok, message = module.NexusCaptcha().signin(
+            {"url": "https://our.kelu.one"}, self._Ctx([self.SIGNED], []))
+        self.assertTrue(ok)
+        self.assertIn("已签到", message)
+
+    def test_captcha_success(self):
+        module = self._module()
+        ctx = self._Ctx([self.FORM], [self.SIGNED])
+        ok, message = module.NexusCaptcha().signin({"url": "https://naturept.top"}, ctx)
+        self.assertTrue(ok)
+        self.assertIn("45", message)
+        posts = [c for c in ctx.calls if c[0] == "POST"]
+        self.assertEqual(posts[0][2].get("imagestring"), "1234")
+        self.assertEqual(posts[0][2].get("imagehash"), "abc123")
+
+    def test_captcha_wrong_then_give_up(self):
+        module = self._module()
+        ctx = self._Ctx([self.FORM], ["<div>验证码错误</div>"] * 3)
+        ok, message = module.NexusCaptcha().signin({"url": "https://our.kelu.one"}, ctx)
+        self.assertFalse(ok)
+        self.assertIn("验证码", message)
+
+    def test_no_form(self):
+        module = self._module()
+        ok, message = module.NexusCaptcha().signin(
+            {"url": "https://our.kelu.one"}, self._Ctx(["<div>什么都没有</div>"], []))
+        self.assertFalse(ok)
+        self.assertIn("验证码表单", message)
+
+
 if __name__ == "__main__":
     unittest.main()

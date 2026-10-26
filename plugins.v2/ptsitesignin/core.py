@@ -281,29 +281,24 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
     # ---- Piggo（piggo.me）：整站在 Cloudflare 后面，按 NexusPHP 通用签到页处理 ----
     # 探测：所有路径对访客都返回 403「Just a moment...」，探不到真实路径，
     # 先按 /attendance.php + 「立即签到」配，若日志显示卡在挑战页或找不到按钮再调。
-    # ---- 可撸（our.kelu.one）/ 自然（naturept.top）：NexusPHP 日历式签到页 ----
-    # 已签到时 /attendance.php 直接显示「签到成功 … 本次签到获得 X 个魔力值」+ 日历；
-    # 未签到时页面上是按钮，按文字点即可。两站都是 GBK 页面，交给本机浏览器处理最稳。
+    # ---- 可撸（our.kelu.one）/ 自然（naturept.top）：NexusPHP 图片验证码签到 ----
+    # 已签到时 /attendance.php 直接写「签到成功 … 本次签到获得 X 个魔力值」+ 日历，没有表单；
+    # 未签到时是带图片验证码的表单（hidden imagehash + imagestring + image.php 验证码图）。
+    # 签到逻辑在 sites/nexuscaptcha.py：GET → OCR → POST → 回读确认，不需要浏览器。
     "our.kelu.one": {
-        "engine": "playwright",
+        "engine": "http",
+        "method": "GET",
         "path": "/attendance.php",
-        "cloudflare_wait": 25,
-        "submit_method": "dom_click",
-        "submit_selector": "button, input[type='submit'], a, [role='button']",
-        "submit_text": "签到",
-        "wait": 6000,
+        "activity_path": "/userdetails.php",
         "success_keywords": ["签到成功", "本次签到获得"],
         "already_keywords": ["今天已经签到", "今日已签到", "已经签到"],
         "bonus": r"(本次签到获得\s*[\d,]+\s*个魔力值)",
     },
     "naturept.top": {
-        "engine": "playwright",
+        "engine": "http",
+        "method": "GET",
         "path": "/attendance.php",
-        "cloudflare_wait": 25,
-        "submit_method": "dom_click",
-        "submit_selector": "button, input[type='submit'], a, [role='button']",
-        "submit_text": "签到",
-        "wait": 6000,
+        "activity_path": "/userdetails.php",
         "success_keywords": ["签到成功", "本次签到获得"],
         "already_keywords": ["今天已经签到", "今日已签到", "已经签到"],
         "bonus": r"(本次签到获得\s*[\d,]+\s*个魔力值)",
