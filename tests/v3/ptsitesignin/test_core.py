@@ -1801,7 +1801,7 @@ class NexusCaptchaModuleTests(unittest.TestCase):
             page = self.pages.pop(0) if len(self.pages) > 1 else (self.pages[0] if self.pages else "")
             return NexusCaptchaModuleTests._Resp(page)
 
-        def ocr(self, url):
+        def ocr(self, url, referer=""):
             self.calls.append(("OCR", url))
             return self.code
 
@@ -1885,6 +1885,81 @@ class NexusCaptchaModuleTests(unittest.TestCase):
             {"url": "https://our.kelu.one"}, self._Ctx(["<div>什么都没有</div>"], []))
         self.assertFalse(ok)
         self.assertIn("验证码表单", message)
+
+
+class OcrFallbackTests(unittest.TestCase):
+    """验证码识别兜底：OcrHelper 不行就试 ddddocr，都不可用返回空。"""
+
+    def _ctx(self):
+        import importlib.util
+        import sys
+        from pathlib import Path as _P
+        path = ROOT / "plugins.v2" / "ptsitesignin" / "sites" / "__init__.py"
+        if not path.is_file():
+            path = ROOT / "plugins.v3" / "ptsitesignin" / "sites" / "__init__.py"
+        spec = importlib.util.spec_from_file_location("sites_api_ocr", path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["sites_api_ocr"] = module
+        spec.loader.exec_module(module)
+        return module.SignContext({"url": "https://x.test", "cookie": "a=1"})
+
+    def test_clean_strips_noise(self):
+        ctx = self._ctx()
+        self.assertEqual(ctx._clean(" 4 5 6 ab\n"), "456ab")
+
+    def test_no_backend_returns_empty(self):
+        ctx = self._ctx()
+        # 没有 OcrHelper 也没有 ddddocr 时，两条路都返回空
+        self.assertEqual(ctx._ocr_via_moviepilot(b"fake"), "")
+        self.assertEqual(ctx._ocr_via_ddddocr(b"fake"), "")
+
+    def test_image_download_failure_is_reported(self):
+        logs = []
+
+        class _Logger:
+            def warning(self, *args, **kwargs):
+                logs.append(args[0] % tuple(args[1:]) if len(args) > 1 else args[0])
+
+            def info(self, *args, **kwargs):
+                pass
+
+        ctx = self._ctx()
+        ctx.logger = _Logger()
+        ctx.image = lambda url, referer="": b""      # 图片下载失败
+        self.assertEqual(ctx.ocr("https://x.test/image.php"), "")
+        self.assertTrue(any("验证码图片下载失败" in line for line in logs))
+
+
+class CaptchaFallbackRuleTests(unittest.TestCase):
+    """OCR 过不了验证码时，回退规则要带 Browserless 的 solveImageCaptcha 参数。"""
+
+    QUOTED = ('<form method=post action=attendance.php>'
+              '<input type=hidden name="imagehash" value="x">'
+              '<img src="image.php?action=regimage&imagehash=x">'
+              '<input type="text" name="imagestring">'
+              '<input type="submit" value="立即签到"></form>')
+    UNQUOTED = ('<form method=post action=attendance.php>'
+                '<input type=hidden name=imagehash value=x>'
+                "<img src='image.php?action=regimage&imagehash=x'>"
+                '<input type=text name=imagestring>'
+                "<input type=submit value='立即签到'></form>")
+
+    def test_derives_image_mode(self):
+        for core in CORES:
+            for label, page in (("quoted", self.QUOTED), ("unquoted", self.UNQUOTED)):
+                with self.subTest(core=core.__name__, case=label):
+                    rule = core.fallback_rule({"engine": "http", "path": "/attendance.php"},
+                                              "captcha", page)
+                    self.assertEqual(rule["mode"], "image")
+                    self.assertEqual(rule["captcha_input_selector"], "input[name='imagestring']")
+                    self.assertIn("img", rule["captcha_selector"])
+
+    def test_no_page_keeps_open_page(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                rule = core.fallback_rule({"engine": "http", "path": "/attendance.php"},
+                                          "captcha")
+                self.assertEqual(rule["mode"], "open_page")
 
 
 if __name__ == "__main__":

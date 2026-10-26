@@ -749,7 +749,41 @@ def validate_rule(rule: Mapping[str, Any]) -> Dict[str, Any]:
 FALLBACK_MODES = {"cloudflare": "cloudflare", "captcha": "open_page"}
 
 
-def fallback_rule(rule: Mapping[str, Any], challenge: str) -> Dict[str, Any]:
+# 验证码表单里的输入框名字（NexusPHP 多为 imagestring，其它站有 code / verify / captcha）
+# name 的取值可能带引号也可能不带（NexusPHP 模板里两种都见过）
+_CAPTCHA_INPUT_NAME_RE = re.compile(r"""name\s*=\s*["']?([^"'\s>]+)["']?""", re.IGNORECASE)
+_CAPTCHA_NAME_HINT_RE = re.compile(r"(imagestring|code|captcha|verify|seccode)", re.IGNORECASE)
+
+
+def captcha_image_rule(html: str) -> Dict[str, Any]:
+    """从签到页 HTML 里推导 Browserless 图片验证码参数（selector 三件套）。
+
+    Browserless 的 BrowserQL 自带 ``solveImageCaptcha``，OCR 认不出时用它再试一次就够了；
+    这里只需要把「验证码输入框 / 验证码图片 / 提交按钮」三个选择器凑出来。
+    """
+    page = str(html or "")
+    name = ""
+    for candidate in _CAPTCHA_INPUT_NAME_RE.findall(page):
+        if _CAPTCHA_NAME_HINT_RE.search(candidate):
+            name = candidate
+            break
+    if not name:
+        return {}
+    escaped = name.replace("'", "")
+    rule: Dict[str, Any] = {
+        "mode": "image",
+        "captcha_input_selector": f"input[name='{escaped}']",
+        "submit_selector": "form input[type='submit'], form button[type='submit']",
+        "submit_method": "click",
+    }
+    if "image.php" in page or "regimage" in page:
+        rule["captcha_selector"] = "form:has(input[name='%s']) img" % escaped
+    else:
+        rule["captcha_selector"] = "form img"
+    return rule
+
+def fallback_rule(rule: Mapping[str, Any], challenge: str,
+                  page_html: str = "") -> Dict[str, Any]:
     """由 HTTP 规则派生一份 Browserless 回退规则。
 
     用于「没有写规则的站点」：HTTP 直连遇 Cloudflare / 验证码时，自动改用浏览器引擎
@@ -763,6 +797,12 @@ def fallback_rule(rule: Mapping[str, Any], challenge: str) -> Dict[str, Any]:
         "submit_selector": "input[type='submit']",
         "already_keywords": [],
     }
+    # 验证码站点：能从页面推导出验证码表单参数时，走 Browserless 自带的 solveImageCaptcha，
+    # 这样 OCR 认不出的验证码也有第二次机会（否则只是重新打开页面，照样卡在验证码）
+    if str(challenge) == "captcha" and page_html:
+        derived = captcha_image_rule(page_html)
+        if derived:
+            fallback.update(derived)
     if rule.get("route_fragment"):
         fallback["route_fragment"] = rule["route_fragment"]
     # 让用户在 HTTP 规则里写的等待参数（如 cloudflare_wait）与点击目标（submit_selector /

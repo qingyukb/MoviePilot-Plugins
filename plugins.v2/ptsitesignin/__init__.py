@@ -177,7 +177,7 @@ class PTSiteSignIn(_PluginBase):
     plugin_name = "PT站点签到"
     plugin_desc = ("PT 站点自动签到，可登录刷新 Cookie 并读取最近动向；遇到验证码或 Cloudflare 会自动改用浏览器。")
     plugin_icon = "signin.png"
-    plugin_version = "1.9.11"
+    plugin_version = "1.9.12"
     plugin_author = "qingyukb"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "ptsignin_"
@@ -1010,7 +1010,14 @@ class PTSiteSignIn(_PluginBase):
         site_name = str(info.get("name") or info.get("url") or "未知站点")
         logger.info("PT站点签到：%s 检测到%s，自动改用 Browserless 重试", site_name, label)
         try:
-            fallback = fallback_rule(rule, outcome.challenge)
+            # 验证码站点要按页面推导选择器交给 Browserless 的 solveImageCaptcha
+            page_html = ""
+            if outcome.challenge == "captcha":
+                page_html = fetch_page(target_url(str(info.get("url") or "").rstrip("/"),
+                                                  str(rule.get("path") or DEFAULT_HTTP_PATH)),
+                                       str(info.get("cookie") or ""), self._timeout,
+                                       self._proxies_for(info), str(info.get("ua") or ""))
+            fallback = fallback_rule(rule, outcome.challenge, page_html)
         except ValueError as error:
             return SignResult("failed", f"{outcome.message}；回退规则无效：{error}"), "http"
         # 撞盾时未必知道该站真正的签到入口（首页挂「每日签到」表单的站点没有独立签到页）：

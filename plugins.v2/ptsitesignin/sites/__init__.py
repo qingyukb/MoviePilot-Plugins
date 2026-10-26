@@ -16,6 +16,7 @@
 """
 from __future__ import annotations
 
+import json
 from typing import Any, Mapping, Optional, Tuple
 
 DEFAULT_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -68,17 +69,65 @@ class SignContext:
             return b""
         return response.content or b""
 
-    # ---------------- OCR（用 MoviePilot 自带的识别器）----------------
-    def ocr(self, image_url: str) -> str:
+    # ---------------- OCR（MP 的 OcrHelper → 本地 ddddocr 兜底）----------------
+    def ocr(self, image_url: str, referer: str = "") -> str:
+        """识别验证码图片。
+
+        MP 的 OcrHelper 走 ``OCR_HOST``（默认 https://movie-pilot.org），容器访问不了
+        外网时它一律返回空字符串，日志里就只剩「OCR 没识别出验证码」。所以这里：
+        1) 自己带着站点 Cookie 把图片下下来（避免 OcrHelper 下载时丢登录态）；
+        2) 先交给 MP 的 OcrHelper（传 image_data，跳过它自己的下载）；
+        3) 还不行再试本地 ddddocr（装了就能用，不依赖任何外部服务）。
+        """
+        data = self.image(image_url, referer=referer)
+        if not data:
+            if self.logger:
+                self.logger.warning("PT站点签到：验证码图片下载失败（%s）", image_url)
+            return ""
+        text = self._ocr_via_moviepilot(data)
+        if text:
+            return text
+        text = self._ocr_via_ddddocr(data)
+        if text:
+            if self.logger:
+                self.logger.info("PT站点签到：MP 的 OCR 没结果，已改用本地 ddddocr 识别成功")
+            return text
+        if self.logger:
+            self.logger.warning(
+                "PT站点签到：验证码识别失败——MP 的 OCR 服务（OCR_HOST，默认 "
+                "https://movie-pilot.org）不可用，且本机没有安装 ddddocr；"
+                "请在 MP 设置里把 OCR_HOST 指向可访问的 OCR 服务，或 pip install ddddocr")
+        return ""
+
+
+    @staticmethod
+    def _clean(text: Any) -> str:
+        """去掉识别结果里的空白与常见噪声字符。"""
+        return "".join(str(text or "").split())
+
+    def _ocr_via_moviepilot(self, data: bytes) -> str:
         try:
             from app.helper.ocr import OcrHelper
         except Exception:
-            if self.logger:
-                self.logger.warning("PT站点签到：当前版本没有 OcrHelper，无法识别验证码")
+            try:
+                from app.core.ocr import OcrHelper  # 老版本路径
+            except Exception:
+                return ""
+        try:
+            result = OcrHelper().get_captcha_text(image_data=data)
+        except Exception:
+            return ""
+        return self._clean(result)
+
+    @staticmethod
+    def _ocr_via_ddddocr(data: bytes) -> str:
+        try:
+            import ddddocr
+        except Exception:
             return ""
         try:
-            return (OcrHelper().get_captcha_text(image_url=image_url, cookie=self.cookie,
-                                                 ua=self.ua) or "").strip()
+            engine = ddddocr.DdddOcr(show_ad=False)
+            return "".join(str(engine.classification(data) or "").split())
         except Exception:
             return ""
 

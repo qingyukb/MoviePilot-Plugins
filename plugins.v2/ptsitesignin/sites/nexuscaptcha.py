@@ -100,7 +100,7 @@ class NexusCaptcha:
                     return ajax
                 return False, "签到失败：" + self._page_evidence(page)
 
-            code = (ctx.ocr(image_url) or "").strip() if image_url else ""
+            code = (ctx.ocr(image_url, referer=target) or "").strip() if image_url else ""
             if not code:
                 last_reason = "OCR 没识别出验证码"
                 continue
