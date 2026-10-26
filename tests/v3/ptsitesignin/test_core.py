@@ -1840,6 +1840,24 @@ class NexusCaptchaModuleTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("验证码", message)
 
+    def test_ajax_fallback(self):
+        # 页面没有验证码表单，但内联脚本里有签到 action → 直接 POST ajax.php
+        module = self._module()
+        page = ("<html><script>jQuery.post('ajax.php', {action: 'attendanceSignin'}, "
+                "function (r) {}, 'json')</script><p>今天还没签到</p></html>")
+        ctx = self._Ctx([page], ['{"ret":0,"msg":"签到成功"}'])
+        ok, message = module.NexusCaptcha().signin({"url": "https://our.kelu.one"}, ctx)
+        self.assertTrue(ok)
+        self.assertIn("签到成功", message)
+        posts = [c for c in ctx.calls if c[0] == "POST"]
+        self.assertEqual(posts[0][2].get("action"), "attendanceSignin")
+
+    def test_ajax_retroactive_is_ignored(self):
+        # 补签 action 不能被当成签到
+        module = self._module()
+        page = "<script>jQuery.post('ajax.php', {action: 'attendanceRetroactive'})</script>"
+        self.assertEqual(module.NexusCaptcha._ajax_actions(page), [])
+
     def test_no_form(self):
         module = self._module()
         ok, message = module.NexusCaptcha().signin(

@@ -11,6 +11,7 @@ POST 表单 → 回读确认（验证码错就换一张重试，最多 3 轮）�
 from __future__ import annotations
 
 import re
+import json
 from typing import Any, Mapping, Tuple
 from urllib.parse import urljoin
 
@@ -93,7 +94,11 @@ class NexusCaptcha:
             if not form:
                 if any(word in page for word in ALREADY_WORDS):
                     return True, "今日已签到"
-                return False, "签到失败：签到页没有找到验证码表单"
+                # 没有验证码表单：有些站点的签到入口是页面 JS 直接 POST ajax.php
+                ajax = self._try_ajax_signin(ctx, base, page)
+                if ajax is not None:
+                    return ajax
+                return False, "签到失败：" + self._page_evidence(page)
 
             code = (ctx.ocr(image_url) or "").strip() if image_url else ""
             if not code:
@@ -124,6 +129,68 @@ class NexusCaptcha:
                 return True, "今日已签到"
             last_reason = "提交后未确认到签到成功"
         return False, f"签到失败：{last_reason or '未知原因'}"
+
+
+    # ---------------- 兜底：ajax.php 直接签到 ----------------
+    AJAX_ACTION_RE = re.compile(r"action\s*:\s*[\"']([A-Za-z0-9_]+)[\"']")
+    SIGN_ACTION_RE = re.compile(r"(attend|sign|check|clock)", re.IGNORECASE)
+
+    @classmethod
+    def _ajax_actions(cls, page: str) -> list[str]:
+        """从页面内联脚本里找出 ajax.php 的 action 名（排除补签那类）。"""
+        found: list[str] = []
+        for name in cls.AJAX_ACTION_RE.findall(page or ""):
+            if not cls.SIGN_ACTION_RE.search(name):
+                continue
+            if "retro" in name.lower():      # 补签（retroactive）不是签到
+                continue
+            if name not in found:
+                found.append(name)
+        return found
+
+    def _try_ajax_signin(self, ctx: Any, base: str, page: str):
+        """页面里能看出签到走 ajax.php 时，直接调它（正常/已签都能覆盖）。"""
+        actions = self._ajax_actions(page)
+        if not actions:
+            return None
+        ajax_url = urljoin(base + "/", "ajax.php")
+        last = ""
+        for action in actions:
+            response = ctx.post(ajax_url, data={"action": action},
+                                headers={"Referer": urljoin(base + "/", "attendance.php")})
+            body = _decode(response) or str(getattr(response, "text", "") or "")
+            if getattr(response, "status_code", 0) >= 400:
+                last = f"ajax {action}：HTTP {getattr(response, 'status_code', '无响应')}"
+                continue
+            try:
+                payload = json.loads(body)
+            except Exception:
+                payload = None
+            if isinstance(payload, dict):
+                ret = str(payload.get("ret", payload.get("state", ""))).lower()
+                message = str(payload.get("msg") or payload.get("message") or "")
+                if ret in {"0", "true", "success"}:
+                    return True, f"签到成功（{message}）" if message else "签到成功"
+                if any(word in message for word in ALREADY_WORDS):
+                    return True, "今日已签到"
+                last = f"ajax {action}：{message or '返回失败'}"
+                continue
+            if any(word in body for word in SIGNED_WORDS):
+                return True, "签到成功"
+            last = f"ajax {action}：响应异常"
+        return (False, f"签到失败：{last}") if last else None
+
+    @staticmethod
+    def _page_evidence(page: str) -> str:
+        """没找到验证码表单时，把页面里有什么写清楚，方便下一轮定位。"""
+        facts = [f"长度 {len(page)}"]
+        for label, marker in (("form", "<form"), ("input", "<input"),
+                              ("image.php", "image.php"), ("ajax.php", "ajax.php"),
+                              ("立即签到", "立即签到"), ("签到", "签到")):
+            count = page.count(marker)
+            if count:
+                facts.append(f"{label}×{count}")
+        return "签到页既没有验证码表单也没有可识别的签到接口（" + "，".join(facts) + "）"
 
     @staticmethod
     def _parse_form(page: str, target: str) -> Tuple[str, dict[str, str], str, str]:
