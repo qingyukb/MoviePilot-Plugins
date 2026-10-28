@@ -20,12 +20,13 @@
 from __future__ import annotations
 
 import importlib
+import json
 import os
 import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from threading import Event, Lock, Thread, Timer
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -70,6 +71,7 @@ from .core import (
     is_signin_record,
     login as site_login,
     message_bonus,
+    normalize_site_ids,
     parse_rules,
     read_activity,
     record_meta,
@@ -177,7 +179,7 @@ class PTSiteSignIn(_PluginBase):
     plugin_name = "PT站点签到"
     plugin_desc = ("PT 站点自动签到，可登录刷新 Cookie 并读取最近动向；遇到验证码或 Cloudflare 会自动改用浏览器。")
     plugin_icon = "signin.png"
-    plugin_version = "1.9.12"
+    plugin_version = "2.0.0"
     plugin_author = "qingyukb"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "ptsignin_"
@@ -289,17 +291,22 @@ class PTSiteSignIn(_PluginBase):
 
     @staticmethod
     def _parse_site_ids(raw: Any) -> Tuple[List[int], bool]:
-        """解析站点选择：返回（站点 ID 列表，是否勾了「全部站点」）。"""
-        values = raw if isinstance(raw, (list, tuple, set)) else ([raw] if raw else [])
-        ids: List[int] = []
-        all_selected = False
-        for value in values:
-            text_value = str(value).strip()
-            if text_value == ALL_SITES:
-                all_selected = True
-            elif text_value.isdigit():
-                ids.append(int(text_value))
-        return ids, all_selected
+        """解析站点选择：返回（去重站点 ID，是否勾了「全部站点」）。
+
+        MoviePilot 不同版本/导入路径可能把多选值保存成 ``"12"``、JSON 数组或
+        分隔文本；统一交给 ``normalize_site_ids``，避免把 12 拆成 1 和 2。
+        """
+        values: Any = raw
+        if isinstance(raw, str):
+            text_value = raw.strip()
+            try:
+                values = json.loads(text_value) if text_value else []
+            except (TypeError, ValueError):
+                values = re.split(r"[\s,;，；]+", text_value)
+        if not isinstance(values, (list, tuple, set)):
+            values = [values]
+        all_selected = any(str(value).strip().lower() == ALL_SITES for value in values)
+        return normalize_site_ids(raw), all_selected
 
     def _config(self) -> Dict[str, Any]:
         return {
@@ -748,6 +755,53 @@ class PTSiteSignIn(_PluginBase):
                             "apikey", "token", "note", "timeout",
                             "username", "user", "account", "password", "passwd", "pwd")}
 
+    @staticmethod
+    def _site_id(info: Dict[str, Any]) -> Optional[int]:
+        """返回正整数站点 ID；字段异常时按未选择处理。"""
+        try:
+            site_id = int(str(info.get("id") or "").strip())
+        except (TypeError, ValueError):
+            return None
+        return site_id if site_id > 0 else None
+
+    @staticmethod
+    def _key_only_site(info: Dict[str, Any]) -> bool:
+        """API Key / Token 站点没有 Cookie 时不能当作 PT 登录态。"""
+        cookie = str(info.get("cookie") or "").strip()
+        credential = (str(info.get("apikey") or "").strip()
+                      or str(info.get("token") or "").strip())
+        return bool(credential and not cookie)
+
+    def _is_run_current(self, run_id: Optional[int]) -> bool:
+        """配置重载会递增 run_id；旧批次不得继续登录、签到或保存。"""
+        event = getattr(self, "_stop_event", None)
+        if event is not None and event.is_set():
+            return False
+        return run_id is None or run_id == getattr(self, "_run_id", run_id)
+
+    def _site_guard(self, info: Dict[str, Any], run_id: Optional[int],
+                    allowed_site_ids: Optional[Set[int]], action: str) -> str:
+        """统一校验轮次、白名单和无 Cookie 的 key-only 站点。"""
+        if not self._is_run_current(run_id):
+            return "任务已停止或被新配置取代，未执行" + action
+        if allowed_site_ids is not None and self._site_id(info) not in allowed_site_ids:
+            return f"站点不在本次{action}选择中，已跳过"
+        if self._key_only_site(info):
+            return "站点仅有 API Key / Token 且未保存 Cookie，不能用于签到或真实登录，已跳过"
+        return ""
+
+    def _skip_result(self, info: Dict[str, Any], reason: str) -> Dict[str, str]:
+        return {"site": str(info.get("name") or info.get("url") or "未知站点"),
+                "site_id": str(info.get("id") or ""), "state_key": site_state_key(info),
+                "engine": "-", "status": "failed", "message": reason,
+                "login": "", "activity": "", "activity_source": "", "ran_at": self._now()}
+
+    def _finish_current(self, run_id: int, results: List[Dict[str, str]]) -> None:
+        if not self._is_run_current(run_id):
+            logger.info("PT站点签到：本轮结果已被新配置取代，不再保存或通知")
+            return
+        self._finish(results)
+
     def _sign_with_engine(self, info: Dict[str, Any], rule: Dict[str, Any], engine: str,
                           signer: Optional[BrowserlessSigner],
                           site_name: str) -> Optional[SignResult]:
@@ -778,13 +832,18 @@ class PTSiteSignIn(_PluginBase):
                            rules: Dict[str, Dict[str, Any]]) -> bool:
         """按最终生效的站点规则判断是否需要初始化 Browserless 引擎。
 
-        两类站点需要浏览器：① 规则显式声明 engine=browserless；
-        ② 未声明引擎的 HTTP 站点（遇盾 / 验证码时自动改用浏览器，恒为开启）。
+        彩虹岛等 quiz 规则只走一次 HTTP 提交与回读确认，失败后禁止改用
+        Browserless 或通用表单，避免重复答题。已有 API Key / Token 但没有
+        Cookie 的站点在 guard 中会被拦截，也不必初始化浏览器。
         """
         for info in infos:
+            if self._key_only_site(info):
+                continue
             try:
                 rule = resolve_rule(info, rules)
             except ValueError:
+                continue
+            if str(rule.get("form_mode") or "").lower() == "quiz":
                 continue
             if str(rule.get("engine")) == "browserless":
                 return True
@@ -793,7 +852,13 @@ class PTSiteSignIn(_PluginBase):
         return False
 
     def _sign_one(self, info: Dict[str, Any], rules: Dict[str, Dict[str, Any]],
-                  signer: Optional[BrowserlessSigner]) -> Dict[str, str]:
+                  signer: Optional[BrowserlessSigner], run_id: Optional[int] = None,
+                  allowed_site_ids: Optional[Set[int]] = None) -> Dict[str, str]:
+        guard = self._site_guard(info, run_id, allowed_site_ids, "签到")
+        if guard:
+            logger.warning("PT站点签到：%s，跳过站点 %s", guard,
+                           info.get("name") or info.get("url") or info.get("id"))
+            return self._skip_result(info, guard)
         site_name = str(info.get("name") or info.get("url") or "未知站点")
         logger.info("PT站点签到：开始 %s", site_name)
         engine = "http"
@@ -832,13 +897,21 @@ class PTSiteSignIn(_PluginBase):
         elif str(info.get("cookie") or "").strip():
             # 站点管理里只有 Cookie：直接拿它签到；dual 站点要把结论写进「登录状态」
             login_text = "复用站点管理 Cookie" if dual else ""
+
+        # 登录可能耗时，期间配置可能重载；进入任何签到网络操作前再校验一次。
+        guard = self._site_guard(info, run_id, allowed_site_ids, "签到")
+        if guard:
+            logger.warning("PT站点签到：%s，跳过站点 %s", guard, site_name)
+            return self._skip_result(info, guard)
         try:
             rule = resolve_rule(info, rules)
             engine = str(rule["engine"])
+            quiz_mode = str(rule.get("form_mode") or "").lower() == "quiz"
             # 规则表达不了的站点（图片验证码 / 答题选海报 / API Token）有专门模块，
-            # 放在插件目录 sites/ 下，优先于规则执行。
-            module_outcome = run_site_module(info, timeout=self._timeout,
-                                             proxies=self._proxies_for(info), logger=logger)
+            # 放在插件目录 sites/ 下，优先于规则执行。quiz 规则自带完整流程，不交给模块。
+            module_outcome = (None if quiz_mode else
+                              run_site_module(info, timeout=self._timeout,
+                                              proxies=self._proxies_for(info), logger=logger))
             if module_outcome is not None and module_outcome.status != "failed":
                 outcome = module_outcome
                 engine = "module"
@@ -892,8 +965,15 @@ class PTSiteSignIn(_PluginBase):
             logger.info("PT站点签到：%s %s", site_name, outcome.message)
         else:
             logger.warning("PT站点签到：%s 失败 - %s", site_name, outcome.message)
-        activity_text, activity_source = (self._read_site_activity(info, rule)
-                                          if self._read_activity else ("", ""))
+
+        # 签到完成后、读取最近动向前再次确认配置仍有效且站点仍在白名单。
+        guard = self._site_guard(info, run_id, allowed_site_ids, "签到")
+        if guard:
+            logger.warning("PT站点签到：%s，跳过站点 %s", guard, site_name)
+            return self._skip_result(info, guard)
+        activity_text, activity_source = (
+            self._read_site_activity(info, rule, run_id, allowed_site_ids)
+            if self._read_activity else ("", ""))
         return {"site": site_name, "site_id": str(info.get("id") or ""),
                 "state_key": site_state_key(info), "engine": engine,
                 "status": outcome.status, "message": outcome.message,
@@ -904,8 +984,14 @@ class PTSiteSignIn(_PluginBase):
                 # dual 站点在「登录状态」里要显示登录结论，而不是签到结论
                 "login_status": ("login_failed" if login_broken else "login") if dual else ""}
 
-    def _login_one(self, info: Dict[str, Any]) -> Dict[str, str]:
+    def _login_one(self, info: Dict[str, Any], run_id: Optional[int] = None,
+                   allowed_site_ids: Optional[Set[int]] = None) -> Dict[str, str]:
         """仅登录站点：真实登录（或复用站点管理 Cookie）后读取最近动向，不触发签到。"""
+        guard = self._site_guard(info, run_id, allowed_site_ids, "仅登录")
+        if guard:
+            logger.warning("PT站点签到：%s，跳过站点 %s", guard,
+                           info.get("name") or info.get("url") or info.get("id"))
+            return self._skip_result(info, guard)
         site_name = str(info.get("name") or info.get("url") or "未知站点")
         logger.info("PT站点签到：仅登录 %s", site_name)
         login_text = ""
@@ -931,30 +1017,47 @@ class PTSiteSignIn(_PluginBase):
             login_ok = True
         else:
             login_text = "未配置账号密码或 Cookie"
-        activity_text, activity_source = (self._read_site_activity(info)
-                                          if (login_ok and self._read_activity) else ("", ""))
+
+        # 登录可能耗时，期间配置可能重载；读取最近动向前再校验一次。
+        guard = self._site_guard(info, run_id, allowed_site_ids, "仅登录")
+        if guard:
+            logger.warning("PT站点签到：%s，跳过站点 %s", guard, site_name)
+            return self._skip_result(info, guard)
+        activity_text, activity_source = (
+            self._read_site_activity(info, run_id=run_id,
+                                     allowed_site_ids=allowed_site_ids)
+            if (login_ok and self._read_activity) else ("", ""))
         return {"site": site_name, "site_id": str(info.get("id") or ""),
                 "state_key": site_state_key(info), "engine": "http",
                 "status": "login" if login_ok else "login_failed",
                 "message": login_text, "login": "", "activity": activity_text,
                 "activity_source": activity_source, "ran_at": self._now()}
 
-    def _run_login_batch(self, infos: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    def _run_login_batch(self, infos: List[Dict[str, Any]],
+                         run_id: Optional[int] = None,
+                         allowed_site_ids: Optional[Set[int]] = None) -> List[Dict[str, str]]:
         if not infos:
             return []
         workers = min(self._concurrency, len(infos))
         if workers <= 1:
-            return [self._login_one(info) for info in infos]
+            return [self._login_one(info, run_id, allowed_site_ids) for info in infos]
         with ThreadPoolExecutor(max_workers=workers) as executor:
-            return list(executor.map(self._login_one, infos))
+            return list(executor.map(
+                lambda info: self._login_one(info, run_id, allowed_site_ids), infos))
 
     def _read_site_activity(self, info: Dict[str, Any],
-                            rule: Optional[Dict[str, Any]] = None) -> Tuple[str, str]:
+                            rule: Optional[Dict[str, Any]] = None,
+                            run_id: Optional[int] = None,
+                            allowed_site_ids: Optional[Set[int]] = None) -> Tuple[str, str]:
         """用登录态 Cookie 打开站点页面，返回（「最近动向」原文, 来源页面）。
 
         来源页面写进记录与日志；读不到时把原因（含试过的页面）也带回去，
-        方便按站点用 activity_path 指定真正的动向页面。
+        方便按站点用 activity_path 指定真正的动向页面。网络请求前统一校验
+        轮次与站点白名单，避免配置重载或误选后继续访问站点。
         """
+        guard = self._site_guard(info, run_id, allowed_site_ids, "读取最近动向")
+        if guard:
+            return "", guard
         cookie = str(info.get("cookie") or "").strip()
         if not cookie:
             return "", ""
@@ -986,6 +1089,9 @@ class PTSiteSignIn(_PluginBase):
         后者常见于只能靠浏览器点击的站点，未写规则的站点也给它一次机会。
         404（找不到签到入口）、Cookie 失效这类重试没用，不折腾。
         """
+        if str(rule.get("form_mode") or "").lower() == "quiz":
+            # quiz 的提交结果只能靠回读确认；重试或换引擎会重复提交，必须禁用。
+            return False
         if outcome.challenge:
             return True
         if not rule.get("auto_fallback") or outcome.missing_path:
@@ -1000,6 +1106,8 @@ class PTSiteSignIn(_PluginBase):
         返回（结果, 实际使用的引擎）。
         """
         # 自动回退恒为开启（设置页不再提供开关）；用户在规则里显式写了 engine 的站点不参与
+        if str(rule.get("form_mode") or "").lower() == "quiz":
+            return outcome, "http"
         if not rule.get("auto_fallback"):
             return outcome, "http"
         label = ("Cloudflare 验证" if outcome.challenge == "cloudflare"
@@ -1078,12 +1186,18 @@ class PTSiteSignIn(_PluginBase):
         return ""
 
     def _run_batch(self, infos: List[Dict[str, Any]], rules: Dict[str, Dict[str, Any]],
-                   signer: Optional[BrowserlessSigner]) -> List[Dict[str, str]]:
+                   signer: Optional[BrowserlessSigner], run_id: Optional[int] = None,
+                   allowed_site_ids: Optional[Set[int]] = None) -> List[Dict[str, str]]:
+        if not infos:
+            return []
         workers = min(self._concurrency, len(infos))
         if workers <= 1:
-            return [self._sign_one(info, rules, signer) for info in infos]
+            return [self._sign_one(info, rules, signer, run_id, allowed_site_ids)
+                    for info in infos]
         with ThreadPoolExecutor(max_workers=workers) as executor:
-            return list(executor.map(lambda info: self._sign_one(info, rules, signer), infos))
+            return list(executor.map(
+                lambda info: self._sign_one(info, rules, signer, run_id, allowed_site_ids),
+                infos))
 
     def run_sign_in(self, allow_retry: bool = True) -> None:
         """执行一轮签到。
@@ -1105,30 +1219,52 @@ class PTSiteSignIn(_PluginBase):
         self._run_id += 1
         run_id = self._run_id
         try:
-            all_sites = {site.id: site for site in SiteOper().list_order_by_pri()}
+            all_sites: Dict[int, Any] = {}
+            for site in SiteOper().list_order_by_pri():
+                site_id = self._site_id({"id": getattr(site, "id", None)})
+                if site_id is not None:
+                    all_sites[site_id] = site
         except Exception as error:
-            self._finish([{"site": "配置", "status": "failed", "engine": "-",
-                           "message": f"读取站点失败：{error}", "ran_at": self._now()}])
+            self._finish_current(run_id, [{"site": "配置", "status": "failed", "engine": "-",
+                                           "message": f"读取站点失败：{error}",
+                                           "ran_at": self._now()}])
             return
-        # 「全部站点」哨兵展开成站点管理里的全部站点；两边都勾的站点只跑一次（_sign_one
-        # 里已经把登录与读最近动向做掉），带 dual 标记后同时进两块统计。
-        signin_order = [sid for sid in (list(all_sites) if self._all_sites else self._site_ids)
-                        if sid in all_sites]
-        login_order = [sid for sid in (list(all_sites) if self._all_login_sites
-                                       else self._login_site_ids) if sid in all_sites]
-        dual_ids = set(signin_order) & set(login_order)
+
+        # 每轮开始时固定站点快照。「全部站点」也在这里展开一次；后续并发线程、
+        # 批次和重试只使用这组 ID，不再读取可能已被设置页重载的 self._*_ids。
+        signin_requested = list(all_sites) if self._all_sites else list(self._site_ids)
+        login_requested = (list(all_sites) if self._all_login_sites
+                           else list(self._login_site_ids))
+        signin_order = [sid for sid in signin_requested if sid in all_sites]
+        login_order = [sid for sid in login_requested if sid in all_sites]
+        signin_ids = set(signin_order)
+        login_ids = set(login_order)
+        dual_ids = signin_ids & login_ids
+        login_only_ids = login_ids - dual_ids
         selected = [all_sites[sid] for sid in signin_order]
-        login_selected = [all_sites[sid] for sid in login_order if sid not in dual_ids]
+        login_selected = [all_sites[sid] for sid in login_order if sid in login_only_ids]
+
+        missing_ids = sorted((set(signin_requested) | set(login_requested)) - set(all_sites))
+        if missing_ids:
+            logger.warning("PT站点签到：配置中的站点 ID 已不存在，已忽略：%s", missing_ids)
+        logger.info("PT站点签到：本轮签到 IDs=%s，仅登录 IDs=%s；实际执行签到 %s 个、仅登录 %s 个",
+                    sorted(signin_ids), sorted(login_only_ids), len(selected), len(login_selected))
         if not selected and not login_selected:
-            self._finish([{"site": "配置", "status": "failed", "engine": "-",
-                           "message": "未选择可用的 MoviePilot 站点", "ran_at": self._now()}])
+            message = (f"未选择可用的 MoviePilot 站点（签到 IDs={sorted(signin_ids)}，"
+                       f"仅登录 IDs={sorted(login_only_ids)}）")
+            if missing_ids:
+                message += f"；站点不存在 IDs={missing_ids}"
+            self._finish_current(run_id, [{"site": "配置", "status": "failed", "engine": "-",
+                                           "message": message, "ran_at": self._now()}])
             return
+
         try:
             rules = parse_rules(self._site_rules)
         except ValueError as error:
-            self._finish([{"site": "配置", "status": "failed", "engine": "-",
-                           "message": str(error), "ran_at": self._now()}])
+            self._finish_current(run_id, [{"site": "配置", "status": "failed", "engine": "-",
+                                           "message": str(error), "ran_at": self._now()}])
             return
+
         infos = [dict(self._site_dict(site), dual=sid in dual_ids)
                  for site, sid in zip(selected, signin_order)]
         infos, skipped_rows = self._sites_to_run(infos)
@@ -1156,31 +1292,39 @@ class PTSiteSignIn(_PluginBase):
                         logger.info("PT站点签到：已配置 %s 个 Browserless Token，额度用尽时自动切换",
                                     len(tokens))
                 except ValueError as error:
-                    self._finish([{"site": "配置", "status": "failed", "engine": "-",
-                                   "message": str(error), "ran_at": self._now()}])
+                    self._finish_current(run_id, [{"site": "配置", "status": "failed", "engine": "-",
+                                                   "message": str(error),
+                                                   "ran_at": self._now()}])
                     return
 
-        results = self._run_batch(infos, rules, signer)
-        login_results = self._run_login_batch(login_infos)
+        results = self._run_batch(infos, rules, signer, run_id, signin_ids)
+        login_results = self._run_login_batch(login_infos, run_id, login_only_ids)
+        if not self._is_run_current(run_id):
+            logger.info("PT站点签到：本轮已被新配置取代，不再保存结果或安排重试")
+            return
         # 跳过的站点把今天的记录原样带上，避免落盘时把它们的记录冲掉
         result_by_key = {r.get("state_key") or r.get("site"): r
                          for r in results + login_results + skipped_rows}
         retry_times = self._retry_count if allow_retry else 0
         failed_infos = [info for info, result in zip(infos, results)
-                        if result.get("status") == "failed"]
+                        if result.get("status") == "failed" and not self._key_only_site(info)]
         if not failed_infos or retry_times <= 0:
-            self._finish(list(result_by_key.values()))
+            self._finish_current(run_id, list(result_by_key.values()))
             return
         # 先落盘首轮结果；重试完成后以最终结果覆盖同一天历史并统一通知。
         self._save_results(list(result_by_key.values()))
-        self._schedule_retry(1, run_id, infos, rules, signer, result_by_key)
+        self._schedule_retry(1, run_id, infos, rules, signer, signin_ids, result_by_key)
 
     def _schedule_retry(self, attempt: int, run_id: int, infos: List[Dict[str, Any]],
                         rules: Dict[str, Dict[str, Any]], signer: Optional[BrowserlessSigner],
+                        signin_ids: Set[int],
                         result_by_key: Dict[str, Dict[str, str]]) -> None:
         """用后台 Timer 延迟执行下一轮失败重试，避免 sleep 占用执行线程。"""
+        if not self._is_run_current(run_id):
+            logger.info("PT站点签到：任务已停止或被新配置取代，不再安排重试")
+            return
         if attempt > self._retry_count:
-            self._finish(list(result_by_key.values()))
+            self._finish_current(run_id, list(result_by_key.values()))
             return
         old_timer = getattr(self, "_retry_timer", None)
         if old_timer is not None:
@@ -1197,7 +1341,7 @@ class PTSiteSignIn(_PluginBase):
                 add_once(self.__class__.__name__, f"retry_{attempt}", self._retry_task,
                          f"PT站点签到 失败重试（第 {attempt} 轮）", delay_seconds=int(delay),
                          kwargs={"attempt": attempt, "run_id": run_id, "infos": infos,
-                                 "rules": rules, "signer": signer,
+                                 "rules": rules, "signer": signer, "signin_ids": signin_ids,
                                  "result_by_key": result_by_key})
                 return
             except TypeError:
@@ -1206,18 +1350,19 @@ class PTSiteSignIn(_PluginBase):
             except Exception:
                 logger.exception("PT站点签到：登记重试任务失败，改用本地 Timer")
         timer = Timer(delay, self._retry_task,
-                      args=(attempt, run_id, infos, rules, signer, result_by_key))
+                      args=(attempt, run_id, infos, rules, signer, signin_ids, result_by_key))
         timer.daemon = True
         self._retry_timer = timer
         timer.start()
 
     def _retry_task(self, attempt: int, run_id: int, infos: List[Dict[str, Any]],
                     rules: Dict[str, Dict[str, Any]], signer: Optional[BrowserlessSigner],
+                    signin_ids: Set[int],
                     result_by_key: Dict[str, Dict[str, str]]) -> None:
         event = getattr(self, "_stop_event", None)
         if event is not None and event.is_set():
             return
-        if run_id != getattr(self, "_run_id", run_id):
+        if not self._is_run_current(run_id):
             logger.info("PT站点签到：本轮重试已被更新的任务取代，跳过")
             return
         # 重试是后台线程；若刚好有新一轮在跑，最多等 5 分钟再决定是否放弃。
@@ -1225,7 +1370,7 @@ class PTSiteSignIn(_PluginBase):
             logger.warning("PT站点签到：执行线程繁忙，跳过第 %s 次失败重试", attempt)
             return
         try:
-            if run_id != getattr(self, "_run_id", run_id) or (event is not None and event.is_set()):
+            if not self._is_run_current(run_id):
                 logger.info("PT站点签到：任务已停止或被新一轮取代，取消重试")
                 return
             logger.info("PT站点签到：开始第 %s/%s 次失败重试（%s 个站点）",
@@ -1233,23 +1378,28 @@ class PTSiteSignIn(_PluginBase):
                         sum(1 for info in infos
                             if result_by_key.get(site_state_key(info), {}).get("status") == "failed"))
             failed_infos = [info for info in infos
-                            if result_by_key.get(site_state_key(info), {}).get("status") == "failed"]
+                            if result_by_key.get(site_state_key(info), {}).get("status") == "failed"
+                            and not self._key_only_site(info)]
             if not failed_infos:
-                self._finish(list(result_by_key.values()))
+                self._finish_current(run_id, list(result_by_key.values()))
                 return
-            for result in self._run_batch(failed_infos, rules, signer):
+            for result in self._run_batch(failed_infos, rules, signer, run_id, signin_ids):
                 result_by_key[result.get("state_key") or result.get("site")] = result
+            if not self._is_run_current(run_id):
+                logger.info("PT站点签到：重试期间配置已重载，丢弃旧批次结果")
+                return
             still_failed = any(result_by_key.get(site_state_key(info), {}).get("status") == "failed"
-                               for info in infos)
+                               for info in infos if not self._key_only_site(info))
             if still_failed and attempt < self._retry_count:
                 self._save_results(list(result_by_key.values()))
-                self._schedule_retry(attempt + 1, run_id, infos, rules, signer, result_by_key)
+                self._schedule_retry(attempt + 1, run_id, infos, rules, signer,
+                                     signin_ids, result_by_key)
                 return
-            self._finish(list(result_by_key.values()))
+            self._finish_current(run_id, list(result_by_key.values()))
         except Exception:
             logger.exception("PT站点签到：失败重试出现未预期错误")
             try:
-                self._finish(list(result_by_key.values()))
+                self._finish_current(run_id, list(result_by_key.values()))
             except Exception:
                 logger.exception("PT站点签到：重试异常后保存结果失败")
         finally:

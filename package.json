@@ -3,7 +3,7 @@
     "name": "PT站点签到",
     "description": "PT 站点自动签到，可登录刷新 Cookie 并读取最近动向；遇到验证码或 Cloudflare 会自动改用浏览器。",
     "labels": "站点,签到",
-    "version": "1.9.12",
+    "version": "2.0.0",
     "icon": "https://raw.githubusercontent.com/qingyukb/MoviePilot-Plugins/main/icons/ptsignin.png",
     "author": "qingyukb",
     "level": 2,
@@ -11,11 +11,11 @@
     "v2": true,
     "system_version": ">=2.0.0",
     "history": {
+      "v2.0.0": "新增彩虹岛（ptchdbits.co）选择题签到，支持固定答案 quiz_answer / quiz_answers，默认随机选择并在回读确认后判定成功；修复站点 ID 字符串被拆分，以及未选站点或仅有 API Key、无 Cookie 的站点仍可能登录、签到：兼容数组、JSON 和分隔文本并去重，每轮固定站点快照，登录、签到和最近动向均校验白名单，配置重载后旧轮次及重试不再继续。",
       "v1.9.12": "验证码过不了时自动改用 Browserless 的 solveImageCaptcha 再试一次（按页面推导验证码选择器）；OCR 链路加本地 ddddocr 兜底，彻底不可用时给出明确告警",
       "v1.9.11": "可撸/自然签到模块加 ajax 兜底：页面没有验证码表单时，自动从内联脚本里找 ajax.php 的签到 action 直接提交；失败时把页面证据写进日志",
       "v1.9.10": "可撸/自然改用验证码签到模块（图片验证码 OCR + 表单提交 + 回读确认），不再依赖本机浏览器",
-      "v1.9.9": "补删残留的 sites/mteam.py（1.9.8 只删了本地文件，仓库里还留着）",
-      "v1.9.8": "新增可撸（our.kelu.one）、自然（naturept.top）签到规则；移除本站的馒头站点模块（馒头保活插件已负责）"
+      "v1.9.9": "补删残留的 sites/mteam.py（1.9.8 只删了本地文件，仓库里还留着）"
     }
   },
   "MTeamAlive": {

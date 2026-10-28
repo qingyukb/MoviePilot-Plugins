@@ -414,8 +414,7 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "signin_token_patterns": {"csrf": "<meta name=\"x-csrf\" content=\"([^\"]+)\""},
         "success_keywords": ["\"state\":\"success\"", "\"state\": \"success\""],
     },
-    # ---- 52PT（52pt.site）/ CHDBits（ptchdbits.co）：bakatest 答题签到，随机选一个选项 ----
-    # 两个站同一套 NexusPHP 插件：首页签到页给 questionid + 若干 choice[]，随便选一个提交即可。
+    # ---- 52PT（52pt.site）：bakatest 答题签到，随机选一个选项 ----
     "52pt.site": {
         "engine": "http",
         "method": "GET",
@@ -427,16 +426,19 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "signin_data": {"usercomment": "太难了！", "wantskip": "不会"},
         "success": "\\d+\\s*点魔力值",
     },
+    # ---- 彩虹岛（CHDBits）：bakatest 选择题签到 ----
+    # 未配置答案时沿用官方 autosignin 的随机策略；固定题可用 quiz_answer 指定
+    # choice[] 值，多题可用 quiz_answers 按题目文本映射。提交后必须回读签到页，
+    # 看到「今天已经签过到了」才算真正完成，页面顶部的魔力值不能当作成功标志。
     "ptchdbits.co": {
         "engine": "http",
-        "method": "GET",
+        "form_mode": "quiz",
         "path": "/bakatest.php",
-        "already_keywords": ["今天已经签过到了"],
-        "signin_path": "/bakatest.php",
-        "signin_method": "POST",
-        "signin_pick": "random",
-        "signin_data": {"usercomment": "太难了！", "wantskip": "不会"},
-        "success": "\\d+\\s*点魔力值",
+        "verify_success_path": "/bakatest.php",
+        "success": r"\d+\s*点魔力值",
+        "already": r"今天已经签过到了?",
+        "quiz_failure": r"(回答错误|答案错误|请重新|不正确|失去)",
+        "quiz_fields": {"usercomment": "太难了！", "wantskip": "不会"},
     },
     # ---- U2（u2.dmhy.org）：showup 四选一答题，随机点一个提交按钮 ----
     "u2.dmhy.org": {
@@ -620,6 +622,45 @@ def normalize_host(url: str) -> str:
 def target_url(base_url: str, path: str, route_fragment: Optional[str] = None) -> str:
     target = urllib.parse.urljoin(base_url.rstrip("/") + "/", str(path).lstrip("/"))
     return target.split("#", 1)[0] + (route_fragment or "")
+
+
+def normalize_site_ids(raw: Any) -> List[int]:
+    """把 MoviePilot 多选配置统一成去重后的正整数站点 ID 列表。
+
+    某些版本或导入方式会把多选保存成字符串。直接遍历字符串会把 ``"12"``
+    错拆成站点 1、2；这里兼容 JSON 数组以及逗号、分号、中英文标点、空白分隔
+    的文本，并过滤布尔值和非正整数。
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return []
+        try:
+            raw = json.loads(text)
+        except (TypeError, ValueError):
+            raw = re.split(r"[\s,;，；]+", text)
+    if isinstance(raw, dict):
+        return []
+    if not isinstance(raw, (list, tuple, set)):
+        raw = [raw]
+
+    result: List[int] = []
+    for value in raw:
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, float):
+            if not value.is_integer():
+                continue
+            value = int(value)
+        try:
+            site_id = int(str(value).strip())
+        except (TypeError, ValueError):
+            continue
+        if site_id > 0 and site_id not in result:
+            result.append(site_id)
+    return result
 
 
 def site_state_key(site: Mapping[str, Any]) -> str:
@@ -826,6 +867,84 @@ def _is_transient(error: Exception) -> bool:
                                              "remotedisconnected", "remote end closed"))
 
 
+def _quiz_already_result(content: str, rule: Mapping[str, Any]) -> Optional[SignResult]:
+    """识别 bakatest 的今日已签到状态。"""
+    pattern = str(rule.get("already") or DEFAULT_ALREADY_PATTERN)
+    if not re.search(pattern, plain_text(content), re.IGNORECASE):
+        return None
+    bonus = extract_bonus(content, rule)
+    return SignResult("already", f"今日已签到（{bonus}）" if bonus else "今日已签到")
+
+
+def http_quiz_sign(session: Any, url: str, content: str, base_url: str,
+                   rule: Mapping[str, Any], timeout: int,
+                   proxies: Optional[Dict[str, str]]) -> SignResult:
+    """完成 bakatest 选择题签到，并在提交后强制回读页面确认结果。"""
+    form = extract_quiz_form(content)
+    already = _quiz_already_result(content, rule)
+    if already:
+        return already
+    checked = judge_http(content, rule)
+    if checked.challenge:
+        return checked
+    if login_page(content) or "Cookie 无效" in checked.message:
+        return SignResult("failed", "Cookie 无效或已过期")
+    if not form:
+        return SignResult("failed", f"未找到彩虹岛答题表单；{page_hint(content)}")
+
+    # 答题页头部通常显示账户当前魔力值，不能把「N 点魔力值」当成签到成功；
+    # 只要表单还在，就必须先选题提交。
+    try:
+        answer = select_quiz_choices(rule, str(form.get("question") or ""),
+                                     list(form.get("choices") or []))
+    except ValueError as error:
+        return SignResult("failed", str(error))
+    payload = build_quiz_payload(form, answer, rule)
+    post_error = ""
+    result_content = ""
+    try:
+        response = session.post(url, headers={"Referer": url}, data=payload,
+                                timeout=timeout, allow_redirects=True, proxies=proxies)
+        result_content = response.text or ""
+        if response.status_code >= 400:
+            post_error = f"答题提交失败（HTTP {response.status_code}）"
+    except Exception as error:
+        post_error = f"答题提交异常：{error}"
+
+    # 无论 POST 返回什么，都以 /bakatest.php 的只读回读为准。POST 响应里的
+    # 「已签到」或魔力值可能是页面头部状态，不能直接判定本次提交成功。
+    verify_path = str(rule.get("verify_success_path") or rule.get("path") or "/bakatest.php")
+    verify_url = target_url(base_url, verify_path)
+    try:
+        verify_response = session.get(verify_url, headers={"Referer": url}, timeout=timeout,
+                                      allow_redirects=True, proxies=proxies)
+    except Exception as error:
+        detail = f"答题已提交，但回读签到状态异常：{error}"
+        return SignResult("failed", f"{post_error}；{detail}" if post_error else detail,
+                          transient=True)
+    verify_content = verify_response.text or ""
+    if verify_response.status_code >= 400:
+        detail = f"答题已提交，但回读签到状态失败（HTTP {verify_response.status_code}）"
+        return SignResult("failed", f"{post_error}；{detail}" if post_error else detail)
+
+    verified_already = _quiz_already_result(verify_content, rule)
+    if verified_already:
+        bonus = extract_bonus((result_content or "") + "\n" + (verify_content or ""), rule)
+        return SignResult("success", f"签到成功（{bonus}）" if bonus else "签到成功")
+
+    if extract_quiz_form(verify_content):
+        return SignResult("failed",
+                          "答题错误，签到未完成；可在规则 quiz_answer / quiz_answers 中配置正确选项")
+
+    verified = judge_http(verify_content, rule)
+    if verified.challenge:
+        return verified
+    if login_page(verify_content) or "Cookie 无效" in verified.message:
+        return SignResult("failed", "Cookie 无效或已过期")
+    detail = ("答题已提交，但回读页面未出现「今天已经签过到了」，无法确认签到成功；"
+              + page_hint(verify_content))
+    return SignResult("failed", f"{post_error}；{detail}" if post_error else detail)
+
 def http_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: int = 30,
               proxies: Optional[Dict[str, str]] = None) -> SignResult:
     """直接 HTTP 请求签到接口（NexusPHP attendance.php 等）。"""
@@ -876,6 +995,8 @@ def http_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: int = 3
     if response.status_code >= 400:
         return SignResult("failed", f"请求失败（HTTP {response.status_code}）",
                           missing_path=response.status_code in {404, 405})
+    if str(rule.get("form_mode") or "").lower() == "quiz":
+        return http_quiz_sign(session, url, content, base_url, rule, timeout, proxies)
     return judge_http(content, rule)
 
 
@@ -991,6 +1112,97 @@ def random_form_fields(html: str) -> Dict[str, str]:
     hidden[name] = value
     return hidden
 
+
+DEFAULT_QUIZ_FAILURE_PATTERN = r"(回答错误|答案错误|请重新|不正确|失去)"
+
+
+def _normalize_quiz_question(value: Any) -> str:
+    return re.sub(r"[\s:：?？]+", "", str(value or "")).lower()
+
+
+def _answer_values(value: Any) -> List[str]:
+    """把单个选项或逗号分隔的多选答案统一成去重列表。"""
+    items = value if isinstance(value, (list, tuple, set)) else [value]
+    result: List[str] = []
+    for item in items:
+        for part in re.split(r"[,，;；\s]+", str(item or "")):
+            part = part.strip()
+            if part and part not in result:
+                result.append(part)
+    return result
+
+
+def extract_quiz_form(content: str) -> Optional[Dict[str, Any]]:
+    """从 NexusPHP bakatest 页面提取题号、选择项、题目和隐藏字段。"""
+    question_id = ""
+    choices: List[str] = []
+    fields: Dict[str, str] = {}
+    for tag in _INPUT_RE.findall(content or ""):
+        attrs = _tag_attrs(tag)
+        name = str(attrs.get("name") or "").strip()
+        value = str(attrs.get("value") or "")
+        kind = str(attrs.get("type") or "text").lower()
+        if name == "questionid" and value:
+            question_id = value
+        elif name == "choice[]" and value:
+            choices.append(value)
+        elif name and value and kind not in {
+                "submit", "button", "reset", "image", "file", "radio", "checkbox"}:
+            fields[name] = value
+    if not question_id or not choices:
+        return None
+
+    question = ""
+    match = re.search(
+        r"请问\s*[:：]\s*(.+?)(?:</td\s*>|<br\s*/?>|</div\s*>|</p\s*>|</li\s*>)",
+        content or "",
+        re.IGNORECASE | re.DOTALL,
+    )
+    if match:
+        question = plain_text(match.group(1))
+    else:
+        visible = plain_text(content or "")
+        match = re.search(r"请问\s*[:：]\s*(.{1,300})", visible)
+        if match:
+            question = match.group(1).strip()
+    return {"questionid": question_id, "choices": choices,
+            "question": question, "fields": fields}
+
+
+def select_quiz_choices(rule: Mapping[str, Any], question: str,
+                        choices: Sequence[str]) -> List[str]:
+    """返回要提交的 choice[]；固定答案缺失或未命中时沿用随机策略。"""
+    if not choices:
+        return []
+    answer: List[str] = []
+    direct = rule.get("quiz_answer")
+    if direct is not None and str(direct).strip():
+        answer = _answer_values(direct)
+    if not answer and isinstance(rule.get("quiz_answers"), Mapping):
+        target = _normalize_quiz_question(question)
+        for key, value in rule["quiz_answers"].items():
+            candidate = _normalize_quiz_question(key)
+            if candidate and (candidate == target or candidate in target):
+                answer = _answer_values(value)
+                break
+    if not answer:
+        answer = [random.choice(list(choices))]
+    invalid = [value for value in answer if value not in choices]
+    if invalid:
+        raise ValueError("quiz_answer 中包含页面不存在的选项值：" + ", ".join(invalid))
+    return answer
+
+
+def build_quiz_payload(form: Mapping[str, Any], answer: Sequence[str],
+                       rule: Mapping[str, Any]) -> Dict[str, Any]:
+    """合并隐藏字段、题号、选择和可配置的附加表单字段。"""
+    data: Dict[str, Any] = dict(form.get("fields") or {})
+    data["questionid"] = str(form.get("questionid") or "")
+    data["choice[]"] = list(answer) if len(answer) > 1 else answer[0]
+    custom = rule.get("quiz_fields")
+    if isinstance(custom, Mapping):
+        data.update({str(key): value for key, value in custom.items()})
+    return data
 
 def http_two_step(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: int = 30,
                   proxies: Optional[Dict[str, str]] = None) -> Optional[SignResult]:
@@ -1648,6 +1860,10 @@ def http_sign_auto(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: in
     先试规则里的 path → 从站点首页「签到」链接自动发现 → 再试几个常见路径。
     """
     result = http_sign(site, rule, timeout=timeout, proxies=proxies)
+    if str(rule.get("form_mode") or "").lower() == "quiz":
+        # 彩虹岛答题只允许一条确定路径：POST 后 GET 回读确认。失败时不能
+        # 再走二次提交、首页猜链接或 Browserless，否则会在答题结果未知时重复签到。
+        return result
     if result.status in {"success", "already"}:
         return result
     # 页面能打开但没判定出结果：很多站点签到是「点表单按钮」触发的，

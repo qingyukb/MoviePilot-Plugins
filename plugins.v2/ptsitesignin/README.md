@@ -32,7 +32,7 @@ MoviePilot 的 PT 站点自动签到插件，支持 V2 / V3。
 
 ## 内置站点
 
-观众（Turnstile）、AGSVPT（`POST /attendance.php`）、学校（首页「每日签到」）、憨憨（日历「签到」）、红豆饭 / PT时间 / 皇后等 NexusPHP 站点，其余站点走默认路径。奖励文案（魔力值、爆米花、憨豆）每次从页面读取。
+观众（Turnstile）、彩虹岛（答题签到）、AGSVPT（`POST /attendance.php`）、学校（首页「每日签到」）、憨憨（日历「签到」）、红豆饭 / PT时间 / 皇后等 NexusPHP 站点，其余站点走默认路径。奖励文案（魔力值、爆米花、憨豆）每次从页面读取。
 
 ## 自定义站点规则
 
@@ -42,6 +42,22 @@ MoviePilot 的 PT 站点自动签到插件，支持 V2 / V3。
 ```
 
 常用字段：`engine`（http / browserless）、`method`、`path`、`submit_text`、`pre_click_selector`、`success`、`already`、`absent_keywords`、`success_on_click`、`bonus`、`activity_path`。`wait` 是点完之后等多久再读结果（毫秒），`cloudflare_wait` 是等待人机验证放行的秒数。
+
+### 彩虹岛选择题签到
+
+彩虹岛（`ptchdbits.co`）已内置 `/bakatest.php` 答题流程。未配置答案时会随机选择；配置固定答案时，值必须与页面 `choice[]` 的 `value` 一致：
+
+```json
+{"ptchdbits.co": {"quiz_answer": "正确选项值"}}
+```
+
+多题可按页面题目文本映射：
+
+```json
+{"ptchdbits.co": {"quiz_answers": {"题目文本": "正确选项值"}}}
+```
+
+插件提交后会重新 GET `/bakatest.php`，只有读到「今天已经签过到了」才判定成功；页面头部的魔力值不会被误判为签到成功。
 
 ## 站点模块
 
@@ -93,4 +109,3 @@ docker cp ptsignin.png moviepilot-v3:/public/plugin_icon/
 
 如果填的是完整 URL，则走 MP 的图片代理（`/api/v1/system/img/…`），**由容器出网去抓**；
 容器访问不了 GitHub 时就会回退成默认的拼图图标，作者头像同理。
-
