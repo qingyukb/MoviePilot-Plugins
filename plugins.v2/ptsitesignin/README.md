@@ -63,6 +63,7 @@ MoviePilot 的 PT 站点自动签到插件，支持 V2 / V3。
 
 - 签到入口固定为 `/calendar`，本机 Playwright 优先，不使用通用 NexusPHP 登录；仅在本机流程失败或缺少浏览器助手时，才会按规则回退到猪猪专用 Browserless 流程。
 - 本机与 Browserless 回退都在同一个浏览器会话内完成账号登录、空闲锁定解锁和签到。请在站点附加信息中配置当前账号密码；已有可用 Cookie 时也可复用会话。
+- `/calendar` 是 Vue 单页应用：本机 Playwright 与 Browserless 都会等待日历骨架屏结束、当天控件或登录/解锁页出现后再继续；日历已加载但当天没有签到控件时会明确提示控件缺失，不再误报为按钮未找到。
 - 回退时会把站点账号密码发送给所配置的 Browserless 服务，请只使用自己信任的地址与 Token。
 - `cf_clearance` 通常绑定出口 IP、User-Agent 与浏览器指纹，跨节点不保证有效；Browserless 能否通过仍取决于节点出口和站点风控。
 - Browserless 只调用官方 BrowserQL `solve`，不包含 Turnstile 绕过。签到接口返回 HTTP 422 时：页面未写入验证 token 就立即失败，不重复提交；生成 token 后只允许重试一次。

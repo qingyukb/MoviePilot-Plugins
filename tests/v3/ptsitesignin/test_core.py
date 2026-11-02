@@ -115,8 +115,8 @@ def inject_payload(after_html, verify_html=None, diag=None, goto=200):
 
 def piggo_state(*, actionable=False, already=False, skip=False, login=False,
                 step_up=False, locked=False, disabled=False, present=True,
-                text="签到 · +10", url="https://piggo.me/calendar"):
-    return {
+                text="签到 · +10", url="https://piggo.me/calendar", calendar=None):
+    state = {
         "url": url,
         "title": "猪猪",
         "login": login,
@@ -132,6 +132,9 @@ def piggo_state(*, actionable=False, already=False, skip=False, login=False,
             "actionable": actionable,
         },
     }
+    if calendar is not None:
+        state["calendar"] = dict(calendar)
+    return state
 
 
 def piggo_value(payload):
@@ -1871,6 +1874,64 @@ class PiggoBrowserlessTests(unittest.TestCase):
                 self.assertIn("piggo-2", signer.endpoints[2])
                 self.assertNotIn("demo-password", result.message)
                 self.assertNotIn("synthetic-turnstile-token", result.message)
+                for query in signer.queries:
+                    self.assertIn(
+                        "waitForSelector(selector:$readySelector,timeout:$calendarWait,visible:true)",
+                        query)
+                for _, variables in signer.calls:
+                    self.assertIn("readySelector", variables)
+                    self.assertEqual(variables["calendarWait"], 20000)
+
+    def test_calendar_skeleton_timeout_has_precise_message(self):
+        for core in self.cores():
+            with self.subTest(core=core.__name__):
+                signer = self._signer(core, [
+                    self._prepare(piggo_state(
+                        present=False,
+                        calendar={"found": True, "loading": True, "ready": False})),
+                ])
+                result = signer.sign(self._site(), self._rule(core))
+                self.assertEqual(result.status, "failed")
+                self.assertIn("仍在显示加载骨架屏", result.message)
+                self.assertNotIn("retry_paths", result.message)
+                self.assertEqual([call[0] for call in signer.calls], ["PiggoPrepare"])
+
+    def test_calendar_loaded_without_control_has_precise_message(self):
+        for core in self.cores():
+            with self.subTest(core=core.__name__):
+                signer = self._signer(core, [
+                    self._prepare(piggo_state(
+                        present=False,
+                        calendar={"found": True, "loading": False, "ready": True})),
+                ])
+                result = signer.sign(self._site(), self._rule(core))
+                self.assertEqual(result.status, "failed")
+                self.assertIn("签到日历已加载", result.message)
+                self.assertNotIn("retry_paths", result.message)
+                self.assertEqual([call[0] for call in signer.calls], ["PiggoPrepare"])
+
+    def test_state_script_distinguishes_loading_from_ready_calendar(self):
+        for core in self.cores():
+            with self.subTest(core=core.__name__):
+                script = core._piggo_state_script(self._rule(core))
+                self.assertIn('document.querySelector(".cal-wrap")', script)
+                self.assertIn("document.querySelector(\".cal-wrap[aria-busy='true']\")", script)
+                self.assertIn("calendar: {found: !!calendarNode, loading: calendarLoading", script)
+                self.assertIn("ready: !!calendarNode && !calendarLoading", script)
+
+    def test_wait_budget_covers_all_three_piggo_stages(self):
+        for core in self.cores():
+            with self.subTest(core=core.__name__):
+                rule = self._rule(core)
+                budget = core.bql_wait_budget_ms(rule)
+                required = (
+                    core.browserless_calendar_wait_ms(rule) * 3
+                    + core.solve_timeout_ms(rule)
+                    + core.navigation_wait_ms(rule) * 2
+                    + int(rule["browserless_click_wait"]) * 2
+                    + int(rule["browserless_auth_wait"]) * 2
+                )
+                self.assertGreaterEqual(budget, required)
 
     def test_missing_token_never_calls_submit_stage(self):
         for core in self.cores():
@@ -2085,9 +2146,12 @@ class PlaywrightCaptchaTests(unittest.TestCase):
             return self._payload
 
     class _CalendarPage:
-        def __init__(self, core, token_ready):
+        def __init__(self, core, token_ready, ready_states=None, control_present=True):
             self.core = core
             self.token_ready = token_ready
+            self.ready_states = list(ready_states or [])
+            self.page_ready_calls = 0
+            self.control_present = control_present
             self.click_count = 0
             self.listeners = {}
             self.response = PlaywrightCaptchaTests._Response(
@@ -2116,6 +2180,8 @@ class PlaywrightCaptchaTests(unittest.TestCase):
             self.listeners.get(event, []).remove(handler)
 
         def click(self, selector, timeout=0):
+            if not self.control_present:
+                raise RuntimeError("control unavailable")
             self.click_count += 1
             for handler in list(self.listeners.get("response", [])):
                 handler(self.response)
@@ -2124,21 +2190,34 @@ class PlaywrightCaptchaTests(unittest.TestCase):
             return None
 
         def evaluate(self, script, args=None):
+            if script == self.core._PLAYWRIGHT_PAGE_READY_JS:
+                self.page_ready_calls += 1
+                if self.ready_states:
+                    index = min(self.page_ready_calls - 1, len(self.ready_states) - 1)
+                    return dict(self.ready_states[index])
+                return {"ready": True, "calendarFound": True, "calendarLoading": False,
+                        "calendarReady": True, "controlFound": self.control_present,
+                        "controlPresent": self.control_present}
             if script == self.core._PLAYWRIGHT_CONTROL_STATE_JS:
+                if not self.control_present:
+                    return {"found": False, "present": False, "disabled": False,
+                            "actionable": False, "text": "", "already": False, "skip": False}
                 disabled = self.click_count > 0
                 return {"found": True, "present": True, "disabled": disabled,
-                        "text": "签到 · +10", "already": False, "skip": False}
+                        "actionable": not disabled, "text": "签到 · +10",
+                        "already": False, "skip": False}
             if script == self.core._PLAYWRIGHT_CAPTCHA_TOKEN_STATE_JS:
                 return {"found": True, "ready": self.token_ready}
             if script in {self.core._MARK_CLICK_JS, self.core._PAGE_CLICK_JS}:
-                return True
+                return self.control_present
             return None
 
     @staticmethod
-    def _run(core, token_ready):
+    def _run(core, token_ready, rule=None, ready_states=None, control_present=True):
         from unittest import mock
 
-        page = PlaywrightCaptchaTests._CalendarPage(core, token_ready)
+        page = PlaywrightCaptchaTests._CalendarPage(
+            core, token_ready, ready_states=ready_states, control_present=control_present)
 
         class Helper:
             def action(self, **kwargs):
@@ -2146,8 +2225,58 @@ class PlaywrightCaptchaTests(unittest.TestCase):
 
         site = {"url": "https://piggo.me", "cookie": "c=1"}
         with mock.patch.object(core, "_load_playwright_helper", return_value=Helper):
-            result = core.playwright_sign(site, PlaywrightCaptchaTests.RULE, timeout=1)
+            result = core.playwright_sign(site, rule or PlaywrightCaptchaTests.RULE, timeout=1)
         return result, page
+
+    @staticmethod
+    def _ready_rule(core):
+        rule = dict(PlaywrightCaptchaTests.RULE)
+        rule.update({
+            "playwright_wait_for_ready": True,
+            "playwright_ready_wait": 1000,
+            "playwright_calendar_selector": ".cal-wrap",
+            "playwright_calendar_loading_selector": ".cal-wrap[aria-busy='true']",
+            "playwright_page_ready_selector": (
+                ".cal-att-pill, .cal-wrap:not([aria-busy='true']), "
+                "input[name='username'], form.step-up input[name='password']"
+            ),
+        })
+        return rule
+
+    def test_waits_for_spa_calendar_before_reading_controls(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                loading = {
+                    "ready": False, "calendarFound": True, "calendarLoading": True,
+                    "calendarReady": False, "controlFound": False, "controlPresent": False,
+                }
+                ready = {
+                    "ready": True, "calendarFound": True, "calendarLoading": False,
+                    "calendarReady": True, "controlFound": True, "controlPresent": True,
+                }
+                result, page = self._run(
+                    core, token_ready=False, rule=self._ready_rule(core),
+                    ready_states=[loading, ready])
+                self.assertIsNotNone(result)
+                self.assertGreaterEqual(page.page_ready_calls, 2)
+                self.assertEqual(page.click_count, 1)
+                self.assertIn("人机验证", result.message)
+
+    def test_loaded_calendar_without_control_has_precise_message(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                ready = {
+                    "ready": True, "calendarFound": True, "calendarLoading": False,
+                    "calendarReady": True, "controlFound": False, "controlPresent": False,
+                }
+                result, page = self._run(
+                    core, token_ready=False, rule=self._ready_rule(core),
+                    ready_states=[ready], control_present=False)
+                self.assertIsNotNone(result)
+                self.assertEqual(result.status, "failed")
+                self.assertIn("签到日历已加载", result.message)
+                self.assertNotIn("retry_paths", result.message)
+                self.assertEqual(page.click_count, 0)
 
     def test_response_path_and_captcha_payload(self):
         for core in CORES:

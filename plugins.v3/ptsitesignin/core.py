@@ -327,6 +327,18 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "captcha_response_path": "/v1/web/calendar/attendance",
         "playwright_captcha_token_selector": "input[name='cf-turnstile-response']",
         "playwright_captcha_wait": 30000,
+        # /calendar 是 Vue 单页应用：先渲染 .cal-wrap 骨架屏，日历接口返回后才会出现
+        # 当天控件。domcontentloaded 后必须等到骨架屏消失或登录/解锁页出现，不能立刻
+        # 读取按钮，否则会把「仍在加载」误报成「没有签到入口」。
+        "playwright_wait_for_ready": True,
+        "playwright_ready_wait": 20000,
+        "playwright_calendar_selector": ".cal-wrap",
+        "playwright_calendar_loading_selector": ".cal-wrap[aria-busy='true']",
+        "playwright_page_ready_selector": (
+            ".cal-att-pill, .cal-wrap:not([aria-busy='true']), "
+            "input[name='username'], form.step-up input[name='password'], "
+            ".denied-page, #idle-lock-title"
+        ),
         "wait": 15000,
         "pending_keywords": ["正在进行安全检测", "安全检测", "正在验证您是否是真人"],
         "success_keywords": ["签到成功", "簽到成功", "签到完成", "本次签到"],
@@ -346,6 +358,7 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "browserless_fallback_mode": "piggo",
         "browserless_auth_wait": 12000,
         "browserless_click_wait": 8000,
+        "browserless_calendar_wait": 20000,
         "solve_timeout": 60000,
         "reconnect_wait": 60000,
         "auto_wait": 30000,
@@ -1522,21 +1535,29 @@ _CLICK_MARKED_SELECTOR = '[data-ptsignin-target="1"]'
 # 「已签到」，整页 contains("已签到") 会把今天尚未签到误判成已完成。
 _PLAYWRIGHT_CONTROL_STATE_JS = r"""
 (args) => {
-  const [selector, alreadyTexts, skipTexts] = args;
+  const [selector, alreadyTexts, skipTexts, submitText] = args;
   const node = selector ? document.querySelector(selector) : null;
-  if (!node) return {found: false, present: false, text: "", already: false, skip: false};
+  if (!node) return {
+    found: false, present: false, disabled: false, actionable: false,
+    text: "", already: false, skip: false,
+  };
   const label = ((node.innerText || node.textContent || node.value || "") + " "
     + (node.getAttribute("aria-label") || "") + " " + (node.getAttribute("title") || ""))
     .replace(/\s+/g, " ").trim();
   const visible = node.offsetParent !== null || node.getClientRects().length > 0;
   const disabled = !!node.disabled || node.getAttribute("aria-disabled") === "true";
+  const already = (alreadyTexts || []).some((word) => label.includes(word));
+  const skipped = (skipTexts || []).some((word) => label.includes(word));
+  const actionText = String(submitText || "");
   return {
     found: true,
     present: visible,
     disabled: disabled,
+    actionable: visible && !disabled && !already && !skipped
+      && (!actionText || label.startsWith(actionText)),
     text: label,
-    already: (alreadyTexts || []).some((word) => label.includes(word)),
-    skip: (skipTexts || []).some((word) => label.includes(word)),
+    already: already,
+    skip: skipped,
   };
 }
 """
@@ -1664,6 +1685,48 @@ _PLAYWRIGHT_AUTH_STATE_JS = """
 }
 """
 
+_PLAYWRIGHT_PAGE_READY_JS = r"""
+(args) => {
+  const [readySelector, calendarSelector, loadingSelector, stateSelector] = args;
+  const visible = (node) => !!node
+    && (node.offsetParent !== null || node.getClientRects().length > 0);
+  const visibleMatch = (selector) => selector
+    ? visible(document.querySelector(selector)) : false;
+  const calendarNode = calendarSelector ? document.querySelector(calendarSelector) : null;
+  const loadingNode = loadingSelector ? document.querySelector(loadingSelector) : null;
+  const controlNode = stateSelector ? document.querySelector(stateSelector) : null;
+  const loginUser = document.querySelector("input[name='username']");
+  const loginPassword = document.querySelector("input[name='password']");
+  const loginSubmit = document.querySelector("button.btn");
+  const unlockPassword = document.querySelector("form.step-up input[name='password']");
+  const unlockSubmit = document.querySelector("form.step-up button[type='submit']");
+  const lockedNode = document.querySelector(".denied-page, #idle-lock-title");
+  const bodyText = (document.body && document.body.innerText) || "";
+  const login = visible(loginUser) && visible(loginPassword) && visible(loginSubmit);
+  const locked = visible(lockedNode) || bodyText.includes("页面已锁定")
+    || bodyText.includes("空闲过久，请验证是你本人");
+  const stepUp = visible(unlockPassword) && visible(unlockSubmit);
+  const calendarFound = !!calendarNode;
+  const calendarLoading = visible(loadingNode);
+  const controlFound = !!controlNode;
+  const controlPresent = visible(controlNode);
+  return {
+    ready: visibleMatch(readySelector) || login || locked || stepUp,
+    login: login,
+    locked: locked,
+    stepUp: stepUp,
+    calendarFound: calendarFound,
+    calendarLoading: calendarLoading,
+    calendarReady: visible(calendarNode) && !calendarLoading,
+    controlFound: controlFound,
+    controlPresent: controlPresent,
+    control: {found: controlFound, present: controlPresent},
+    url: location.href,
+  };
+}
+"""
+
+
 _CHALLENGE_PATTERN = re.compile(r"(just a moment|cf-chl|_cf_chl_opt|chl_page|"
                                 r"正在进行安全检测|安全检测能力由|雷池\s*WAF|SafeLine|"
                                 r"正在验证您是否是真人|verify you are human|checking your browser)",
@@ -1744,6 +1807,47 @@ def _wait_playwright_auth_state(page: Any, predicate: Any, timeout_ms: int) -> D
             _time.sleep(0.5)
         state = _playwright_auth_state(page)
     return state
+
+
+def _playwright_page_ready_state(page: Any, rule: Mapping[str, Any]) -> Dict[str, Any]:
+    """读取单页应用是否已渲染出日历、登录页或空闲锁定页。"""
+    try:
+        value = page.evaluate(_PLAYWRIGHT_PAGE_READY_JS, [
+            str(rule.get("playwright_page_ready_selector") or ""),
+            str(rule.get("playwright_calendar_selector") or ""),
+            str(rule.get("playwright_calendar_loading_selector") or ""),
+            str(rule.get("playwright_state_selector") or ""),
+        ])
+    except Exception:
+        value = None
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _wait_playwright_page_ready(page: Any, rule: Mapping[str, Any],
+                                timeout_ms: int = 20000) -> Dict[str, Any]:
+    """等 SPA 完成首屏渲染；骨架屏、登录页和解锁页都算可处理状态。"""
+    import time as _time
+
+    deadline = _time.monotonic() + max(0.5, timeout_ms / 1000)
+    state = _playwright_page_ready_state(page, rule)
+    while _time.monotonic() < deadline:
+        if state.get("ready"):
+            return state
+        try:
+            page.wait_for_timeout(500)
+        except Exception:
+            _time.sleep(0.5)
+        state = _playwright_page_ready_state(page, rule)
+    return state
+
+
+def _page_ready_timeout_message(state: Mapping[str, Any]) -> str:
+    """把页面就绪超时翻译成可执行的失败原因，不输出页面脚本变量。"""
+    if state.get("calendarLoading"):
+        return "等待签到页加载超时：日历仍在显示加载骨架屏，未读取签到控件"
+    if not state.get("calendarFound"):
+        return "等待签到页就绪超时：未出现日历容器，也未识别到登录或解锁页"
+    return "等待签到页就绪超时：页面状态未稳定，未读取签到控件"
 
 
 def _prepare_browser_auth(page: Any, site: Mapping[str, Any],
@@ -1911,13 +2015,19 @@ def playwright_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: i
         captcha_wait_ms = int(rule.get("playwright_captcha_wait") or 30000)
     except (TypeError, ValueError):
         captcha_wait_ms = 30000
+    wait_for_ready = bool(rule.get("playwright_wait_for_ready"))
+    try:
+        ready_wait_ms = int(rule.get("playwright_ready_wait") or 20000)
+    except (TypeError, ValueError):
+        ready_wait_ms = 20000
+    ready_wait_ms = max(500, min(ready_wait_ms, 60000))
 
     def control_state(page: Any) -> Dict[str, Any]:
         if not state_selector:
             return {}
         try:
             value = page.evaluate(_PLAYWRIGHT_CONTROL_STATE_JS,
-                                  [state_selector, already_texts, skip_texts])
+                                  [state_selector, already_texts, skip_texts, submit_text])
         except Exception:
             value = None
         return dict(value) if isinstance(value, Mapping) else {}
@@ -1954,6 +2064,7 @@ def playwright_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: i
         for path in paths:
             url = target_url(base_url, path)
             tried.append(path)
+            page_ready: Dict[str, Any] = {}
             try:
                 page.goto(url, wait_until="domcontentloaded",
                           timeout=max(15000, int(timeout * 1000)))
@@ -1964,6 +2075,24 @@ def playwright_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: i
             except Exception:
                 pass
             before = _wait_challenge_clear(page, challenge_budget)
+
+            # 猪猪的鉴权在页面 JS + localStorage 中完成。登录页、锁定页和日历容器都
+            # 由前端异步渲染；先等页面进入可处理状态，再读取鉴权控件。
+            if before and _page_has_challenge(before):
+                last = {"before": before, "after": before, "clicked": False,
+                        "path": path, "stuck": "challenge"}
+                continue
+            if wait_for_ready:
+                page_ready = _wait_playwright_page_ready(page, rule, ready_wait_ms)
+                if not page_ready.get("ready"):
+                    last = {"before": before, "after": before, "clicked": False,
+                            "path": path, "stuck": "page_ready", "ready": page_ready,
+                            "result": SignResult("failed", _page_ready_timeout_message(page_ready))}
+                    break
+                try:
+                    before = page.content() or before
+                except Exception:
+                    pass
 
             # 猪猪的鉴权在页面 JS + localStorage 中完成。先在同一页面完成登录/解锁，
             # 再重新打开签到页；不自行请求 /v1 API，避免缺少前端签名头而得到 401。
@@ -1986,6 +2115,22 @@ def playwright_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: i
                     except Exception:
                         pass
                     before = _wait_challenge_clear(page, challenge_budget)
+                    if before and _page_has_challenge(before):
+                        last = {"before": before, "after": before, "clicked": False,
+                                "path": path, "stuck": "challenge"}
+                        continue
+                    if wait_for_ready:
+                        page_ready = _wait_playwright_page_ready(page, rule, ready_wait_ms)
+                        if not page_ready.get("ready"):
+                            last = {"before": before, "after": before, "clicked": False,
+                                    "path": path, "stuck": "page_ready", "ready": page_ready,
+                                    "result": SignResult(
+                                        "failed", _page_ready_timeout_message(page_ready))}
+                            break
+                        try:
+                            before = page.content() or before
+                        except Exception:
+                            pass
             clicked = False
             stuck = ""
             if before and _page_has_challenge(before):
@@ -2005,7 +2150,7 @@ def playwright_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: i
                 except Exception:
                     pass
                 last = {"before": before, "after": after, "clicked": False,
-                        "path": path, "stuck": "control_state",
+                        "path": path, "stuck": "control_state", "ready": page_ready,
                         "state": state_before, "result": state_before_result}
                 if state_before_result.status in {"success", "already"}:
                     break
@@ -2116,6 +2261,20 @@ def playwright_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: i
                             except Exception:
                                 pass
                             after = _wait_challenge_clear(page, challenge_budget)
+                    if after and _page_has_challenge(after):
+                        stuck = "challenge"
+                        break
+                    if wait_for_ready:
+                        page_ready = _wait_playwright_page_ready(page, rule, ready_wait_ms)
+                        if not page_ready.get("ready"):
+                            loop_result = SignResult(
+                                "failed", _page_ready_timeout_message(page_ready))
+                            stuck = "page_ready"
+                            break
+                        try:
+                            after = page.content() or after
+                        except Exception:
+                            pass
                     state_after = control_state(page)
                     state_after_result = control_result(state_after, clicked)
                     if state_after_result is not None:
@@ -2138,7 +2297,8 @@ def playwright_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: i
                     after = page.content() or after
                 except Exception:
                     pass
-            last = {"before": before, "after": after, "clicked": clicked, "path": path}
+            last = {"before": before, "after": after, "clicked": clicked,
+                    "path": path, "ready": page_ready}
             if loop_state:
                 last["state"] = loop_state
             if loop_result is not None:
@@ -2183,6 +2343,11 @@ def playwright_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: i
         prefix = "" if outcome.get("clicked") else "（页面已是签到完成状态）"
         return SignResult(judged.status, f"{judged.message}{prefix}")
     if not outcome.get("clicked"):
+        if outcome.get("stuck") == "page_ready":
+            return SignResult("failed", str(outcome.get("message")
+                                            or (outcome.get("result").message
+                                                if isinstance(outcome.get("result"), SignResult)
+                                                else "等待签到页加载超时")))
         if outcome.get("stuck") in {"browser_auth", "control_state"}:
             return SignResult("failed", str(outcome.get("message")
                                             or judged.message
@@ -2191,6 +2356,14 @@ def playwright_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: i
             return SignResult("failed", str(outcome.get("message")
                                             or "站点要求二级验证（异地登录验证）"))
         tried = "、".join(str(item) for item in (outcome.get("tried") or []))
+        ready = outcome.get("ready") if isinstance(outcome.get("ready"), Mapping) else {}
+        if (rule.get("playwright_calendar_selector")
+                and ready.get("calendarReady") and not ready.get("controlFound")):
+            return SignResult(
+                "failed",
+                str(rule.get("playwright_missing_control_message")
+                    or "签到日历已加载，但今日没有签到入口或控件状态异常"),
+            )
         if outcome.get("stuck") == "challenge":
             return SignResult("failed",
                               f"本地浏览器仍卡在安全验证页面（已试：{tried or '默认页面'}）："
@@ -3854,6 +4027,15 @@ def navigation_wait_ms(rule: Mapping[str, Any]) -> int:
     return cloudflare_wait_ms(rule) if str(rule.get("mode")) == "cloudflare" else 2000
 
 
+def browserless_calendar_wait_ms(rule: Mapping[str, Any]) -> int:
+    """Browserless 等待猪猪 Vue 日历进入可操作状态的毫秒数（3~60 秒）。"""
+    try:
+        milli = int(float(rule.get("browserless_calendar_wait") or 20000))
+    except (TypeError, ValueError):
+        milli = 20000
+    return max(3000, min(milli, 60000))
+
+
 def bql_wait_budget_ms(rule: Mapping[str, Any]) -> int:
     """估算一次签到的 BQL 页面内等待总时长（毫秒）。
 
@@ -3893,6 +4075,19 @@ def bql_wait_budget_ms(rule: Mapping[str, Any]) -> int:
             total += max(1000, min(int(rule.get("verify_wait") or 8000), 20000))
         except (TypeError, ValueError):
             total += 8000
+    if str(rule.get("browserless_fallback_mode") or "").lower() == "piggo":
+        # 猪猪专用流程分三次请求：每段都等待日历；登录/解锁两段都要等鉴权；
+        # solve 与 token 重试各等待一次点击结果；solve / 提交两段还要算导航等待。
+        total += browserless_calendar_wait_ms(rule) * 3
+        total += solve_timeout_ms(rule)
+        for key, fallback in (("browserless_click_wait", 8000),
+                              ("browserless_auth_wait", 12000)):
+            try:
+                value = int(float(rule.get(key) or fallback))
+            except (TypeError, ValueError):
+                value = fallback
+            total += max(1000, min(value, 60000)) * 2
+        total += navigation_wait_ms(rule) * 2
     return total
 
 
@@ -4259,6 +4454,9 @@ def _piggo_state_script(rule: Mapping[str, Any]) -> str:
                           if str(item).strip()], ensure_ascii=False)
     skip = json.dumps([str(item) for item in (rule.get("playwright_skip_texts") or [])
                        if str(item).strip()], ensure_ascii=False)
+    calendar = json.dumps(str(rule.get("playwright_calendar_selector") or ".cal-wrap"))
+    calendar_loading = json.dumps(
+        str(rule.get("playwright_calendar_loading_selector") or ".cal-wrap[aria-busy='true']"))
     return """(() => {
       const node = document.querySelector(%s);
       const visible = (el) => !!el && (el.offsetParent !== null || el.getClientRects().length > 0);
@@ -4272,6 +4470,8 @@ def _piggo_state_script(rule: Mapping[str, Any]) -> str:
       const skipped = skipTexts.some((word) => label.includes(word));
       const actionable = !!node && visible(node) && !disabled && !already && !skipped
         && label.startsWith('签到');
+      const calendarNode = document.querySelector(%s);
+      const calendarLoading = visible(document.querySelector(%s));
       const loginUser = document.querySelector("input[name='username']");
       const loginPassword = document.querySelector("input[name='password']");
       const loginSubmit = document.querySelector('button.btn');
@@ -4281,6 +4481,8 @@ def _piggo_state_script(rule: Mapping[str, Any]) -> str:
       return JSON.stringify({
         url: location.href,
         title: document.title || '',
+        calendar: {found: !!calendarNode, loading: calendarLoading,
+                   ready: !!calendarNode && !calendarLoading},
         login: visible(loginUser) && visible(loginPassword) && visible(loginSubmit),
         locked: visible(document.querySelector('.denied-page, #idle-lock-title'))
           || bodyText.includes('页面已锁定') || bodyText.includes('空闲过久，请验证是你本人'),
@@ -4288,7 +4490,7 @@ def _piggo_state_script(rule: Mapping[str, Any]) -> str:
         control: {found: !!node, present: visible(node), disabled: disabled,
                   text: label, already: already, skip: skipped, actionable: actionable},
       });
-    })()""" % (selector, already, skip)
+    })()""" % (selector, already, skip, calendar, calendar_loading)
 
 
 def _piggo_login_script(rule: Mapping[str, Any], username: str, password: str) -> str:
@@ -4430,7 +4632,7 @@ def _piggo_inject_script(rule: Mapping[str, Any], token: str) -> str:
 def build_piggo_prepare_query(user_agent: Optional[str] = None) -> str:
     set_user_agent = "userAgent(userAgent:$userAgent){time}" if user_agent else ""
     user_agent_variable = " $userAgent:String!" if user_agent else ""
-    return """mutation PiggoPrepare($cookies:[CookieInput!]! $loginUrl:String! $calendarUrl:String! $waitLogin:Float! $authWait:Float! $loginScript:String! $unlockScript:String! $stateScript:String! $reconnectTimeout:Float!%s) {
+    return """mutation PiggoPrepare($cookies:[CookieInput!]! $loginUrl:String! $calendarUrl:String! $waitLogin:Float! $authWait:Float! $loginScript:String! $unlockScript:String! $stateScript:String! $readySelector:String! $calendarWait:Float! $reconnectTimeout:Float!%s) {
       %s
       cookies(cookies:$cookies){cookies{name}}
       loginPage:goto(url:$loginUrl,waitUntil:domContentLoaded){status}
@@ -4438,7 +4640,8 @@ def build_piggo_prepare_query(user_agent: Optional[str] = None) -> str:
       login:evaluate(content:$loginScript){value}
       waitAuth:waitForTimeout(time:$authWait){time}
       calendar:goto(url:$calendarUrl,waitUntil:domContentLoaded){status}
-      waitCalendar:waitForTimeout(time:2000){time}
+      waitCalendar:waitForSelector(selector:$readySelector,timeout:$calendarWait,visible:true){selector time}
+      waitCalendarSettle:waitForTimeout(time:1000){time}
       unlock:evaluate(content:$unlockScript){value}
       waitUnlock:waitForTimeout(time:$authWait){time}
       state:evaluate(content:$stateScript){value}
@@ -4450,9 +4653,10 @@ def build_piggo_prepare_query(user_agent: Optional[str] = None) -> str:
 def build_piggo_solve_query(user_agent: Optional[str] = None) -> str:
     set_user_agent = "userAgent(userAgent:$userAgent){time}" if user_agent else ""
     user_agent_variable = " $userAgent:String!" if user_agent else ""
-    return """mutation PiggoSolve($calendarUrl:String! $beforeWait:Float! $clickWait:Float! $stateScript:String! $clickScript:String! $solveTimeout:Float! $reconnectTimeout:Float!%s) {
+    return """mutation PiggoSolve($calendarUrl:String! $readySelector:String! $calendarWait:Float! $beforeWait:Float! $clickWait:Float! $stateScript:String! $clickScript:String! $solveTimeout:Float! $reconnectTimeout:Float!%s) {
       %s
       calendar:goto(url:$calendarUrl,waitUntil:domContentLoaded){status}
+      waitCalendar:waitForSelector(selector:$readySelector,timeout:$calendarWait,visible:true){selector time}
       waitBefore:waitForTimeout(time:$beforeWait){time}
       stateBefore:evaluate(content:$stateScript){value}
       click:evaluate(content:$clickScript){value}
@@ -4468,9 +4672,10 @@ def build_piggo_solve_query(user_agent: Optional[str] = None) -> str:
 def build_piggo_submit_query(user_agent: Optional[str] = None) -> str:
     set_user_agent = "userAgent(userAgent:$userAgent){time}" if user_agent else ""
     user_agent_variable = " $userAgent:String!" if user_agent else ""
-    return """mutation PiggoSubmit($calendarUrl:String! $beforeWait:Float! $stateScript:String! $injectScript:String! $waitAfter:Float!%s) {
+    return """mutation PiggoSubmit($calendarUrl:String! $readySelector:String! $calendarWait:Float! $beforeWait:Float! $stateScript:String! $injectScript:String! $waitAfter:Float!%s) {
       %s
       calendar:goto(url:$calendarUrl,waitUntil:domContentLoaded){status}
+      waitCalendar:waitForSelector(selector:$readySelector,timeout:$calendarWait,visible:true){selector time}
       waitBefore:waitForTimeout(time:$beforeWait){time}
       stateBefore:evaluate(content:$stateScript){value}
       inject:evaluate(content:$injectScript){value}
@@ -4484,6 +4689,8 @@ def _piggo_step_hint(data: Mapping[str, Any]) -> str:
     """把 BrowserQL 失败步骤翻成固定提示，不转发可能含脚本变量的原始错误。"""
     labels: List[str] = []
     aliases = {
+        "waitcalendar": "等待签到日历加载失败",
+        "waitlogin": "等待登录页加载失败",
         "loginpage": "打开登录页失败",
         "login": "登录操作失败",
         "calendar": "打开签到页失败",
@@ -4614,6 +4821,9 @@ class BrowserlessSigner:
             return SignResult("failed", "站点 Cookie 格式无效")
         user_agent = str(site.get("ua") or "").strip()
         state_script = _piggo_state_script(rule)
+        ready_selector = str(rule.get("playwright_page_ready_selector")
+                             or rule.get("playwright_calendar_selector") or "")
+        calendar_wait = browserless_calendar_wait_ms(rule)
         login_url = target_url(base_url, str(rule.get("browser_login_url")
                                            or "/login?redirect=/calendar"))
         auth_wait = max(1000, min(int(rule.get("browserless_auth_wait") or 12000), 60000))
@@ -4629,6 +4839,8 @@ class BrowserlessSigner:
             "loginScript": _piggo_login_script(rule, username, password),
             "unlockScript": _piggo_unlock_script(rule, password),
             "stateScript": state_script,
+            "readySelector": ready_selector,
+            "calendarWait": calendar_wait,
             "reconnectTimeout": reconnect_wait,
         }
         if user_agent:
@@ -4644,6 +4856,7 @@ class BrowserlessSigner:
         unlock_state = _piggo_value(prepared, "unlock")
         state = _piggo_value(prepared, "state")
         control = state.get("control") if isinstance(state.get("control"), Mapping) else {}
+        calendar = state.get("calendar") if isinstance(state.get("calendar"), Mapping) else {}
         prepared_html = str((prepared.get("html") or {}).get("html") or "")
 
         if state.get("login") or (not control and login_page(prepared_html)):
@@ -4679,8 +4892,22 @@ class BrowserlessSigner:
             return SignResult("failed", "当天签到控件显示「补签」状态，未执行签到")
         if not control.get("present"):
             hint = _piggo_step_hint(prepared)
-            return SignResult("failed", "未找到当天签到控件，无法确认签到状态" +
-                              (f"（{hint}）" if hint else ""))
+            suffix = f"（{hint}）" if hint else ""
+            if calendar.get("loading"):
+                return SignResult(
+                    "failed",
+                    "Browserless 等待猪猪签到日历加载完成超时：页面仍在显示加载骨架屏，"
+                    "未读取签到控件" + suffix,
+                )
+            if calendar.get("found"):
+                return SignResult(
+                    "failed",
+                    "Browserless 签到日历已加载，但今日没有签到入口或控件状态异常" + suffix,
+                )
+            return SignResult(
+                "failed",
+                "Browserless 未识别到猪猪签到日历或登录/解锁页面，无法确认签到状态" + suffix,
+            )
         if control.get("disabled"):
             return SignResult("failed", "当天签到控件当前不可用")
         if not control.get("actionable"):
@@ -4697,6 +4924,8 @@ class BrowserlessSigner:
 
         solve_variables: Dict[str, Any] = {
             "calendarUrl": calendar_url,
+            "readySelector": ready_selector,
+            "calendarWait": calendar_wait,
             "beforeWait": navigation_wait_ms(rule),
             "clickWait": click_wait,
             "stateScript": state_script,
@@ -4721,6 +4950,7 @@ class BrowserlessSigner:
 
         before = _piggo_value(solved, "stateBefore")
         before_control = before.get("control") if isinstance(before.get("control"), Mapping) else {}
+        before_calendar = before.get("calendar") if isinstance(before.get("calendar"), Mapping) else {}
         if before.get("login"):
             return SignResult("failed", "Browserless 会话登录状态已失效，请重新登录后重试")
         if before.get("stepUp") or before.get("locked"):
@@ -4731,8 +4961,20 @@ class BrowserlessSigner:
             return SignResult("failed", "当天签到控件显示「补签」状态，未执行签到")
         if not before_control.get("actionable"):
             hint = _piggo_step_hint(solved)
-            return SignResult("failed", "重新打开签到页后，当天签到控件不可用" +
-                              (f"（{hint}）" if hint else ""))
+            suffix = f"（{hint}）" if hint else ""
+            if before_calendar.get("loading"):
+                return SignResult(
+                    "failed",
+                    "Browserless 重新打开签到页后等待日历加载超时：页面仍在显示骨架屏，" +
+                    "未执行签到点击" + suffix,
+                )
+            if before_calendar.get("found"):
+                return SignResult(
+                    "failed",
+                    "Browserless 签到日历已加载，但今日没有可执行的签到控件，" +
+                    "未执行签到点击" + suffix,
+                )
+            return SignResult("failed", "重新打开签到页后，当天签到控件不可用" + suffix)
 
         click_state = _piggo_value(solved, "click")
         after = _piggo_value(solved, "stateAfter")
@@ -4764,6 +5006,8 @@ class BrowserlessSigner:
 
         submit_variables: Dict[str, Any] = {
             "calendarUrl": calendar_url,
+            "readySelector": ready_selector,
+            "calendarWait": calendar_wait,
             "beforeWait": navigation_wait_ms(rule),
             "stateScript": state_script,
             "injectScript": _piggo_inject_script(rule, token),
