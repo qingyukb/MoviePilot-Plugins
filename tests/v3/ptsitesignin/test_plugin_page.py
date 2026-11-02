@@ -234,10 +234,10 @@ class PagePluginTests(unittest.TestCase):
         self.assertIn("-webkit-line-clamp:3", style)
 
     def test_signin_result_prefers_bonus_field(self):
-        latest = [{"site": "AGSVPT", "status": "success", "message": "签到成功（65,）",
+        latest = [{"site": "观众", "status": "success", "message": "签到成功（65,）",
                    "bonus": "获得 65", "ran_at": self._today("03:20:02"), "engine": "http"}]
         page, _ = self._page(latest, history=latest)
-        self.assertIn(("AGSVPT", "签到成功", "获得 65"), row_pairs(page))
+        self.assertIn(("观众", "签到成功", "获得 65"), row_pairs(page))
 
     def test_dual_site_shows_in_both_tables(self):
         latest = [{"site": "观众", "status": "already", "ran_at": self._today("03:11:49"),
@@ -286,6 +286,27 @@ class PagePluginTests(unittest.TestCase):
         page, _ = self._page([history[-1]], history=history)
         captions = [site for site, _status, _result in table_rows(page)]
         self.assertTrue(any("共 12 条记录" in caption for caption in captions))
+
+    def test_unselected_sites_from_history_are_not_rendered(self):
+        history = [
+            {"site": "观众", "status": "success", "message": "签到成功",
+             "ran_at": self._today("08:00:00")},
+            {"site": "馒头", "status": "failed", "message": "签到失败",
+             "ran_at": "2026-10-16 08:00:00"},
+            {"site": "MiKan", "status": "already", "message": "今日已签到",
+             "ran_at": "2026-10-15 08:00:00"},
+        ]
+        data = {"latest": history, "history_index": ["history_20261016"],
+                "history_20261016": history}
+        plugin = self._make(data, _site_ids=[1], _login_site_ids=[])
+        plugin.get_data = lambda key: data.get(key)               # type: ignore[method-assign]
+        page = plugin.get_page()
+        self.assertEqual(row_pairs(page), [("观众", "签到成功", "签到成功")])
+        self.assertNotIn("馒头", texts(page))
+        self.assertNotIn("MiKan", texts(page))
+        numbers = [node.get("text") for node in nodes(page, "div")
+                   if "ptsignin-stat-num" in str(node.get("props", {}).get("class"))]
+        self.assertEqual(numbers, ["1", "1", "0", "0", "0"])
 
     def test_fallback_uses_discovered_signin_entry(self):
         # 撞盾时先按首页「每日签到」表单修正签到入口，再交给浏览器（别让浏览器开 404 的地址）

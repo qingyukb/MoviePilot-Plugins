@@ -179,7 +179,7 @@ class PTSiteSignIn(_PluginBase):
     plugin_name = "PT站点签到"
     plugin_desc = ("PT 站点自动签到，可登录刷新 Cookie 并读取最近动向；遇到验证码或 Cloudflare 会自动改用浏览器。")
     plugin_icon = "signin.png"
-    plugin_version = "2.0.0"
+    plugin_version = "2.0.2"
     plugin_author = "qingyukb"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "ptsignin_"
@@ -520,9 +520,13 @@ class PTSiteSignIn(_PluginBase):
         if not latest and not history:
             return [{"component": "VAlert", "props": {"type": "info", "variant": "tonal",
                      "text": "暂无签到记录；保存配置后点「保存后立即执行一次」，或等 Cron 触发。"}}]
+        selected_names = self._selected_site_names()
+        selected = set(selected_names)
+        # latest 会跨配置保留旧站点记录；详情页只能展示当前勾选的站点。
+        visible_latest = [row for row in latest if str(row.get("site") or "") in selected]
         today = self._today_records(latest)
-        summary = summarize_records(latest, self._selected_site_names())
-        last_run = max((str(row.get("ran_at") or "") for row in latest), default="")[5:16]
+        summary = summarize_records(visible_latest, selected_names)
+        last_run = max((str(row.get("ran_at") or "") for row in visible_latest), default="")[5:16]
         # 同一份统计渲染两种形态：桌面是卡片，手机是胶囊（CSS 控制显示哪套）
         metrics = [("站点", summary["total"], "info"),
                    ("成功", summary["success"], "success"),
@@ -542,16 +546,16 @@ class PTSiteSignIn(_PluginBase):
             body.append({"component": "div", "props": {"class": "ptsignin-updated"},
                          "text": f"上次执行 {last_run}"})
         body += self._status_table("签到状态", "mdi-calendar-check",
-                                   self._section_site_names(False, history, latest),
+                                   self._section_site_names(False, visible_latest),
                                    history, today, login_view=False)
         body += self._status_table("登录状态", "mdi-login-variant",
-                                   self._section_site_names(True, history, latest),
+                                   self._section_site_names(True, visible_latest),
                                    history, today, login_view=True)
         page: List[dict] = [{"component": "style", "text": PAGE_STYLE},
                             {"component": "div", "props": {"class": "ptsignin-page"},
                              "content": body}]
-        recorded = {str(row.get("site") or "") for row in latest}
-        missing = [name for name in self._selected_site_names() if name not in recorded]
+        recorded = {str(row.get("site") or "") for row in visible_latest}
+        missing = [name for name in selected_names if name not in recorded]
         if missing:
             page.append({"component": "VAlert",
                          "props": {"type": "warning", "variant": "tonal", "density": "compact",
@@ -653,9 +657,9 @@ class PTSiteSignIn(_PluginBase):
                  ]} for item in rows]}
         return [header, table, cards]
 
-    def _section_site_names(self, login_view: bool, history: List[Dict[str, Any]],
+    def _section_site_names(self, login_view: bool,
                             latest: List[Dict[str, Any]]) -> List[str]:
-        """该区块要显示的站点：配置里勾选的站点优先，再补上历史 / 本轮里出现过的站点。"""
+        """该区块要显示的站点，以当前勾选集合为上限。"""
         try:
             sites = {site.id: site for site in SiteOper().list_order_by_pri()}
         except Exception:
@@ -665,13 +669,13 @@ class PTSiteSignIn(_PluginBase):
         else:
             ids = list(sites) if self._all_sites else self._site_ids
         names = [str(sites[sid].name) for sid in ids if sid in sites]
+        # 双选站点可能只勾了签到，但仍会产生登录记录；只从当前选中的 latest 补齐。
         belongs = ((lambda row: is_login_record(row, strict=True)) if login_view
                    else is_signin_record)
-        for row in latest + history:
-            if not belongs(row):
-                continue
-            name = str(row.get("site") or "未知站点")
-            if name not in names:
+        selected = set(self._selected_site_names())
+        for row in latest:
+            name = str(row.get("site") or "")
+            if name in selected and belongs(row) and name not in names:
                 names.append(name)
         return names
 
@@ -810,11 +814,31 @@ class PTSiteSignIn(_PluginBase):
             if engine == "playwright":
                 outcome = playwright_sign(info, rule, timeout=max(90, self._timeout * 2),
                                           proxies=self._proxies_for(info))
-                if outcome is not None:
+                if outcome is not None and outcome.status in {"success", "already"}:
                     return outcome
-                if signer is not None:
-                    logger.info("PT站点签到：%s 本机没有 Playwright，改用 Browserless", site_name)
-                    return signer.sign(dict(rule, engine="browserless"))
+                # 本机成功时绝不消耗 Browserless 额度；只有浏览器助手缺失或本机流程失败，
+                # 且规则允许时才回退。猪猪需要专用 Browserless 流程，不能套通用 HTTP 规则。
+                allow_fallback = bool(rule.get("browserless_fallback")) or outcome is None
+                if allow_fallback and signer is not None:
+                    reason = ("本机未提供 Playwright" if outcome is None
+                              else f"本机 Playwright 失败：{outcome.message}")
+                    logger.info("PT站点签到：%s %s，改用 Browserless", site_name, reason)
+                    fallback = signer.sign(info, rule)
+                    if fallback.status in {"success", "already"}:
+                        return SignResult(fallback.status,
+                                          f"{reason}；Browserless：{fallback.message}")
+                    return SignResult("failed",
+                                      f"{reason}；Browserless 回退：{fallback.message}")
+                if outcome is not None:
+                    if allow_fallback:
+                        return SignResult(outcome.status,
+                                          f"{outcome.message}；未配置 Browserless，无法回退")
+                    return outcome
+                if rule.get("browser_auth_mode"):
+                    return SignResult(
+                        "failed",
+                        "该站点需要本机 Playwright 完成浏览器内登录，"
+                        "当前 MoviePilot 环境没有可用的浏览器助手")
                 return SignResult("failed", "本机缺少 Playwright，且未配置 Browserless")
             if engine == "browserless":
                 if signer is None:
@@ -847,7 +871,7 @@ class PTSiteSignIn(_PluginBase):
                 continue
             if str(rule.get("engine")) == "browserless":
                 return True
-            if rule.get("auto_fallback"):
+            if rule.get("auto_fallback") or rule.get("browserless_fallback"):
                 return True
         return False
 
@@ -872,7 +896,29 @@ class PTSiteSignIn(_PluginBase):
         # 没有账号密码时直接复用站点管理保存的 Cookie 签到。登录失败不直接判整站失败
         # ——仍用旧 Cookie 试一次，并如实记录原因。
         account = account_from_site(info)
-        if account_ready(account):
+        # 先解析一次规则，识别必须在真实浏览器里完成登录/解锁的站点。猪猪是前后端分离
+        # 站点，通用 NexusPHP site_login() 会错误访问 /login.php，必须跳过。
+        try:
+            auth_rule = resolve_rule(info, rules)
+        except ValueError:
+            auth_rule = {}
+        browser_auth = str(auth_rule.get("browser_auth_mode") or "").strip().lower()
+        playwright_info: Dict[str, Any] = info
+        if browser_auth:
+            if account:
+                # 只在交给浏览器回调的临时副本中放账号密码；不写回站点记录/结果。
+                playwright_info = dict(info)
+                playwright_info.update(account)
+            if account_ready(account):
+                login_text = "浏览器内自动登录"
+            elif account:
+                login_text = "账号信息不完整，将尝试复用站点管理 Cookie"
+                logger.info("PT站点签到：%s 的浏览器登录账号信息不完整，先尝试已有 Cookie", site_name)
+            elif str(info.get("cookie") or "").strip():
+                login_text = "复用站点管理 Cookie" if dual else ""
+            else:
+                login_text = "未配置账号密码或 Cookie"
+        elif account_ready(account):
             proxies = self._proxies_for(info)
             try:
                 login_result = site_login(info, account, timeout=self._timeout, proxies=proxies)
@@ -922,7 +968,7 @@ class PTSiteSignIn(_PluginBase):
                 module_note = f"模块：{module_outcome.message}"
                 logger.info("PT站点签到：%s 站点模块失败（%s），改用规则引擎重试",
                             site_name, module_outcome.message)
-                outcome = self._sign_with_engine(info, rule, engine, signer, site_name)
+                outcome = self._sign_with_engine(playwright_info, rule, engine, signer, site_name)
                 if outcome is None:
                     outcome = module_outcome
                     engine = "module"
@@ -935,17 +981,10 @@ class PTSiteSignIn(_PluginBase):
                                          f"{module_note}；规则引擎：{outcome.message}")
                     engine = str(rule["engine"])
             elif engine == "playwright":
-                # 本机浏览器：IP 与家宽一致，站点不会判异地登录，也不消耗 Browserless 额度
-                outcome = playwright_sign(info, rule, timeout=max(90, self._timeout * 2),
-                                          proxies=self._proxies_for(info))
-                if outcome is None:
-                    logger.info("PT站点签到：%s 本机没有 Playwright，改用 Browserless", site_name)
-                    if signer is not None:
-                        outcome = signer.sign(dict(rule, engine="browserless"))
-                        engine = "browserless"
-                    else:
-                        outcome = SignResult("failed", "本机缺少 Playwright，且未配置 Browserless")
-                        engine = "playwright"
+                # 本机浏览器优先：IP 与家宽一致，站点不会判异地登录，也不消耗 Browserless 额度。
+                # 本机失败或助手缺失时才按规则回退；记录仍保留 playwright，方便区分额度来源。
+                outcome = self._sign_with_engine(playwright_info, rule, engine, signer, site_name)
+                engine = "playwright"
             elif engine == "browserless":
                 if signer is None:
                     outcome = SignResult("failed", "未配置 Browserless 地址或 Token")
@@ -965,6 +1004,13 @@ class PTSiteSignIn(_PluginBase):
             logger.info("PT站点签到：%s %s", site_name, outcome.message)
         else:
             logger.warning("PT站点签到：%s 失败 - %s", site_name, outcome.message)
+
+        if browser_auth and dual:
+            if outcome.status in {"success", "already"}:
+                login_text = ("浏览器内登录成功" if account_ready(account)
+                              else "浏览器会话可用")
+            else:
+                login_broken = True
 
         # 签到完成后、读取最近动向前再次确认配置仍有效且站点仍在白名单。
         guard = self._site_guard(info, run_id, allowed_site_ids, "签到")
@@ -1281,10 +1327,10 @@ class PTSiteSignIn(_PluginBase):
             tokens = self._browserless_tokens()
             if not self._browserless_url:
                 logger.warning("PT站点签到：未配置 Browserless 地址，相关站点将失败")
-            elif not tokens:
-                # 自建 Browserless 常关掉鉴权：留空 Token 也照常走，只是不能多 Key 轮换
-                logger.info("PT站点签到：Browserless 未填 Token，按自建无鉴权实例处理")
             else:
+                if not tokens:
+                    # 自建 Browserless 常关掉鉴权：留空 Token 也照常走，只是不能多 Key 轮换
+                    logger.info("PT站点签到：Browserless 未填 Token，按自建无鉴权实例处理")
                 try:
                     signer = BrowserlessPool(self._browserless_url, tokens,
                                              self._browserless_timeout, logger=logger)

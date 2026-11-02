@@ -304,28 +304,51 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "bonus": r"(本次签到获得\s*[\d,]+\s*个魔力值)",
     },
     "piggo.me": {
-        # 猪猪在站点侧有「异地登录」校验：Browserless 是美国机房 IP，会被判异常。
-        # 改用本机 Playwright（走你家网络），勾选级 CF 验证它也能自己点过。
-        # cookie_mode=browser：账号 Cookie 写进浏览器 Cookie 存储（add_cookies），
-        # 验证过程中新下发的 cf_clearance / sl_* 才能随后续请求发出——照 tmzg 2.0.2 的做法。
-        # 实测首页 /index.php 没有签到按钮，只有一个 [签到已得…] 链接指向 attendance.php，
-        # 所以主路径改成 attendance.php，首页作兜底。
+        # 猪猪是前后端分离站点：签到入口在 /calendar，鉴权依赖 localStorage 里的 Bearer
+        # token，Cookie 只覆盖 Cloudflare/雷池层。因此只能让页面自己的 JS 完成登录和请求，
+        # 不能走通用 NexusPHP 登录，也不能手写带签名的 API 请求。
+        # cookie_mode=browser：站点管理里的 Cookie 先写入浏览器存储，后续由浏览器维护。
         "engine": "playwright",
         "cookie_mode": "browser",
         "method": "GET",
         # 云盾 / 雷池检测页多等一会儿（Playwright 引擎按这个预算轮询放行）
         "cloudflare_wait": 40,
-        "path": "/attendance.php",
-        "retry_paths": ["/index.php"],
+        "path": "/calendar",
         "submit_method": "dom_click",
-        "submit_selector": "a, input[type='submit'], button, [role='button'], span",
+        "submit_selector": ".cal-att-pill.act",
         "submit_text": "签到",
+        # 日历里历史日期也会出现「已签到」。只看当天控件，避免整页关键字把未签到误判成
+        # 已签到；「补签」也不是今天的可执行签到入口。
+        "playwright_state_selector": ".cal-att-pill",
+        "playwright_already_texts": ["已签到", "今日已签到", "今天已签到", "已簽到"],
+        "playwright_skip_texts": ["补签", "補簽"],
+        # 签到接口首次返回 422 时会要求 Turnstile。只有页面写入验证 token 后才重试一次，
+        # 不在验证未完成时重复点击；接口响应只用于判定，不记录 token 或 Cookie。
+        "captcha_response_path": "/v1/web/calendar/attendance",
+        "playwright_captcha_token_selector": "input[name='cf-turnstile-response']",
+        "playwright_captcha_wait": 30000,
         "wait": 15000,
         "pending_keywords": ["正在进行安全检测", "安全检测", "正在验证您是否是真人"],
-        # 照 tmzg 的做法：按钮消失不算成功，只认站点给的明确文字；
-        # 已签到只看这几个（「已领取」是别的站点文案，容易误判）
         "success_keywords": ["签到成功", "簽到成功", "签到完成", "本次签到"],
-        "already_keywords": ["今日已签到", "今天已签到", "已簽到"],
+        "already_keywords": ["已签到", "今日已签到", "今天已签到", "已簽到"],
+        "strict_status_keywords": True,
+        # 登录页 / 空闲锁定页都在同一个真实浏览器会话里处理，不实现站点的 SRP 或 API 签名。
+        "browser_auth_mode": "login_and_unlock",
+        "browser_login_url": "/login?redirect=/calendar",
+        "browser_login_username_selector": "input[name='username']",
+        "browser_login_password_selector": "input[name='password']",
+        "browser_login_submit_selector": "button.btn",
+        "browser_unlock_password_selector": "form.step-up input[name='password']",
+        "browser_unlock_submit_selector": "form.step-up button[type='submit']",
+        # 本机 Playwright 优先；仅在本机失败或缺少浏览器助手时才进入猪猪专用
+        # Browserless 流程。回退成功后详情页仍记录 playwright，便于区分是否消耗额度。
+        "browserless_fallback": True,
+        "browserless_fallback_mode": "piggo",
+        "browserless_auth_wait": 12000,
+        "browserless_click_wait": 8000,
+        "solve_timeout": 60000,
+        "reconnect_wait": 60000,
+        "auto_wait": 30000,
     },
     # ---- 以下站点流程参考 thsrite「站点自动签到」的 sites/ 模块 ----
     # 只收录能用规则表达的：POST 固定字段、首页抓 CSRF、JSON 返回判定这几种。
@@ -1437,14 +1460,16 @@ def discover_signin_target(html: str, base_url: str) -> Dict[str, Any]:
 # IP 就是运营商/家里的 IP，站点不会判「异地登录」，也不消耗 Browserless 额度。
 _PAGE_CLICK_JS = """
 (args) => {
-  const [selector, text] = args;
+  const [selector, text, excludeTexts] = args;
   const nodes = Array.from(document.querySelectorAll(
     selector || "button, a, [role='button'], [role='menuitem'], input[type='submit'], li, span"));
+  const excluded = (excludeTexts || []).filter(Boolean);
   const hits = nodes
     .filter((node) => {
       const label = (node.value || node.textContent || "").trim();
       const visible = node.offsetParent !== null || node.getClientRects().length > 0;
-      return visible && label.includes(text);
+      return visible && label.includes(text)
+        && !excluded.some((word) => label.includes(word));
     })
     .sort((left, right) => {
       const a = (left.value || left.textContent || "").trim().length;
@@ -1465,16 +1490,18 @@ _PAGE_CLICK_JS = """
 # （tmzg 的 captchasignin 也是用 page.click 才在猪猪上点成功的）。
 _MARK_CLICK_JS = """
 (args) => {
-  const [selector, text] = args;
+  const [selector, text, excludeTexts] = args;
   const nodes = Array.from(document.querySelectorAll(
     selector || "input[type='submit'], button, a, [role='button']"));
   const wanted = (text || "").trim();
+  const excluded = (excludeTexts || []).filter(Boolean);
   const hits = nodes.filter((node) => {
     if (node.disabled) return false;
     const label = ((node.value || node.textContent || "") + " " + (node.getAttribute("aria-label") || "")
                    + " " + (node.getAttribute("title") || "")).trim();
     const visible = node.offsetParent !== null || node.getClientRects().length > 0;
-    return visible && (!wanted || label.includes(wanted));
+    return visible && (!wanted || label.includes(wanted))
+      && !excluded.some((word) => label.includes(word));
   });
   if (!hits.length) return false;
   hits.sort((left, right) => {
@@ -1489,6 +1516,153 @@ _MARK_CLICK_JS = """
 """
 
 _CLICK_MARKED_SELECTOR = '[data-ptsignin-target="1"]'
+
+
+# 只读取当天的签到控件，不能拿整页文字判断签到状态：日历里历史日期也会显示
+# 「已签到」，整页 contains("已签到") 会把今天尚未签到误判成已完成。
+_PLAYWRIGHT_CONTROL_STATE_JS = r"""
+(args) => {
+  const [selector, alreadyTexts, skipTexts] = args;
+  const node = selector ? document.querySelector(selector) : null;
+  if (!node) return {found: false, present: false, text: "", already: false, skip: false};
+  const label = ((node.innerText || node.textContent || node.value || "") + " "
+    + (node.getAttribute("aria-label") || "") + " " + (node.getAttribute("title") || ""))
+    .replace(/\s+/g, " ").trim();
+  const visible = node.offsetParent !== null || node.getClientRects().length > 0;
+  const disabled = !!node.disabled || node.getAttribute("aria-disabled") === "true";
+  return {
+    found: true,
+    present: visible,
+    disabled: disabled,
+    text: label,
+    already: (alreadyTexts || []).some((word) => label.includes(word)),
+    skip: (skipTexts || []).some((word) => label.includes(word)),
+  };
+}
+"""
+
+
+def playwright_control_result(state: Mapping[str, Any], clicked: bool,
+                              submit_text: str) -> Optional[SignResult]:
+    """判定当天签到控件状态；禁用、补签或文字不符都不能算成功。"""
+    if not state or not state.get("found") or state.get("present") is False:
+        return None
+    if state.get("skip"):
+        return SignResult("failed", "当天签到状态为补签，未执行自动签到")
+    if state.get("already"):
+        if clicked:
+            return SignResult("success", "签到成功")
+        return SignResult("already", "今日已经签到")
+    text = str(state.get("text") or "").strip()
+    if state.get("disabled"):
+        prefix = "签到请求提交后控件仍不可用" if clicked else "当天签到控件不可用"
+        return SignResult("failed", f"{prefix}（{text[:40] or '已禁用'}），未确认签到成功")
+    if submit_text and not text.startswith(submit_text):
+        return SignResult("failed", f"当天签到控件状态未识别（{text[:60] or '无文字'}）")
+    return None
+
+
+def captcha_response_result(status: int, payload: Any) -> Optional[SignResult]:
+    """识别签到接口的人机验证失败，不输出响应中的 token 或其它敏感数据。"""
+    if not isinstance(payload, Mapping):
+        return None
+    data = payload.get("data")
+    data = data if isinstance(data, Mapping) else {}
+    need_captcha = any(bool(data.get(key) or payload.get(key))
+                       for key in ("need_captcha", "site_captcha"))
+    message = next((str(value) for value in (
+        data.get("message"), data.get("msg"), payload.get("msg"),
+        payload.get("message"), payload.get("error"),
+    ) if value), "")
+    captcha_message = any(word in message for word in ("人机验证", "人機驗證", "captcha"))
+    if 200 <= int(status) < 300 and not need_captcha:
+        return None
+    if not need_captcha and not captcha_message:
+        return None
+    return SignResult(
+        "failed",
+        f"签到接口要求完成人机验证（Cloudflare Turnstile，HTTP {status}）；"
+        "当前浏览器未通过验证，未确认签到成功",
+        challenge="captcha",
+    )
+
+
+def playwright_response_matches_path(expected_path: str, response: Any) -> bool:
+    """只比较响应 URL 路径，不读取响应正文。"""
+    try:
+        raw_url = response.url
+        url = raw_url() if callable(raw_url) else raw_url
+        actual_path = urllib.parse.urlsplit(str(url or "")).path.rstrip("/")
+        expected_path = str(expected_path or "").rstrip("/")
+        return bool(expected_path) and actual_path == expected_path
+    except Exception:
+        return False
+
+
+def playwright_captcha_response_result(expected_path: str,
+                                      response: Any) -> Optional[SignResult]:
+    """只从签到接口响应提取状态码和 JSON 判定字段，不保存响应正文。"""
+    if not playwright_response_matches_path(expected_path, response):
+        return None
+    try:
+        raw_status = response.status
+        status = int(raw_status() if callable(raw_status) else raw_status)
+        payload = response.json()
+    except Exception:
+        return None
+    return captcha_response_result(status, payload)
+
+
+_PLAYWRIGHT_CAPTCHA_TOKEN_STATE_JS = r"""
+(selector) => {
+  const node = selector ? document.querySelector(selector) : null;
+  const value = node ? String(node.value || node.textContent || "").trim() : "";
+  return {found: !!node, ready: value.length > 0};
+}
+"""
+
+
+def _wait_playwright_captcha_token(page: Any, selector: str, timeout_ms: int) -> bool:
+    """等待页面 JS 写入 Turnstile token；不读取或返回 token 内容。"""
+    if not selector:
+        return False
+    deadline = time.monotonic() + max(0, timeout_ms) / 1000
+    while True:
+        try:
+            state = page.evaluate(_PLAYWRIGHT_CAPTCHA_TOKEN_STATE_JS, selector)
+        except Exception:
+            state = None
+        if isinstance(state, Mapping) and state.get("ready"):
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        try:
+            page.wait_for_timeout(min(500, max(1, int(remaining * 1000))))
+        except Exception:
+            time.sleep(min(0.5, remaining))
+
+
+# 登录页和空闲锁定页都由站点前端自己处理：这里只负责识别、填密码、点提交，
+# 后续 SRP / token / 请求签名全部交给页面 JS，避免复制站点鉴权协议。
+_PLAYWRIGHT_AUTH_STATE_JS = """
+() => {
+  const visible = (node) => !!node && (node.offsetParent !== null || node.getClientRects().length > 0);
+  const loginUser = document.querySelector("input[name='username']");
+  const loginPassword = document.querySelector("input[name='password']");
+  const loginSubmit = document.querySelector("button.btn");
+  const locked = document.querySelector(".denied-page, #idle-lock-title");
+  const unlockPassword = document.querySelector("form.step-up input[name='password']");
+  const unlockSubmit = document.querySelector("form.step-up button[type='submit']");
+  const bodyText = (document.body && document.body.innerText) || "";
+  return {
+    login: visible(loginUser) && visible(loginPassword) && visible(loginSubmit),
+    locked: visible(locked) || bodyText.includes("页面已锁定")
+      || bodyText.includes("空闲过久，请验证是你本人"),
+    stepUp: visible(unlockPassword) && visible(unlockSubmit),
+  };
+}
+"""
 
 _CHALLENGE_PATTERN = re.compile(r"(just a moment|cf-chl|_cf_chl_opt|chl_page|"
                                 r"正在进行安全检测|安全检测能力由|雷池\s*WAF|SafeLine|"
@@ -1544,6 +1718,90 @@ def _wait_challenge_clear(page: Any, budget_ms: int) -> str:
         except Exception:
             _time.sleep(1.5)
     return html
+
+
+def _playwright_auth_state(page: Any) -> Dict[str, Any]:
+    """读取登录页 / 空闲锁定页状态；页面尚未就绪时返回空状态。"""
+    try:
+        value = page.evaluate(_PLAYWRIGHT_AUTH_STATE_JS)
+    except Exception:
+        value = None
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _wait_playwright_auth_state(page: Any, predicate: Any, timeout_ms: int) -> Dict[str, Any]:
+    """在同一个浏览器会话里等登录或解锁完成，不读取也不输出任何凭据。"""
+    import time as _time
+
+    deadline = _time.monotonic() + max(1, timeout_ms / 1000)
+    state = _playwright_auth_state(page)
+    while _time.monotonic() < deadline:
+        if predicate(state):
+            return state
+        try:
+            page.wait_for_timeout(500)
+        except Exception:
+            _time.sleep(0.5)
+        state = _playwright_auth_state(page)
+    return state
+
+
+def _prepare_browser_auth(page: Any, site: Mapping[str, Any],
+                          rule: Mapping[str, Any], timeout: int = 90) -> Tuple[SignResult, bool]:
+    """处理猪猪这类站点的浏览器内登录与空闲解锁。
+
+    返回 ``(结果, 是否发生登录/解锁)``。只把密码填进页面，不自行调用登录 API，
+    也不把密码拼进异常、日志或返回消息。没有密码时，只有页面确实要求登录/解锁才报错；
+    已有有效 Cookie 的站点仍可直接签到。
+    """
+    state = _playwright_auth_state(page)
+    changed = False
+    username = str(site.get("username") or site.get("user") or site.get("account") or "").strip()
+    password = str(site.get("password") or site.get("passwd") or site.get("pwd") or "")
+    wait_ms = min(max(int(timeout) * 1000, 15000), 45000)
+
+    if state.get("login"):
+        if not username or not password:
+            return SignResult(
+                "failed",
+                "站点要求登录，请在站点附加信息配置账号和当前密码以自动签到"), changed
+        try:
+            page.fill(str(rule.get("browser_login_username_selector")
+                          or "input[name='username']"), username)
+            page.fill(str(rule.get("browser_login_password_selector")
+                          or "input[name='password']"), password)
+            page.click(str(rule.get("browser_login_submit_selector") or "button.btn"),
+                       timeout=10000)
+        except Exception:
+            return SignResult("failed", "浏览器内自动登录失败，请检查登录页是否改版"), changed
+        changed = True
+        state = _wait_playwright_auth_state(
+            page, lambda value: not bool(value.get("login")), wait_ms)
+        if state.get("login"):
+            return SignResult(
+                "failed",
+                "浏览器内自动登录未完成，请检查账号密码或站点登录页是否改版"), changed
+
+    # 登录后页面可能立即进入空闲锁定页；也可能一开始就是锁定页。
+    state = _playwright_auth_state(page)
+    if state.get("locked") or state.get("stepUp"):
+        if not password:
+            return SignResult(
+                "failed",
+                "站点页面已锁定，请在站点附加信息配置当前密码以自动解锁"), changed
+        try:
+            page.fill(str(rule.get("browser_unlock_password_selector")
+                          or "form.step-up input[name='password']"), password)
+            page.click(str(rule.get("browser_unlock_submit_selector")
+                           or "form.step-up button[type='submit']"), timeout=10000)
+        except Exception:
+            return SignResult("failed", "页面解锁失败，请检查锁定页是否改版"), changed
+        changed = True
+        state = _wait_playwright_auth_state(
+            page, lambda value: not value.get("locked") and not value.get("stepUp"), wait_ms)
+        if state.get("locked") or state.get("stepUp"):
+            return SignResult("failed", "页面解锁未完成，请检查当前密码是否正确"), changed
+    return SignResult("success", ""), changed
 
 
 def _load_playwright_helper():
@@ -1627,6 +1885,12 @@ def playwright_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: i
     paths = playwright_paths(rule)
     selector = str(rule.get("submit_selector") or "")
     submit_text = str(rule.get("submit_text") or "")
+    state_selector = str(rule.get("playwright_state_selector") or "").strip()
+    already_texts = [str(item) for item in (rule.get("playwright_already_texts") or [])
+                     if str(item).strip()]
+    skip_texts = [str(item) for item in (rule.get("playwright_skip_texts") or [])
+                  if str(item).strip()]
+    excluded_texts = list(dict.fromkeys(skip_texts + already_texts))
     wait_ms = int(rule.get("wait") or 4000)
 
     # CF / 雷池 都靠页面自己的 JS 跑完才放行：勾选式还要点一下 iframe 里的勾选框。
@@ -1639,6 +1903,38 @@ def playwright_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: i
     wait_ms = max(wait_ms, 4000)
 
     cookie_mode = str(rule.get("cookie_mode") or "header").lower()
+    browser_auth_mode = str(rule.get("browser_auth_mode") or "").strip().lower()
+    captcha_response_path = str(rule.get("captcha_response_path") or "").strip()
+    captcha_token_selector = str(
+        rule.get("playwright_captcha_token_selector") or "").strip()
+    try:
+        captcha_wait_ms = int(rule.get("playwright_captcha_wait") or 30000)
+    except (TypeError, ValueError):
+        captcha_wait_ms = 30000
+
+    def control_state(page: Any) -> Dict[str, Any]:
+        if not state_selector:
+            return {}
+        try:
+            value = page.evaluate(_PLAYWRIGHT_CONTROL_STATE_JS,
+                                  [state_selector, already_texts, skip_texts])
+        except Exception:
+            value = None
+        return dict(value) if isinstance(value, Mapping) else {}
+
+    def control_result(state: Mapping[str, Any], clicked: bool) -> Optional[SignResult]:
+        return playwright_control_result(state, clicked, submit_text)
+
+    def judge_browser_page(html: str) -> SignResult:
+        """有当天控件规则时，只信控件状态或明确的成功提示，不信整页「已签到」。"""
+        if not state_selector:
+            return classify(html, rule)
+        text = page_text(html)
+        lower = text.lower()
+        if any(str(word).lower() in lower
+               for word in (rule.get("success_keywords") or []) if str(word).strip()):
+            return SignResult("success", _bonus_message("签到成功", text, rule))
+        return SignResult("failed", "未识别到当天签到控件的完成状态；" + page_hint(html))
 
     def callback(page: Any) -> Dict[str, Any]:
         # 有的站点（猪猪）必须把 Cookie 写进浏览器存储：验证过程中新下发的
@@ -1668,9 +1964,30 @@ def playwright_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: i
             except Exception:
                 pass
             before = _wait_challenge_clear(page, challenge_budget)
+
+            # 猪猪的鉴权在页面 JS + localStorage 中完成。先在同一页面完成登录/解锁，
+            # 再重新打开签到页；不自行请求 /v1 API，避免缺少前端签名头而得到 401。
+            if browser_auth_mode:
+                auth_result, auth_changed = _prepare_browser_auth(
+                    page, site, rule, timeout=timeout)
+                if auth_result.status != "success":
+                    try:
+                        after = page.content() or before
+                    except Exception:
+                        after = before
+                    return {"before": before, "after": after, "clicked": False,
+                            "path": path, "stuck": "browser_auth",
+                            "message": auth_result.message, "tried": tried, "paths": paths}
+                if auth_changed:
+                    try:
+                        page.goto(url, wait_until="domcontentloaded",
+                                  timeout=max(15000, int(timeout * 1000)))
+                        page.wait_for_load_state("domcontentloaded")
+                    except Exception:
+                        pass
+                    before = _wait_challenge_clear(page, challenge_budget)
             clicked = False
             stuck = ""
-            judged_before = classify(before, rule)
             if before and _page_has_challenge(before):
                 # 还停在雷池 / Cloudflare 检测页：这时候页面上根本没有签到按钮，
                 # 直接去点只会得到「没找到按钮」的误导性结论。
@@ -1678,38 +1995,139 @@ def playwright_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: i
                 last = {"before": before, "after": before, "clicked": False,
                         "path": path, "stuck": stuck}
                 continue
+
+            state_before = control_state(page)
+            state_before_result = control_result(state_before, False)
+            if state_before_result is not None:
+                after = before
+                try:
+                    after = page.content() or before
+                except Exception:
+                    pass
+                last = {"before": before, "after": after, "clicked": False,
+                        "path": path, "stuck": "control_state",
+                        "state": state_before, "result": state_before_result}
+                if state_before_result.status in {"success", "already"}:
+                    break
+                if state_before_result.message:
+                    return last
+
+            judged_before = (judge_browser_page(before)
+                             if not state_before_result or not state_before.get("found")
+                             else SignResult("failed", ""))
             if judged_before.status == "failed" and "二级验证" in str(judged_before.message or ""):
                 # 异地登录验证页：需要人工/2FA，点按钮没用
                 return {"before": before, "after": before, "clicked": False,
                         "path": path, "stuck": "second_factor",
                         "message": judged_before.message}
+            loop_state: Dict[str, Any] = {}
+            loop_result: Optional[SignResult] = None
+            last_captcha_failure: Optional[SignResult] = None
             if judged_before.status not in {"success", "already"}:
                 after = before
-                # 最多点两轮：猪猪首页点「[签到已得…]」只是跳到 attendance.php，
-                # 真正提交要在签到页再点一次（tmzg 的实现同样只点一次，所以这里更稳一点）。
+                # 某些站点点击后先跳转再出按钮，保留两轮点击机会；排除文本确保
+                # 「已签到 / 补签」永远不会被当成可点的「签到」。猪猪若首次返回 422
+                # 人机验证，只有页面自己写入 Turnstile token 后才允许再点一次。
                 for _attempt in range(2):
                     try:
-                        marked = bool(page.evaluate(_MARK_CLICK_JS, [selector, submit_text]))
+                        marked = bool(page.evaluate(
+                            _MARK_CLICK_JS, [selector, submit_text, excluded_texts]))
                     except Exception:
                         marked = False
                     if not marked:
                         break
-                    try:
-                        page.click(_CLICK_MARKED_SELECTOR, timeout=10000)
-                        clicked = True
-                    except Exception:
-                        # 真实点击失败（遮罩/动画挡住）时退回 JS 点击
+
+                    captcha_failures: List[SignResult] = []
+                    response_listener: Any = None
+
+                    def observe_captcha_response(response: Any) -> None:
+                        result = playwright_captcha_response_result(
+                            captcha_response_path, response)
+                        if result is not None:
+                            captcha_failures.append(result)
+
+                    if captcha_response_path:
                         try:
-                            clicked = bool(page.evaluate(_PAGE_CLICK_JS, [selector, submit_text]))
+                            on_response = getattr(page, "on", None)
+                            if callable(on_response):
+                                on_response("response", observe_captcha_response)
+                                response_listener = observe_captcha_response
                         except Exception:
-                            clicked = False
+                            response_listener = None
                     try:
-                        page.wait_for_timeout(max(1000, wait_ms))
-                    except Exception:
-                        pass
+                        try:
+                            page.click(_CLICK_MARKED_SELECTOR, timeout=10000)
+                            clicked = True
+                        except Exception:
+                            # 真实点击失败（遮罩/动画挡住）时退回 JS 点击
+                            try:
+                                clicked = bool(page.evaluate(
+                                    _PAGE_CLICK_JS, [selector, submit_text, excluded_texts]))
+                            except Exception:
+                                clicked = False
+                        try:
+                            page.wait_for_timeout(max(1000, wait_ms))
+                        except Exception:
+                            pass
+                    finally:
+                        if response_listener is not None:
+                            for method_name in ("remove_listener", "off"):
+                                remover = getattr(page, method_name, None)
+                                if not callable(remover):
+                                    continue
+                                try:
+                                    remover("response", response_listener)
+                                    break
+                                except Exception:
+                                    continue
+
+                    captcha_failure = captcha_failures[0] if captcha_failures else None
+                    if captcha_failure is not None:
+                        last_captcha_failure = captcha_failure
+                        token_ready = False
+                        if _attempt == 0:
+                            token_ready = _wait_playwright_captcha_token(
+                                page, captcha_token_selector, captcha_wait_ms)
+                        if token_ready:
+                            # 验证 token 已由页面 JS 生成：仅重试这一次。
+                            continue
+                        message = captcha_failure.message
+                        if _attempt > 0:
+                            message += "；页面已生成验证 token，仅重试一次后仍未确认签到成功"
+                        return {"before": before, "after": after, "clicked": clicked,
+                                "path": path, "stuck": "captcha", "result": captcha_failure,
+                                "message": message, "tried": tried, "paths": paths}
+
                     # 点完签到可能被踢到雷池 / Cloudflare 检测页，再等一次放行
                     after = _wait_challenge_clear(page, challenge_budget)
-                    if classify(after, rule).status in {"success", "already"}:
+                    if browser_auth_mode:
+                        auth_result, auth_changed = _prepare_browser_auth(
+                            page, site, rule, timeout=timeout)
+                        if auth_result.status != "success":
+                            return {"before": before, "after": after, "clicked": clicked,
+                                    "path": path, "stuck": "browser_auth",
+                                    "message": auth_result.message, "tried": tried,
+                                    "paths": paths}
+                        if auth_changed:
+                            try:
+                                page.goto(url, wait_until="domcontentloaded",
+                                          timeout=max(15000, int(timeout * 1000)))
+                                page.wait_for_load_state("domcontentloaded")
+                            except Exception:
+                                pass
+                            after = _wait_challenge_clear(page, challenge_budget)
+                    state_after = control_state(page)
+                    state_after_result = control_result(state_after, clicked)
+                    if state_after_result is not None:
+                        loop_state = state_after
+                        loop_result = state_after_result
+                        if state_after_result.status in {"success", "already"}:
+                            break
+                        # 人机验证后的第二次提交已是最后一次；控件仍不可用时
+                        # 不再触发第三次请求。
+                        if last_captcha_failure is not None:
+                            break
+                    if not state_selector and classify(after, rule).status in {"success", "already"}:
                         break
                     if after and _page_has_challenge(after):
                         stuck = "challenge"
@@ -1721,7 +2139,24 @@ def playwright_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: i
                 except Exception:
                     pass
             last = {"before": before, "after": after, "clicked": clicked, "path": path}
-            if clicked or classify(after, rule).status in {"success", "already"}:
+            if loop_state:
+                last["state"] = loop_state
+            if loop_result is not None:
+                last["result"] = loop_result
+            if (last_captcha_failure is not None
+                    and (loop_result is None
+                         or loop_result.status not in {"success", "already"})):
+                last["result"] = SignResult(
+                    "failed",
+                    f"{last_captcha_failure.message}；页面已生成验证 token，"
+                    "仅重试一次后仍未确认签到成功",
+                    challenge="captcha")
+                last["stuck"] = "captcha"
+            if "result" not in last:
+                judged_after = judge_browser_page(after)
+                if judged_after.status in {"success", "already"}:
+                    last["result"] = judged_after
+            if clicked or (last.get("result") and last["result"].status in {"success", "already"}):
                 break
             # 这一页既没点成也不像已签到：换下一个备用页面
         last["tried"] = tried
@@ -1741,11 +2176,17 @@ def playwright_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: i
         return SignResult("failed", "本地浏览器没拿到页面（检查 MoviePilot 的浏览器依赖）")
 
     after = str(outcome.get("after") or "")
-    judged = classify(after, rule)
+    judged = outcome.get("result")
+    if not isinstance(judged, SignResult):
+        judged = judge_browser_page(after)
     if judged.status in {"success", "already"}:
         prefix = "" if outcome.get("clicked") else "（页面已是签到完成状态）"
         return SignResult(judged.status, f"{judged.message}{prefix}")
     if not outcome.get("clicked"):
+        if outcome.get("stuck") in {"browser_auth", "control_state"}:
+            return SignResult("failed", str(outcome.get("message")
+                                            or judged.message
+                                            or "浏览器内登录或页面解锁未完成"))
         if outcome.get("stuck") == "second_factor":
             return SignResult("failed", str(outcome.get("message")
                                             or "站点要求二级验证（异地登录验证）"))
@@ -1757,6 +2198,11 @@ def playwright_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: i
         return SignResult("failed",
                           f"本地浏览器没找到可点的签到按钮（已试：{tried or '默认页面'}；"
                           f"可在这条规则的 retry_paths 里补页面）")
+    if outcome.get("stuck") == "captcha":
+        return SignResult("failed", str(outcome.get("message") or judged.message),
+                          challenge="captcha")
+    if outcome.get("stuck") == "control_state":
+        return SignResult("failed", str(outcome.get("message") or judged.message))
     return judged
 
 
@@ -3792,6 +4238,270 @@ def _browserless_error_message(operation: str, exc: BaseException, elapsed: floa
     return f"Browserless 请求失败（{step}，已等待 {elapsed:.0f} 秒）：{exc}"
 
 
+def _piggo_value(data: Mapping[str, Any], key: str) -> Dict[str, Any]:
+    """读取 Piggo BrowserQL 的 evaluate 返回值；解析失败时返回空字典。"""
+    item = data.get(key) if isinstance(data, Mapping) else None
+    value = item.get("value") if isinstance(item, Mapping) else item
+    if isinstance(value, Mapping):
+        return dict(value)
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError):
+            return {}
+        return dict(parsed) if isinstance(parsed, Mapping) else {}
+    return {}
+
+
+def _piggo_state_script(rule: Mapping[str, Any]) -> str:
+    selector = json.dumps(str(rule.get("playwright_state_selector") or ".cal-att-pill"))
+    already = json.dumps([str(item) for item in (rule.get("playwright_already_texts") or [])
+                          if str(item).strip()], ensure_ascii=False)
+    skip = json.dumps([str(item) for item in (rule.get("playwright_skip_texts") or [])
+                       if str(item).strip()], ensure_ascii=False)
+    return """(() => {
+      const node = document.querySelector(%s);
+      const visible = (el) => !!el && (el.offsetParent !== null || el.getClientRects().length > 0);
+      const label = node ? ((node.innerText || node.textContent || node.value || '') + ' '
+        + (node.getAttribute('aria-label') || '') + ' ' + (node.getAttribute('title') || ''))
+        .replace(/\\s+/g, ' ').trim() : '';
+      const alreadyTexts = %s;
+      const skipTexts = %s;
+      const disabled = !!node && (!!node.disabled || node.getAttribute('aria-disabled') === 'true');
+      const already = alreadyTexts.some((word) => label.includes(word));
+      const skipped = skipTexts.some((word) => label.includes(word));
+      const actionable = !!node && visible(node) && !disabled && !already && !skipped
+        && label.startsWith('签到');
+      const loginUser = document.querySelector("input[name='username']");
+      const loginPassword = document.querySelector("input[name='password']");
+      const loginSubmit = document.querySelector('button.btn');
+      const unlockPassword = document.querySelector("form.step-up input[name='password']");
+      const unlockSubmit = document.querySelector("form.step-up button[type='submit']");
+      const bodyText = (document.body && document.body.innerText) || '';
+      return JSON.stringify({
+        url: location.href,
+        title: document.title || '',
+        login: visible(loginUser) && visible(loginPassword) && visible(loginSubmit),
+        locked: visible(document.querySelector('.denied-page, #idle-lock-title'))
+          || bodyText.includes('页面已锁定') || bodyText.includes('空闲过久，请验证是你本人'),
+        stepUp: visible(unlockPassword) && visible(unlockSubmit),
+        control: {found: !!node, present: visible(node), disabled: disabled,
+                  text: label, already: already, skip: skipped, actionable: actionable},
+      });
+    })()""" % (selector, already, skip)
+
+
+def _piggo_login_script(rule: Mapping[str, Any], username: str, password: str) -> str:
+    if not str(username or "").strip() or not str(password or ""):
+        return "(() => JSON.stringify({submitted:false,reason:'credentials-missing'}))()"
+    user_selector = json.dumps(str(rule.get("browser_login_username_selector")
+                                   or "input[name='username']"))
+    password_selector = json.dumps(str(rule.get("browser_login_password_selector")
+                                        or "input[name='password']"))
+    submit_selector = json.dumps(str(rule.get("browser_login_submit_selector") or "button.btn"))
+    return """(() => {
+      const user = document.querySelector(%s);
+      const password = document.querySelector(%s);
+      const submit = document.querySelector(%s);
+      const visible = (el) => !!el && (el.offsetParent !== null || el.getClientRects().length > 0);
+      if (!visible(user) || !visible(password) || !visible(submit)) {
+        return JSON.stringify({submitted: false, reason: 'not-login'});
+      }
+      const setValue = (el, value) => {
+        const proto = el instanceof HTMLTextAreaElement
+          ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+        const setter = Object.getOwnPropertyDescriptor(proto, 'value');
+        if (setter && setter.set) setter.set.call(el, value); else el.value = value;
+        el.dispatchEvent(new Event('input', {bubbles: true}));
+        el.dispatchEvent(new Event('change', {bubbles: true}));
+      };
+      setValue(user, %s);
+      setValue(password, %s);
+      submit.click();
+      return JSON.stringify({submitted: true, reason: 'submitted'});
+    })()""" % (user_selector, password_selector, submit_selector,
+              json.dumps(username, ensure_ascii=False), json.dumps(password, ensure_ascii=False))
+
+
+def _piggo_unlock_script(rule: Mapping[str, Any], password: str) -> str:
+    if not str(password or ""):
+        return "(() => JSON.stringify({submitted:false,reason:'credentials-missing'}))()"
+    password_selector = json.dumps(str(rule.get("browser_unlock_password_selector")
+                                        or "form.step-up input[name='password']"))
+    submit_selector = json.dumps(str(rule.get("browser_unlock_submit_selector")
+                                     or "form.step-up button[type='submit']"))
+    return """(() => {
+      const password = document.querySelector(%s);
+      const submit = document.querySelector(%s);
+      const visible = (el) => !!el && (el.offsetParent !== null || el.getClientRects().length > 0);
+      if (!visible(password) || !visible(submit)) {
+        return JSON.stringify({submitted: false, reason: 'not-locked'});
+      }
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+      if (setter && setter.set) setter.set.call(password, %s); else password.value = %s;
+      password.dispatchEvent(new Event('input', {bubbles: true}));
+      password.dispatchEvent(new Event('change', {bubbles: true}));
+      submit.click();
+      return JSON.stringify({submitted: true, reason: 'submitted'});
+    })()""" % (password_selector, submit_selector,
+              json.dumps(password, ensure_ascii=False), json.dumps(password, ensure_ascii=False))
+
+
+def _piggo_click_script(rule: Mapping[str, Any]) -> str:
+    selector = json.dumps(str(rule.get("playwright_state_selector") or ".cal-att-pill"))
+    already = json.dumps([str(item) for item in (rule.get("playwright_already_texts") or [])
+                          if str(item).strip()], ensure_ascii=False)
+    skip = json.dumps([str(item) for item in (rule.get("playwright_skip_texts") or [])
+                       if str(item).strip()], ensure_ascii=False)
+    return """(() => {
+      const node = document.querySelector(%s);
+      const visible = (el) => !!el && (el.offsetParent !== null || el.getClientRects().length > 0);
+      const label = node ? ((node.innerText || node.textContent || node.value || '') + ' '
+        + (node.getAttribute('aria-label') || '') + ' ' + (node.getAttribute('title') || ''))
+        .replace(/\\s+/g, ' ').trim() : '';
+      const disabled = !!node && (!!node.disabled || node.getAttribute('aria-disabled') === 'true');
+      const already = %s.some((word) => label.includes(word));
+      const skipped = %s.some((word) => label.includes(word));
+      if (!node || !visible(node) || disabled || already || skipped || !label.startsWith('签到')) {
+        return JSON.stringify({clicked: false, text: label,
+          reason: already ? 'already' : skipped ? 'skip' : 'not-actionable'});
+      }
+      node.setAttribute('data-piggo-signin-target', '1');
+      node.scrollIntoView({block: 'center'});
+      node.click();
+      return JSON.stringify({clicked: true, text: label, reason: 'clicked'});
+    })()""" % (selector, already, skip)
+
+
+def _piggo_inject_script(rule: Mapping[str, Any], token: str) -> str:
+    selector = json.dumps(str(rule.get("playwright_state_selector") or ".cal-att-pill"))
+    already = json.dumps([str(item) for item in (rule.get("playwright_already_texts") or [])
+                          if str(item).strip()], ensure_ascii=False)
+    skip = json.dumps([str(item) for item in (rule.get("playwright_skip_texts") or [])
+                       if str(item).strip()], ensure_ascii=False)
+    return """(() => {
+      const token = %s;
+      const root = document;
+      const inputs = Array.from(root.querySelectorAll("input[name='cf-turnstile-response']"));
+      const callbacks = [];
+      const addCallback = (name) => { name = (name || '').trim();
+        if (name && callbacks.indexOf(name) < 0) callbacks.push(name); };
+      root.querySelectorAll('[data-callback]').forEach((node) =>
+        addCallback(node.getAttribute('data-callback')));
+      ['cfCallback', 'turnstileCallback', 'onTurnstileSuccess', 'onTurnstileVerify',
+       'onVerify', 'verifyCallback', 'onCaptchaSuccess', 'captchaCallback'].forEach(addCallback);
+      inputs.forEach((input) => {
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+        if (setter && setter.set) setter.set.call(input, token); else input.value = token;
+        input.dispatchEvent(new Event('input', {bubbles: true}));
+        input.dispatchEvent(new Event('change', {bubbles: true}));
+      });
+      let callbackCalled = '';
+      for (const name of callbacks) {
+        if (typeof window[name] !== 'function') continue;
+        try { window[name](token); callbackCalled = name; break; } catch (err) {}
+      }
+      try {
+        if (window.turnstile && typeof window.turnstile.getResponse === 'function') {
+          window.turnstile.getResponse = () => token;
+        }
+      } catch (err) {}
+      const node = document.querySelector(%s);
+      const visible = (el) => !!el && (el.offsetParent !== null || el.getClientRects().length > 0);
+      const label = node ? ((node.innerText || node.textContent || node.value || '') + ' '
+        + (node.getAttribute('aria-label') || '') + ' ' + (node.getAttribute('title') || ''))
+        .replace(/\\s+/g, ' ').trim() : '';
+      const disabled = !!node && (!!node.disabled || node.getAttribute('aria-disabled') === 'true');
+      const alreadyDone = %s.some((word) => label.includes(word));
+      const skipped = %s.some((word) => label.includes(word));
+      const actionable = !!node && visible(node) && !disabled && !alreadyDone && !skipped
+        && label.startsWith('签到');
+      if (actionable) {
+        node.setAttribute('data-piggo-signin-target', '1');
+        node.scrollIntoView({block: 'center'});
+        node.click();
+      }
+      return JSON.stringify({injected: inputs.length > 0, inputs: inputs.length,
+        callback: callbackCalled, clicked: actionable, text: label,
+        reason: actionable ? 'clicked' : alreadyDone ? 'already' : skipped ? 'skip' : 'not-actionable'});
+    })()""" % (json.dumps(token), selector, already, skip)
+
+
+def build_piggo_prepare_query(user_agent: Optional[str] = None) -> str:
+    set_user_agent = "userAgent(userAgent:$userAgent){time}" if user_agent else ""
+    user_agent_variable = " $userAgent:String!" if user_agent else ""
+    return """mutation PiggoPrepare($cookies:[CookieInput!]! $loginUrl:String! $calendarUrl:String! $waitLogin:Float! $authWait:Float! $loginScript:String! $unlockScript:String! $stateScript:String! $reconnectTimeout:Float!%s) {
+      %s
+      cookies(cookies:$cookies){cookies{name}}
+      loginPage:goto(url:$loginUrl,waitUntil:domContentLoaded){status}
+      waitLogin:waitForTimeout(time:$waitLogin){time}
+      login:evaluate(content:$loginScript){value}
+      waitAuth:waitForTimeout(time:$authWait){time}
+      calendar:goto(url:$calendarUrl,waitUntil:domContentLoaded){status}
+      waitCalendar:waitForTimeout(time:2000){time}
+      unlock:evaluate(content:$unlockScript){value}
+      waitUnlock:waitForTimeout(time:$authWait){time}
+      state:evaluate(content:$stateScript){value}
+      html:html{html}
+      session:reconnect(timeout:$reconnectTimeout){browserQLEndpoint}
+    }""" % (user_agent_variable, set_user_agent)
+
+
+def build_piggo_solve_query(user_agent: Optional[str] = None) -> str:
+    set_user_agent = "userAgent(userAgent:$userAgent){time}" if user_agent else ""
+    user_agent_variable = " $userAgent:String!" if user_agent else ""
+    return """mutation PiggoSolve($calendarUrl:String! $beforeWait:Float! $clickWait:Float! $stateScript:String! $clickScript:String! $solveTimeout:Float! $reconnectTimeout:Float!%s) {
+      %s
+      calendar:goto(url:$calendarUrl,waitUntil:domContentLoaded){status}
+      waitBefore:waitForTimeout(time:$beforeWait){time}
+      stateBefore:evaluate(content:$stateScript){value}
+      click:evaluate(content:$clickScript){value}
+      waitAfterClick:waitForTimeout(time:$clickWait){time}
+      solve:solve(timeout:$solveTimeout){found solved time token}
+      waitAfterSolve:waitForTimeout(time:2000){time}
+      stateAfter:evaluate(content:$stateScript){value}
+      html:html{html}
+      session:reconnect(timeout:$reconnectTimeout){browserQLEndpoint}
+    }""" % (user_agent_variable, set_user_agent)
+
+
+def build_piggo_submit_query(user_agent: Optional[str] = None) -> str:
+    set_user_agent = "userAgent(userAgent:$userAgent){time}" if user_agent else ""
+    user_agent_variable = " $userAgent:String!" if user_agent else ""
+    return """mutation PiggoSubmit($calendarUrl:String! $beforeWait:Float! $stateScript:String! $injectScript:String! $waitAfter:Float!%s) {
+      %s
+      calendar:goto(url:$calendarUrl,waitUntil:domContentLoaded){status}
+      waitBefore:waitForTimeout(time:$beforeWait){time}
+      stateBefore:evaluate(content:$stateScript){value}
+      inject:evaluate(content:$injectScript){value}
+      waitAfter:waitForTimeout(time:$waitAfter){time}
+      stateAfter:evaluate(content:$stateScript){value}
+      html:html{html}
+    }""" % (user_agent_variable, set_user_agent)
+
+
+def _piggo_step_hint(data: Mapping[str, Any]) -> str:
+    """把 BrowserQL 失败步骤翻成固定提示，不转发可能含脚本变量的原始错误。"""
+    labels: List[str] = []
+    aliases = {
+        "loginpage": "打开登录页失败",
+        "login": "登录操作失败",
+        "calendar": "打开签到页失败",
+        "unlock": "空闲解锁失败",
+        "click": "点击签到按钮失败",
+        "solve": "Turnstile 求解失败",
+        "inject": "Turnstile token 注入失败",
+    }
+    for item in data.get("_errors") or []:
+        if not isinstance(item, Mapping):
+            continue
+        path = str(item.get("path") or "").strip().lower()
+        label = next((value for key, value in aliases.items() if key in path), "")
+        if label and label not in labels:
+            labels.append(label)
+    return "；".join(labels)
+
+
 class BrowserlessSigner:
     """通过 Browserless BrowserQL 执行一次签到。"""
 
@@ -3884,7 +4594,227 @@ class BrowserlessSigner:
                 "未能确认为已签到")
         return data
 
+    def _sign_piggo(self, site: Mapping[str, Any], rule: Mapping[str, Any]) -> SignResult:
+        """猪猪专用 Browserless 流程：登录/解锁 -> 点击并 solve -> 注入 token 重试一次。"""
+        base_url = str(site.get("url") or "").rstrip("/")
+        parsed = urllib.parse.urlsplit(base_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            return SignResult("failed", "猪猪站点地址无效")
+
+        account = account_from_site(site)
+        username = str(account.get("username") or "").strip()
+        password = str(account.get("password") or "")
+        cookie = str(site.get("cookie") or "").strip()
+        if not cookie and not account_ready(account):
+            return SignResult("failed", "猪猪签到需要账号密码或 Cookie（Browserless 流程两者均未提供）")
+
+        calendar_url = target_url(base_url, str(rule.get("path") or "/calendar"))
+        cookies = cookie_objects(cookie, calendar_url) if cookie else []
+        if cookie and not cookies:
+            return SignResult("failed", "站点 Cookie 格式无效")
+        user_agent = str(site.get("ua") or "").strip()
+        state_script = _piggo_state_script(rule)
+        login_url = target_url(base_url, str(rule.get("browser_login_url")
+                                           or "/login?redirect=/calendar"))
+        auth_wait = max(1000, min(int(rule.get("browserless_auth_wait") or 12000), 60000))
+        click_wait = max(1000, min(int(rule.get("browserless_click_wait") or 8000), 30000))
+        reconnect_wait = reconnect_wait_ms(rule)
+
+        prepare_variables: Dict[str, Any] = {
+            "cookies": cookies,
+            "loginUrl": login_url,
+            "calendarUrl": calendar_url,
+            "waitLogin": 2000,
+            "authWait": auth_wait,
+            "loginScript": _piggo_login_script(rule, username, password),
+            "unlockScript": _piggo_unlock_script(rule, password),
+            "stateScript": state_script,
+            "reconnectTimeout": reconnect_wait,
+        }
+        if user_agent:
+            prepare_variables["userAgent"] = user_agent
+        prepared = self._request(
+            prepare_variables, "PiggoPrepare", build_piggo_prepare_query(user_agent),
+            timeout=self.request_timeout(rule),
+        )
+        if isinstance(prepared, SignResult):
+            return prepared
+
+        login_state = _piggo_value(prepared, "login")
+        unlock_state = _piggo_value(prepared, "unlock")
+        state = _piggo_value(prepared, "state")
+        control = state.get("control") if isinstance(state.get("control"), Mapping) else {}
+        prepared_html = str((prepared.get("html") or {}).get("html") or "")
+
+        if state.get("login") or (not control and login_page(prepared_html)):
+            if not account_ready(account):
+                return SignResult(
+                    "failed",
+                    "Browserless 中的 Cookie 已失效，登录页要求账号密码；"
+                    "请补充站点账号密码后重试",
+                )
+            if login_state.get("submitted"):
+                return SignResult(
+                    "failed",
+                    "Browserless 自动登录失败：提交账号密码后仍停留在登录页；"
+                    "请检查账号密码或 Browserless 节点是否被人机验证拦截",
+                )
+            return SignResult("failed", "Browserless 未能在登录页提交账号密码")
+        if state.get("stepUp") or state.get("locked"):
+            if not password:
+                return SignResult("failed", "签到页处于空闲锁定状态，但未配置当前密码，无法解锁")
+            if unlock_state.get("submitted"):
+                return SignResult(
+                    "failed",
+                    "Browserless 空闲解锁失败：提交密码后页面仍处于锁定状态，请检查密码是否正确",
+                )
+            return SignResult("failed", "Browserless 检测到空闲锁定页，但未找到可提交的解锁表单")
+        if not state:
+            hint = _piggo_step_hint(prepared)
+            return SignResult("failed", "Browserless 打开猪猪签到页失败" +
+                              (f"（{hint}）" if hint else ""))
+        if control.get("already"):
+            return SignResult("already", "Browserless 确认今日已签到")
+        if control.get("skip"):
+            return SignResult("failed", "当天签到控件显示「补签」状态，未执行签到")
+        if not control.get("present"):
+            hint = _piggo_step_hint(prepared)
+            return SignResult("failed", "未找到当天签到控件，无法确认签到状态" +
+                              (f"（{hint}）" if hint else ""))
+        if control.get("disabled"):
+            return SignResult("failed", "当天签到控件当前不可用")
+        if not control.get("actionable"):
+            text = str(control.get("text") or "无文字")[:60]
+            return SignResult("failed", f"当天签到控件状态未识别（{text}）")
+
+        session = prepared.get("session") if isinstance(prepared.get("session"), Mapping) else {}
+        endpoint = session_endpoint(str(session.get("browserQLEndpoint") or ""), self.token)
+        if not endpoint:
+            return SignResult(
+                "failed",
+                "Browserless 未返回可复用的会话地址，无法在 solve 后注入 token；未执行点击",
+            )
+
+        solve_variables: Dict[str, Any] = {
+            "calendarUrl": calendar_url,
+            "beforeWait": navigation_wait_ms(rule),
+            "clickWait": click_wait,
+            "stateScript": state_script,
+            "clickScript": _piggo_click_script(rule),
+            "solveTimeout": solve_timeout_ms(rule),
+            "reconnectTimeout": reconnect_wait,
+        }
+        if user_agent:
+            solve_variables["userAgent"] = user_agent
+        solved = self._request(
+            solve_variables, "PiggoSolve", build_piggo_solve_query(user_agent),
+            timeout=self.request_timeout(rule), endpoint=endpoint,
+        )
+        if isinstance(solved, SignResult):
+            if solved.transient:
+                return SignResult(
+                    "failed",
+                    f"{solved.message}；猪猪点击后的响应丢失，未再次点击，未能确认签到结果",
+                    transient=True,
+                )
+            return solved
+
+        before = _piggo_value(solved, "stateBefore")
+        before_control = before.get("control") if isinstance(before.get("control"), Mapping) else {}
+        if before.get("login"):
+            return SignResult("failed", "Browserless 会话登录状态已失效，请重新登录后重试")
+        if before.get("stepUp") or before.get("locked"):
+            return SignResult("failed", "Browserless 会话再次被空闲锁定，未执行签到点击")
+        if before_control.get("already"):
+            return SignResult("already", "Browserless 确认今日已签到")
+        if before_control.get("skip"):
+            return SignResult("failed", "当天签到控件显示「补签」状态，未执行签到")
+        if not before_control.get("actionable"):
+            hint = _piggo_step_hint(solved)
+            return SignResult("failed", "重新打开签到页后，当天签到控件不可用" +
+                              (f"（{hint}）" if hint else ""))
+
+        click_state = _piggo_value(solved, "click")
+        after = _piggo_value(solved, "stateAfter")
+        after_control = after.get("control") if isinstance(after.get("control"), Mapping) else {}
+        if after_control.get("already"):
+            return SignResult("success", "Browserless 点击签到后已确认今日签到成功")
+        if not click_state.get("clicked"):
+            return SignResult("failed", "点击时签到控件状态发生变化，未提交签到请求")
+
+        solve = solved.get("solve") if isinstance(solved.get("solve"), Mapping) else {}
+        token = str(solve.get("token") or "").strip()
+        if not token:
+            hint = _piggo_step_hint(solved)
+            return SignResult(
+                "failed",
+                "点击签到后未取得 Turnstile token，未进行第二次提交；"
+                "请检查 Browserless 节点的 solve 能力或稍后重试" +
+                (f"（{hint}）" if hint else ""),
+                challenge="captcha",
+            )
+
+        solve_session = solved.get("session") if isinstance(solved.get("session"), Mapping) else {}
+        submit_endpoint = session_endpoint(
+            str(solve_session.get("browserQLEndpoint") or session.get("browserQLEndpoint") or ""),
+            self.token,
+        )
+        if not submit_endpoint:
+            return SignResult("failed", "Browserless solve 后未返回可复用会话，未执行 token 重试")
+
+        submit_variables: Dict[str, Any] = {
+            "calendarUrl": calendar_url,
+            "beforeWait": navigation_wait_ms(rule),
+            "stateScript": state_script,
+            "injectScript": _piggo_inject_script(rule, token),
+            "waitAfter": click_wait,
+        }
+        if user_agent:
+            submit_variables["userAgent"] = user_agent
+        submitted = self._request(
+            submit_variables, "PiggoSubmit", build_piggo_submit_query(user_agent),
+            timeout=self.request_timeout(rule), endpoint=submit_endpoint,
+        )
+        if isinstance(submitted, SignResult):
+            if submitted.transient:
+                return SignResult(
+                    "failed",
+                    f"{submitted.message}；token 重试响应丢失，未再次点击，未能确认签到结果",
+                    transient=True,
+                )
+            return submitted
+
+        inject_state = _piggo_value(submitted, "inject")
+        final = _piggo_value(submitted, "stateAfter")
+        final_control = final.get("control") if isinstance(final.get("control"), Mapping) else {}
+        if final_control.get("already"):
+            return SignResult("success", "Browserless 注入 Turnstile token 后签到成功")
+        if final.get("login"):
+            return SignResult("failed", "token 重试阶段登录状态失效，未确认签到成功")
+        if final.get("stepUp") or final.get("locked"):
+            return SignResult("failed", "token 重试阶段页面被空闲锁定，未确认签到成功")
+        if not inject_state.get("injected"):
+            return SignResult("failed", "已取得 Turnstile token，但未能写入签到页，未再次点击",
+                              challenge="captcha")
+        if not inject_state.get("clicked"):
+            return SignResult("failed", "Turnstile token 已注入，但签到按钮不可用，未再次点击",
+                              challenge="captcha")
+        hint = _piggo_step_hint(submitted)
+        return SignResult(
+            "failed",
+            "已使用 Turnstile token 重试一次，但当天签到控件仍未显示已签到" +
+            (f"（{hint}）" if hint else ""),
+            challenge="captcha",
+        )
+
     def sign(self, site: Mapping[str, Any], rule: Mapping[str, Any]) -> SignResult:
+        fallback_mode = str(rule.get("browserless_fallback_mode") or "").strip().lower()
+        if fallback_mode == "piggo":
+            try:
+                return self._sign_piggo(site, rule)
+            except Exception:
+                # 登录脚本变量里可能有账号密码，绝不能把底层异常原样写进结果或日志。
+                return SignResult("failed", "Browserless 猪猪签到执行出现未预期错误（异常详情已隐藏）")
         base_url = str(site.get("url") or "").rstrip("/")
         cookie = str(site.get("cookie") or "").strip()
         if not base_url or not cookie:

@@ -11,10 +11,10 @@ MoviePilot 的 PT 站点自动签到插件，支持 V2 / V3。
 ## 主要功能
 
 - HTTP 直连签到，默认 `/attendance.php`，404 时自动查找首页签到入口
-- 内置站点预设（观众、学校、憨憨、SUNNYPT、TTG、HDKylin、Piggo、AGSVPT、LuckPT 等）按域名匹配，未覆盖的站点写自定义规则
-- 验证码 / Cloudflare / Turnstile 改用 Browserless；没写规则的站点签到失败时也会用它再试一次
+- 内置站点预设（观众、学校、憨憨、SUNNYPT、TTG、HDKylin、Piggo（`/calendar`、浏览器内登录/解锁）、AGSVPT、LuckPT 等）按域名匹配，未覆盖的站点写自定义规则
+- 需要交互的人机验证优先用本机 Playwright；普通站点或猪猪本机流程失败、缺少浏览器助手时，可按规则回退到 Browserless 处理验证码 / Cloudflare
 - 签到后读取「最近动向」，包含站点自带的相对时间
-- 详情页分「签到状态」「登录状态」，结果列显示奖励或失败原因
+- 详情页分「签到状态」「登录状态」，只展示当前勾选站点，结果列显示奖励或失败原因
 - 当天已签到成功的站点跳过；通知只统计签到成功 / 登录成功 / 失败
 - 支持 Cron 定时、并发、失败重试
 
@@ -59,6 +59,15 @@ MoviePilot 的 PT 站点自动签到插件，支持 V2 / V3。
 
 插件提交后会重新 GET `/bakatest.php`，只有读到「今天已经签过到了」才判定成功；页面头部的魔力值不会被误判为签到成功。
 
+### 猪猪（piggo.me）日历签到
+
+- 签到入口固定为 `/calendar`，本机 Playwright 优先，不使用通用 NexusPHP 登录；仅在本机流程失败或缺少浏览器助手时，才会按规则回退到猪猪专用 Browserless 流程。
+- 本机与 Browserless 回退都在同一个浏览器会话内完成账号登录、空闲锁定解锁和签到。请在站点附加信息中配置当前账号密码；已有可用 Cookie 时也可复用会话。
+- 回退时会把站点账号密码发送给所配置的 Browserless 服务，请只使用自己信任的地址与 Token。
+- `cf_clearance` 通常绑定出口 IP、User-Agent 与浏览器指纹，跨节点不保证有效；Browserless 能否通过仍取决于节点出口和站点风控。
+- Browserless 只调用官方 BrowserQL `solve`，不包含 Turnstile 绕过。签到接口返回 HTTP 422 时：页面未写入验证 token 就立即失败，不重复提交；生成 token 后只允许重试一次。
+- 最终必须看到当天签到控件变为已签到，不能仅凭整页文字或“补签”入口判定成功。
+
 ## 站点模块
 
 图片验证码、答题选海报这类规则写不了的站点，用插件目录里的 sites/ 放一个 Python 模块（一个站一个文件），
@@ -94,7 +103,7 @@ class Example:
 
 - **签到返回 404**：站点签到路径不是 `/attendance.php`，用规则里的 `path` 指定
 - **Cookie 无效**：重新复制 Cookie，或在「登录站点」里填账号密码
-- **卡在 Cloudflare**：填写 Browserless 地址与 Token
+- **卡在 Cloudflare / Turnstile**：可填写 Browserless 地址与 Token。猪猪先在本机 Playwright 中处理；失败或缺少浏览器助手时才回退到 Browserless。回退会发送账号密码，且只调用官方 `solve`，能否通过仍取决于节点出口与站点风控
 - **最近动向未读取到**：提示里会列出试过的页面，可用 `activity_path` 指定
 - **想重新签到**：打开「清理本日缓存」保存一次
 
