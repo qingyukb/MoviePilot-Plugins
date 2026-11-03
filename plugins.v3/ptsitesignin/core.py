@@ -186,6 +186,122 @@ def target_url(base_url: str, path: str, route_fragment: Optional[str] = None) -
     return target.split("#", 1)[0] + (route_fragment or "")
 
 
+# --------------------------------------------------------------- API Key 规则
+API_KEY_AUTH = "api_key"
+_API_KEY_SOURCES = {"apikey", "token"}
+_API_HEADER_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+_API_REDIRECT_STATUSES = {301, 302, 303, 307, 308}
+
+
+class ApiRequestError(RuntimeError):
+    """API 请求的安全错误；消息里不会包含凭证。"""
+
+
+def is_api_key_rule(rule: Mapping[str, Any]) -> bool:
+    return str(rule.get("auth") or "").strip().lower() == API_KEY_AUTH
+
+
+def _validate_site_path(value: Any, label: str) -> str:
+    path = str(value or "").strip()
+    parsed = urllib.parse.urlsplit(path)
+    if (not path or not path.startswith("/") or path.startswith("//")
+            or "\\" in path or "#" in path or parsed.scheme or parsed.netloc):
+        raise ValueError(f"{label}必须是以 / 开头的站内路径，不能是绝对 URL、//、反斜杠或 # 片段")
+    if any(char in path for char in ("\r", "\n")):
+        raise ValueError(f"{label}不能包含换行")
+    return path
+
+
+def _api_key_config(rule: Mapping[str, Any]) -> Dict[str, str]:
+    source = str(rule.get("api_key_source") or "apikey").strip().lower()
+    if source not in _API_KEY_SOURCES:
+        raise ValueError("api_key_source 只能是 apikey 或 token")
+    header = str(rule.get("api_key_header") or "Authorization").strip()
+    if not _API_HEADER_NAME_RE.fullmatch(header):
+        raise ValueError("api_key_header 必须是合法的 HTTP Header 名")
+    if "api_key_prefix" in rule:
+        prefix = str(rule.get("api_key_prefix") or "")
+    else:
+        prefix = "" if header.lower() == "x-api-key" else "Bearer "
+    if "\r" in prefix or "\n" in prefix:
+        raise ValueError("api_key_prefix 不能包含换行")
+    return {"source": source, "header": header, "prefix": prefix}
+
+
+def _api_key_value(site: Mapping[str, Any], rule: Mapping[str, Any]) -> str:
+    config = _api_key_config(rule)
+    return str(site.get(config["source"]) or "").strip()
+
+
+def _api_headers(site: Mapping[str, Any], rule: Mapping[str, Any]) -> Dict[str, str]:
+    config = _api_key_config(rule)
+    key = _api_key_value(site, rule)
+    if not key:
+        raise ValueError(f"站点规则使用 API Key，但站点管理未配置 {config['source']}")
+    if "\r" in key or "\n" in key:
+        raise ValueError("API Key 不能包含换行")
+    headers = {
+        "User-Agent": str(site.get("ua") or "").strip() or DEFAULT_USER_AGENT,
+        "Accept": "application/json, text/plain, text/html, */*",
+        "X-Requested-With": "XMLHttpRequest",
+    }
+    headers[config["header"]] = config["prefix"] + key
+    return headers
+
+
+def _redact_api_secret(value: Any, secret: str) -> str:
+    text = str(value or "")
+    key = str(secret or "")
+    if key:
+        text = text.replace(key, "***")
+    return text
+
+
+def _same_origin(left: str, right: str) -> bool:
+    first = urllib.parse.urlsplit(left)
+    second = urllib.parse.urlsplit(right)
+    def normalized(parts: Any) -> tuple:
+        scheme = str(parts.scheme or "").lower()
+        port = parts.port or (443 if scheme == "https" else 80 if scheme == "http" else None)
+        return scheme, str(parts.hostname or "").lower(), port
+    return normalized(first) == normalized(second)
+
+
+def _api_request(session: Any, method: str, url: str, headers: Mapping[str, str],
+                 timeout: int, proxies: Optional[Dict[str, str]],
+                 data: Optional[Mapping[str, Any]] = None,
+                 json_body: Optional[Mapping[str, Any]] = None,
+                 params: Optional[Mapping[str, Any]] = None) -> Any:
+    """发送 API 请求；关闭自动重定向，仅手动跟随同源重定向。"""
+    current_url = url
+    current_method = method.upper()
+    current_data = data
+    current_json = json_body
+    current_params = params
+    redirects = 0
+    while True:
+        response = session.request(
+            current_method, current_url, headers=dict(headers), timeout=timeout,
+            allow_redirects=False, proxies=proxies, data=current_data,
+            json=current_json, params=current_params)
+        status = int(getattr(response, "status_code", 0) or 0)
+        location = str((getattr(response, "headers", {}) or {}).get("Location") or "").strip()
+        if status not in _API_REDIRECT_STATUSES or not location:
+            return response
+        if redirects >= 3:
+            raise ApiRequestError("API 请求重定向超过 3 次，已停止")
+        next_url = urllib.parse.urljoin(current_url, location)
+        if not _same_origin(current_url, next_url):
+            raise ApiRequestError("API 请求被重定向到站外，已停止且未携带 API Key 继续访问")
+        redirects += 1
+        if status in {301, 302, 303} and current_method != "GET":
+            current_method = "GET"
+            current_data = None
+            current_json = None
+            current_params = None
+        current_url = next_url
+
+
 def normalize_site_ids(raw: Any) -> List[int]:
     """把 MoviePilot 多选配置统一成去重后的正整数站点 ID 列表。
 
@@ -283,9 +399,13 @@ def resolve_rule(site: Mapping[str, Any], custom_rules: Mapping[str, Mapping[str
     host = normalize_host(str(site.get("url") or ""))
     custom = (custom_rules.get(str(site.get("id"))) or custom_rules.get(host)
               or custom_rules.get("www." + host) or {})
-    preset = preset_for_host(host)
-    rule = dict(preset or {})
-    rule.update(custom)
+    if is_api_key_rule(custom):
+        # API Key 规则只使用用户显式声明的固定端点，不继承内置站点的普通签到路径。
+        rule = dict(custom)
+    else:
+        preset = preset_for_host(host)
+        rule = dict(preset or {})
+        rule.update(custom)
     # 只有用户在自定义规则里显式声明 engine 才算「手工指定」；内置预设声明的 http
     # 仍允许在遇盾 / 验证码时自动回退到浏览器引擎
     user_engine = str(custom.get("engine") or "").strip().lower()
@@ -294,7 +414,13 @@ def resolve_rule(site: Mapping[str, Any], custom_rules: Mapping[str, Mapping[str
     if rule["engine"] not in {"http", "browserless", "playwright"}:
         raise ValueError("签到引擎只能是 http、browserless 或 playwright")
     rule["auto_fallback"] = not user_engine
-    if rule["engine"] in {"http", "playwright"}:
+    if is_api_key_rule(rule):
+        # API Key 模式只能访问显式配置的固定端点，绝不探测路径或回退浏览器。
+        rule["engine"] = "http"
+        rule["auto_fallback"] = False
+        rule.setdefault("success", DEFAULT_SUCCESS_PATTERN)
+        rule.setdefault("already", DEFAULT_ALREADY_PATTERN)
+    elif rule["engine"] in {"http", "playwright"}:
         rule.setdefault("path", DEFAULT_HTTP_PATH)
         rule.setdefault("success", DEFAULT_SUCCESS_PATTERN)
         rule.setdefault("already", DEFAULT_ALREADY_PATTERN)
@@ -308,13 +434,17 @@ def resolve_rule(site: Mapping[str, Any], custom_rules: Mapping[str, Mapping[str
 
 def validate_rule(rule: Mapping[str, Any]) -> Dict[str, Any]:
     result = dict(rule)
+    auth = str(result.get("auth") or "").strip().lower()
+    if auth and auth != API_KEY_AUTH:
+        raise ValueError("auth 目前只支持 api_key")
+    if auth == API_KEY_AUTH:
+        _validate_api_key_rule(result)
+        return result
     if result["engine"] in {"http", "playwright"}:
-        path = str(result.get("path") or "")
-        if not path.startswith("/") or path.startswith("//"):
-            raise ValueError("签到路径必须是以 / 开头的站内路径")
+        result["path"] = _validate_site_path(result.get("path"), "签到路径")
         signin_path = str(result.get("signin_path") or "")
-        if signin_path and (not signin_path.startswith("/") or signin_path.startswith("//")):
-            raise ValueError("第二段签到地址必须是以 / 开头的站内路径")
+        if signin_path:
+            result["signin_path"] = _validate_site_path(signin_path, "第二段签到地址")
         patterns = result.get("signin_token_patterns")
         if patterns is not None and not isinstance(patterns, Mapping):
             raise ValueError("signin_token_patterns 必须是 {字段: 正则} 形式的对象")
@@ -346,6 +476,52 @@ def validate_rule(rule: Mapping[str, Any]) -> Dict[str, Any]:
                 raise ValueError("Altcha 规则缺少 " + name)
     # cloudflare / turnstile：仅允许自动检测，不允许手工指定 solve 类型
     return result
+
+
+def _validate_api_key_rule(result: Dict[str, Any]) -> None:
+    if str(result.get("engine") or "").strip().lower() != "http":
+        raise ValueError("API Key 规则只能使用 http 引擎")
+    # 签到与登录可以分开配置：只登录的站点可以仅提供 credential_check_path，
+    # 只签到的站点可以仅提供 path。缺少对应端点时由执行函数在联网前明确失败。
+    path = str(result.get("path") or "").strip()
+    if path:
+        result["path"] = _validate_site_path(path, "API 签到 path")
+    else:
+        result.pop("path", None)
+    method = str(result.get("method") or "GET").strip().upper()
+    if method not in {"GET", "POST"}:
+        raise ValueError("API Key 签到 method 只能是 GET 或 POST")
+    result["method"] = method
+    for name in ("success", "already"):
+        try:
+            re.compile(str(result.get(name) or ""))
+        except re.error:
+            raise ValueError(f"API Key 规则的 {name} 不是有效正则") from None
+    config = _api_key_config(result)
+    result.update({"api_key_source": config["source"], "api_key_header": config["header"],
+                   "api_key_prefix": config["prefix"]})
+    data = result.get("data")
+    json_body = result.get("json")
+    if data is not None and not isinstance(data, Mapping):
+        raise ValueError("API Key 规则的 data 必须是 JSON 对象")
+    if json_body is not None and not isinstance(json_body, Mapping):
+        raise ValueError("API Key 规则的 json 必须是 JSON 对象")
+    if data is not None and json_body is not None:
+        raise ValueError("API Key 规则的 data 与 json 不能同时配置")
+    check_path = str(result.get("credential_check_path") or "").strip()
+    if check_path:
+        result["credential_check_path"] = _validate_site_path(
+            check_path, "credential_check_path ")
+    if not path and not check_path:
+        raise ValueError("API Key 规则至少需要 path（签到）或 credential_check_path（登录验证）")
+    check_method = str(result.get("credential_check_method") or "GET").strip().upper()
+    if check_method not in {"GET", "POST"}:
+        raise ValueError("credential_check_method 只能是 GET 或 POST")
+    result["credential_check_method"] = check_method
+    activity_path = str(result.get("activity_path") or "").strip()
+    if activity_path:
+        result["activity_path"] = _validate_site_path(activity_path, "activity_path ")
+    result["auto_fallback"] = False
 
 
 # 挑战类型 → Browserless 签到方式
@@ -507,56 +683,139 @@ def http_quiz_sign(session: Any, url: str, content: str, base_url: str,
               + page_hint(verify_content))
     return SignResult("failed", f"{post_error}；{detail}" if post_error else detail)
 
+def judge_api_response(content: str, rule: Mapping[str, Any],
+                       secret: str = "") -> SignResult:
+    """判定固定 API 端点响应；不复用 Cookie 页面的失效提示。"""
+    text = str(content or "")[:200000]
+    visible = plain_text(text)
+    success = str(rule.get("success") or DEFAULT_SUCCESS_PATTERN)
+    already = str(rule.get("already") or DEFAULT_ALREADY_PATTERN)
+    try:
+        if re.search(success, visible, re.IGNORECASE):
+            bonus = extract_bonus(text, rule)
+            return SignResult("success", f"签到成功（{bonus}）" if bonus else "签到成功")
+        if re.search(already, visible, re.IGNORECASE):
+            bonus = extract_bonus(text, rule)
+            return SignResult("already", f"今日已签到（{bonus}）" if bonus else "今日已签到")
+    except re.error:
+        return SignResult("failed", "API Key 规则的 success / already 不是有效正则")
+    try:
+        payload = json.loads(text.strip())
+    except (TypeError, ValueError):
+        payload = None
+    if isinstance(payload, Mapping):
+        state = str(payload.get("state") or payload.get("status") or "").strip().lower()
+        message = str(payload.get("sign") or payload.get("msg")
+                      or payload.get("message") or "").strip()
+        flag = payload.get("success")
+        ok = state in {"success", "ok", "true", "1", "already", "signed"}
+        ok = ok or flag is True or str(flag).strip().lower() in {"true", "1", "ok", "success"}
+        if ok:
+            status = "already" if state in {"already", "signed"} else "success"
+            message = message or ("今日已签到" if status == "already" else "签到成功")
+            return SignResult(status, _redact_api_secret(message, secret))
+        failed = state in {"false", "fail", "failed", "error", "invalid"}
+        failed = failed or flag is False or str(flag).strip().lower() in {"false", "0", "error"}
+        if failed:
+            detail = message or str(payload.get("error") or "站点返回 API 签到失败")
+            return SignResult("failed", _redact_api_secret(detail, secret))
+    return SignResult("failed",
+                      _redact_api_secret(f"未匹配到 API 签到成功标志；{page_hint(text)}", secret))
+
+
 def http_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: int = 30,
               proxies: Optional[Dict[str, str]] = None) -> SignResult:
-    """直接 HTTP 请求签到接口（NexusPHP attendance.php 等）。"""
+    """直接 HTTP 请求签到接口；API Key 规则只访问显式固定端点。"""
     import requests
 
     base_url = str(site.get("url") or "").rstrip("/")
-    cookie = str(site.get("cookie") or "").strip()
-    if not base_url or not cookie:
+    if not base_url:
+        return SignResult("failed", "站点地址为空")
+    api_mode = is_api_key_rule(rule)
+    secret = ""
+    if not api_mode and not str(site.get("cookie") or "").strip():
         return SignResult("failed", "站点地址或 Cookie 为空")
-    url = target_url(base_url, str(rule.get("path") or DEFAULT_HTTP_PATH))
-    headers = {
-        "User-Agent": str(site.get("ua") or "").strip() or DEFAULT_USER_AGENT,
-        "Referer": f"{base_url}/index.php",
-        "Cookie": cookie,
-        "Accept": "application/json, text/javascript, text/html, */*",
-        "X-Requested-With": "XMLHttpRequest",
-    }
     try:
+        path = str(rule.get("path") or "").strip()
+        if api_mode:
+            if not path:
+                return SignResult("failed", "API Key 规则未配置 path，无法签到")
+            secret = _api_key_value(site, rule)
+            path = _validate_site_path(path, "API 签到 path")
+        elif not path:
+            path = DEFAULT_HTTP_PATH
+        url = target_url(base_url, path)
+        if api_mode:
+            headers = _api_headers(site, rule)
+        else:
+            headers = {
+                "User-Agent": str(site.get("ua") or "").strip() or DEFAULT_USER_AGENT,
+                "Referer": f"{base_url}/index.php",
+                "Cookie": str(site.get("cookie") or "").strip(),
+                "Accept": "application/json, text/javascript, text/html, */*",
+                "X-Requested-With": "XMLHttpRequest",
+            }
         session = requests.Session()
         session.headers.update(headers)
         method = str(rule.get("method") or "GET").upper()
-        # 规则里的 data：签到表单需要提交字段时用（例如首页「每日签到」按钮带 name）
+        if api_mode and method not in {"GET", "POST"}:
+            return SignResult("failed", "API Key 签到 method 只能是 GET 或 POST")
         data = rule.get("data") if isinstance(rule.get("data"), Mapping) else None
-        if method == "POST":
-            response = session.post(url, data=data, timeout=timeout,
-                                    allow_redirects=True, proxies=proxies)
+        json_body = rule.get("json") if isinstance(rule.get("json"), Mapping) else None
+        if api_mode:
+            if method == "GET":
+                response = _api_request(session, method, url, headers, timeout, proxies,
+                                        params=data if data is not None else json_body)
+            else:
+                response = _api_request(session, method, url, headers, timeout, proxies,
+                                        data=data, json_body=json_body)
+        elif method == "POST":
+            if json_body is not None:
+                response = session.post(url, json=json_body, timeout=timeout,
+                                        allow_redirects=True, proxies=proxies)
+            else:
+                response = session.post(url, data=data, timeout=timeout,
+                                        allow_redirects=True, proxies=proxies)
         else:
             response = session.get(url, params=data, timeout=timeout,
                                    allow_redirects=True, proxies=proxies)
+    except ApiRequestError as error:
+        return SignResult("failed", _redact_api_secret(error, secret))
+    except ValueError as error:
+        return SignResult("failed", _redact_api_secret(error, secret))
     except Exception as error:
-        # 读超时 / 连接被重置大多是网络抖动，加长超时再试一次，别让站点整天算失败
         if _is_transient(error):
             try:
                 longer = max(15, int(timeout * 1.5))
                 session = requests.Session()
                 session.headers.update(headers)
-                if method == "POST":
+                if api_mode:
+                    if method == "GET":
+                        response = _api_request(session, method, url, headers, longer, proxies,
+                                                params=data if data is not None else json_body)
+                    else:
+                        response = _api_request(session, method, url, headers, longer, proxies,
+                                                data=data, json_body=json_body)
+                elif method == "POST" and json_body is not None:
+                    response = session.post(url, json=json_body, timeout=longer,
+                                            allow_redirects=True, proxies=proxies)
+                elif method == "POST":
                     response = session.post(url, data=data, timeout=longer,
                                             allow_redirects=True, proxies=proxies)
                 else:
                     response = session.get(url, params=data, timeout=longer,
                                            allow_redirects=True, proxies=proxies)
             except Exception as retry_error:
-                return SignResult("failed", f"请求异常：{retry_error}")
+                return SignResult("failed",
+                                  _redact_api_secret(f"请求异常：{retry_error}", secret))
         else:
-            return SignResult("failed", f"请求异常：{error}")
-    content = response.text or ""
-    if response.status_code >= 400:
+            return SignResult("failed", _redact_api_secret(f"请求异常：{error}", secret))
+    content = str(getattr(response, "text", "") or "")
+    if int(getattr(response, "status_code", 0) or 0) >= 400:
         return SignResult("failed", f"请求失败（HTTP {response.status_code}）",
                           missing_path=response.status_code in {404, 405})
+    if api_mode:
+        return judge_api_response(content, rule, secret)
     if str(rule.get("form_mode") or "").lower() == "quiz":
         return http_quiz_sign(session, url, content, base_url, rule, timeout, proxies)
     return judge_http(content, rule)
@@ -1979,8 +2238,11 @@ def site_module_for(url: str) -> Optional[Any]:
 
 def run_site_module(site: Mapping[str, Any], timeout: int = 30,
                     proxies: Optional[Dict[str, str]] = None,
-                    logger: Any = None) -> Optional[SignResult]:
-    """有匹配的站点模块就执行它，返回结果；没有模块返回 None，交给规则引擎。"""
+                    logger: Any = None,
+                    rule: Optional[Mapping[str, Any]] = None) -> Optional[SignResult]:
+    """有匹配的站点模块就执行它；API Key 规则始终跳过模块。"""
+    if rule is not None and is_api_key_rule(rule):
+        return None
     api = _sites_api()
     if api is None:
         return None
@@ -2004,6 +2266,8 @@ def http_sign_auto(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: in
     碰上没有 `/attendance.php` 的站点只会得到一句「请求失败（HTTP 404）」。现在的顺序是：
     先试规则里的 path → 从站点首页「签到」链接自动发现 → 再试几个常见路径。
     """
+    if is_api_key_rule(rule):
+        return http_sign(site, rule, timeout=timeout, proxies=proxies)
     result = http_sign(site, rule, timeout=timeout, proxies=proxies)
     if str(rule.get("form_mode") or "").lower() == "quiz":
         # 彩虹岛答题只允许一条确定路径：POST 后 GET 回读确认。失败时不能
@@ -2318,6 +2582,52 @@ class ActivityResult:
     last_seen: str = ""
     snippet: str = ""
     source: str = ""   # 从哪个候选页读到的，便于排查「最近动向」读不到的问题
+
+
+def http_check_api_key(site: Mapping[str, Any], rule: Mapping[str, Any],
+                       timeout: int = 30,
+                       proxies: Optional[Dict[str, str]] = None) -> LoginResult:
+    """用显式 credential_check_path 验证 API Key；不会访问任何猜测路径。"""
+    if not is_api_key_rule(rule):
+        return LoginResult("failed", "站点规则未声明 auth=api_key，无法用 API Key 验证登录")
+    path = str(rule.get("credential_check_path") or "").strip()
+    if not path:
+        return LoginResult("failed", "API Key 规则未配置 credential_check_path，无法验证登录")
+    base_url = str(site.get("url") or "").rstrip("/")
+    if not base_url:
+        return LoginResult("failed", "站点地址为空")
+    secret = ""
+    try:
+        secret = _api_key_value(site, rule)
+        path = _validate_site_path(path, "credential_check_path ")
+        url = target_url(base_url, path)
+        headers = _api_headers(site, rule)
+        method = str(rule.get("credential_check_method") or "GET").upper()
+        if method not in {"GET", "POST"}:
+            return LoginResult("failed", "API Key 验证 method 只能是 GET 或 POST")
+        import requests
+        session = requests.Session()
+        session.headers.update(headers)
+        response = _api_request(session, method, url, headers, timeout, proxies)
+    except (ApiRequestError, ValueError) as error:
+        return LoginResult("failed", _redact_api_secret(error, secret))
+    except Exception as error:
+        return LoginResult("failed", _redact_api_secret(f"API Key 验证请求异常：{error}", secret))
+    status_code = int(getattr(response, "status_code", 0) or 0)
+    if status_code in {401, 403}:
+        return LoginResult("failed", "API Key 无效或没有权限")
+    if status_code >= 400:
+        return LoginResult("failed", f"API Key 验证失败（HTTP {status_code}）")
+    expected = str(rule.get("credential_check_success") or "").strip()
+    content = str(getattr(response, "text", "") or "")
+    if expected:
+        try:
+            matched = bool(re.search(expected, content, re.IGNORECASE))
+        except re.error:
+            matched = expected in content
+        if not matched:
+            return LoginResult("failed", "API Key 验证失败：响应未匹配 credential_check_success")
+    return LoginResult("success", "API Key 验证成功")
 
 
 def parse_accounts(raw: Any) -> Dict[str, Dict[str, Any]]:
@@ -2653,17 +2963,81 @@ def cookie_uid(cookie: str) -> str:
     return ""
 
 
+def _activity_from_api_payload(content: str) -> Dict[str, str]:
+    found = extract_activity(content)
+    if found:
+        return found
+    try:
+        payload = json.loads(str(content or "").strip())
+    except (TypeError, ValueError):
+        return {}
+    candidates: List[Mapping[str, Any]] = []
+    def collect(value: Any, depth: int = 0) -> None:
+        if depth > 3:
+            return
+        if isinstance(value, Mapping):
+            candidates.append(value)
+            for nested in value.values():
+                collect(nested, depth + 1)
+        elif isinstance(value, list):
+            for nested in value[:10]:
+                collect(nested, depth + 1)
+    collect(payload)
+    keys = ("last_seen", "last_active", "last_activity", "last_visit", "activity",
+            "最近动向", "最近動向", "上次访问", "上次訪問")
+    for item in candidates:
+        for key in keys:
+            if key not in item:
+                continue
+            value = str(item.get(key) or "").strip()
+            if value:
+                return {"keyword": key, "snippet": value, "last_seen": value}
+    return {}
+
+
 def read_activity(site: Mapping[str, Any], cookie: str, timeout: int = 30,
                   proxies: Optional[Dict[str, str]] = None,
                   path: Optional[str] = None,
-                  paths: Optional[Sequence[str]] = None) -> ActivityResult:
-    """用登录态 Cookie 打开用户页，读取站点展示的「最近动向」。
-
-    path 优先，paths 是调用方按站点规则补充的候选页面（比如签到页 / 校验页）。
-    """
+                  paths: Optional[Sequence[str]] = None,
+                  rule: Optional[Mapping[str, Any]] = None) -> ActivityResult:
+    """读取最近动向；API Key 规则只访问显式 activity_path，不访问首页。"""
     base_url = str(site.get("url") or "").rstrip("/")
+    if not base_url:
+        return ActivityResult("failed", "站点地址为空")
+    api_rule = rule or {}
+    if is_api_key_rule(api_rule):
+        activity_path = str(api_rule.get("activity_path") or "").strip()
+        if not activity_path:
+            return ActivityResult("failed", "API Key 规则未配置 activity_path，未读取最近动向")
+        secret = ""
+        try:
+            secret = _api_key_value(site, api_rule)
+            activity_path = _validate_site_path(activity_path, "activity_path ")
+            url = target_url(base_url, activity_path)
+            headers = _api_headers(site, api_rule)
+            import requests
+            session = requests.Session()
+            session.headers.update(headers)
+            response = _api_request(session, "GET", url, headers, timeout, proxies)
+        except (ApiRequestError, ValueError) as error:
+            return ActivityResult("failed", _redact_api_secret(error, secret))
+        except Exception as error:
+            return ActivityResult("failed",
+                                  _redact_api_secret(f"读取 API 最近动向异常：{error}", secret))
+        status_code = int(getattr(response, "status_code", 0) or 0)
+        if status_code >= 400:
+            return ActivityResult("failed", f"读取 API 最近动向失败（HTTP {status_code}）")
+        found = _activity_from_api_payload(str(getattr(response, "text", "") or ""))
+        if found:
+            return ActivityResult("success", f"已读取最近动向（{activity_path}）",
+                                  last_seen=found.get("last_seen", ""),
+                                  snippet=found.get("snippet", ""),
+                                  source=activity_path)
+        return ActivityResult("failed",
+                              _redact_api_secret(
+                                  f"API 响应里没有「最近动向」字段（{activity_path}）", secret))
     cookie = str(cookie or "").strip()
-    if not base_url or not cookie:
+    if not cookie:
         return ActivityResult("failed", "站点地址或 Cookie 为空")
     import requests
     session = requests.Session()

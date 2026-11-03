@@ -1,9 +1,9 @@
 {
   "PTSiteSignIn": {
     "name": "PT站点签到",
-    "description": "PT 站点自动签到，可登录刷新 Cookie 并读取最近动向；遇到验证码或 Cloudflare 会自动改用浏览器。",
+    "description": "PT 站点自动签到，支持 Cookie / 账号密码 / API Key 登录并读取最近动向；验证码或 Cloudflare 可按规则改用浏览器。",
     "labels": "站点,签到",
-    "version": "2.0.4",
+    "version": "2.0.5",
     "icon": "https://raw.githubusercontent.com/qingyukb/MoviePilot-Plugins/main/icons/ptsignin.png",
     "author": "qingyukb",
     "level": 2,
@@ -12,6 +12,7 @@
     "v2": true,
     "system_version": ">=2.0.0,<3.0.0",
     "history": {
+      "v2.0.5": "支持站点管理里显式声明的 API Key / Token 登录验证与签到；只访问固定端点，不探测路径、不加载站点模块、不调用 Browserless。纯 Key 站点未声明 API 规则时不发起请求，结果与异常中的 Key 会打码。",
       "v2.0.4": "重构：拆分内置规则与专用 Browserless 执行脚本，移除已过期的猪猪（piggo.me）内置预设；保留通用 Playwright / Browserless 执行能力，待新规则确认后单独加入。",
       "v2.0.3": "修复猪猪（piggo.me）Vue 签到日历骨架屏造成的假失败：本机 Playwright 和 Browserless 均等待日历加载完成后再读取当天控件；日历已加载但无签到入口时给出准确提示，不再建议无效的 retry_paths。",
       "v2.0.2": "猪猪（piggo.me）签到新增 Browserless 回退：本机 Playwright 成功时不消耗远程额度，失败或缺少浏览器助手时才使用猪猪专用 BrowserQL，在远程会话中完成账号登录、空闲解锁、官方 solve、token 注入与签到回读；无 token 不二次提交，最终只信当天签到控件。",
