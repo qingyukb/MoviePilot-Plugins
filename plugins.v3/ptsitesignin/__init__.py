@@ -425,11 +425,22 @@ class PTSiteSignIn(_PluginBase):
         except Exception:
             sites = []
         # 第一个选项是哨兵值 all：等于「全部站点，且自动包含以后新增的站点」
+        def auth_label(site: Any) -> str:
+            if str(getattr(site, "cookie", None) or "").strip():
+                return "Cookie"
+            if (str(getattr(site, "apikey", None) or "").strip()
+                    and str(getattr(site, "token", None) or "").strip()):
+                return "ApiKey + Token"
+            if str(getattr(site, "apikey", None) or "").strip():
+                return "ApiKey"
+            if str(getattr(site, "token", None) or "").strip():
+                return "Token"
+            return ""
+
         options: List[Dict[str, Any]] = [{"title": "全部站点（含后续新增）", "value": ALL_SITES}]
-        options += [{"title": site.name, "value": site.id}
+        options += [{"title": f"{site.name}（{auth_label(site)}）", "value": site.id}
                     for site in sites
-                    if (getattr(site, "cookie", None) or getattr(site, "apikey", None)
-                        or getattr(site, "token", None))]
+                    if auth_label(site)]
 
         def field(kind: str, model: str, label: str, md: int = 6,
                   **props: Any) -> Dict[str, Any]:
@@ -463,8 +474,9 @@ class PTSiteSignIn(_PluginBase):
             ]}
 
         rules_hint = ('键为域名或站点 ID。HTTP：{"path":"/attendance.php","success":"正则","already":"正则"}；'
-                      'API Key：{"auth":"api_key","api_key_source":"apikey","path":"/api/checkin",'
-                      '"credential_check_path":"/api/profile"}（固定端点，不探测、不回退浏览器）；'
+                      'API Key：{"api_key_source":"auto","path":"/api/checkin",'
+                      '"credential_check_path":"/api/profile"}（纯 Key 站点会自动识别，不再要求填写 auth；'
+                      '固定端点，不探测、不回退浏览器）；'
                       'Browserless：{"engine":"browserless","mode":"cloudflare|image|trigger_image|altcha|open_page", ...}；'
                       '页面内嵌 Turnstile、验证通过后由站点自己提交（如观众）用 {"submit_method":"auto"}；'
                       '点签到后跳 WAF / Cloudflare 检测页时用 {"wait": 12000} 等它放行；'
@@ -934,8 +946,8 @@ class PTSiteSignIn(_PluginBase):
             logger.info("PT站点签到：开始 %s（API Key）", site_name)
             return self._sign_api_key_one(info, initial_rule, run_id, allowed_site_ids)
         if self._key_only_site(info):
-            reason = ("站点仅有 API Key / Token，但未声明 auth=api_key 签到规则，已跳过且未发起请求"
-                      "；请在自定义站点规则中补全固定 path 等字段")
+            reason = ("站点仅有 ApiKey / Token，但自定义规则未声明固定签到或验证端点，已跳过且未发起请求"
+                      "；请在自定义站点规则中补全 path / credential_check_path 等字段")
             if initial_rule_error is not None:
                 reason += f"；规则错误：{initial_rule_error}"
             logger.warning("PT站点签到：%s，跳过站点 %s", reason, site_name)

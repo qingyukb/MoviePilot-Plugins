@@ -188,7 +188,8 @@ def target_url(base_url: str, path: str, route_fragment: Optional[str] = None) -
 
 # --------------------------------------------------------------- API Key 规则
 API_KEY_AUTH = "api_key"
-_API_KEY_SOURCES = {"apikey", "token"}
+_API_KEY_SOURCES = {"auto", "apikey", "token"}
+_API_KEY_ENDPOINT_KEYS = {"path", "credential_check_path"}
 _API_HEADER_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 _API_REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 
@@ -199,6 +200,14 @@ class ApiRequestError(RuntimeError):
 
 def is_api_key_rule(rule: Mapping[str, Any]) -> bool:
     return str(rule.get("auth") or "").strip().lower() == API_KEY_AUTH
+
+
+def is_api_key_site(site: Mapping[str, Any]) -> bool:
+    """站点是否为纯 API 凭证：没有 Cookie，但配置了 ApiKey 或 Token。"""
+    cookie = str(site.get("cookie") or "").strip()
+    credential = (str(site.get("apikey") or "").strip()
+                  or str(site.get("token") or "").strip())
+    return bool(credential and not cookie)
 
 
 def _validate_site_path(value: Any, label: str) -> str:
@@ -213,9 +222,9 @@ def _validate_site_path(value: Any, label: str) -> str:
 
 
 def _api_key_config(rule: Mapping[str, Any]) -> Dict[str, str]:
-    source = str(rule.get("api_key_source") or "apikey").strip().lower()
+    source = str(rule.get("api_key_source") or "auto").strip().lower()
     if source not in _API_KEY_SOURCES:
-        raise ValueError("api_key_source 只能是 apikey 或 token")
+        raise ValueError("api_key_source 只能是 auto、apikey 或 token")
     header = str(rule.get("api_key_header") or "Authorization").strip()
     if not _API_HEADER_NAME_RE.fullmatch(header):
         raise ValueError("api_key_header 必须是合法的 HTTP Header 名")
@@ -230,14 +239,20 @@ def _api_key_config(rule: Mapping[str, Any]) -> Dict[str, str]:
 
 def _api_key_value(site: Mapping[str, Any], rule: Mapping[str, Any]) -> str:
     config = _api_key_config(rule)
-    return str(site.get(config["source"]) or "").strip()
+    sources = ("apikey", "token") if config["source"] == "auto" else (config["source"],)
+    for source in sources:
+        value = str(site.get(source) or "").strip()
+        if value:
+            return value
+    return ""
 
 
 def _api_headers(site: Mapping[str, Any], rule: Mapping[str, Any]) -> Dict[str, str]:
     config = _api_key_config(rule)
     key = _api_key_value(site, rule)
     if not key:
-        raise ValueError(f"站点规则使用 API Key，但站点管理未配置 {config['source']}")
+        label = "ApiKey 或 Token" if config["source"] == "auto" else config["source"]
+        raise ValueError(f"站点规则使用 API Key，但站点管理未配置 {label}")
     if "\r" in key or "\n" in key:
         raise ValueError("API Key 不能包含换行")
     headers = {
@@ -399,9 +414,17 @@ def resolve_rule(site: Mapping[str, Any], custom_rules: Mapping[str, Mapping[str
     host = normalize_host(str(site.get("url") or ""))
     custom = (custom_rules.get(str(site.get("id"))) or custom_rules.get(host)
               or custom_rules.get("www." + host) or {})
-    if is_api_key_rule(custom):
+    # 站点管理里的凭证二选一：Cookie 站点走页面流程，纯 ApiKey / Token 站点走 API。
+    # 纯 Key 站点只有在自定义规则明确给出固定端点时才自动切到 API 模式，避免把 Key
+    # 发到默认的 /attendance.php 或内置 Cookie 签到路径。
+    auto_api = (is_api_key_site(site)
+                and not str(custom.get("auth") or "").strip()
+                and any(custom.get(name) for name in _API_KEY_ENDPOINT_KEYS))
+    if is_api_key_rule(custom) or auto_api:
         # API Key 规则只使用用户显式声明的固定端点，不继承内置站点的普通签到路径。
         rule = dict(custom)
+        if auto_api:
+            rule["auth"] = API_KEY_AUTH
     else:
         preset = preset_for_host(host)
         rule = dict(preset or {})

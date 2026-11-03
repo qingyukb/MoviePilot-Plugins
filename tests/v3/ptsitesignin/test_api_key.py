@@ -138,6 +138,53 @@ class ApiKeyCoreTests(unittest.TestCase):
                     self.assertEqual(result.status, "success")
                     self.assertEqual(session.calls[0]["headers"][header], expected)
 
+    def test_auto_key_source_uses_apikey_then_token(self):
+        cases = [
+            ({"apikey": SECRET, "token": TOKEN}, {}, "Bearer " + SECRET),
+            ({"apikey": "", "token": TOKEN}, {}, "Bearer " + TOKEN),
+            ({"apikey": SECRET, "token": TOKEN}, {"api_key_source": "token"},
+             "Bearer " + TOKEN),
+        ]
+        for core in CORES:
+            for values, extra, expected in cases:
+                with self.subTest(core=core.__name__, extra=extra, values=values):
+                    site = make_site(**values)
+                    rule = api_rule(core, site, path="/api/checkin", **extra)
+                    session = FakeSession(lambda method, url, kwargs: FakeResponse(
+                        "{\"success\":true}"))
+                    with mock.patch.dict(sys.modules, {"requests": fake_requests(session)}):
+                        result = core.http_sign(site, rule, timeout=5)
+                    self.assertEqual(result.status, "success")
+                    self.assertEqual(session.calls[0]["headers"]["Authorization"], expected)
+
+    def test_key_only_site_auto_enables_api_mode_for_explicit_endpoint(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                site = make_site(cookie="")
+                rule = core.resolve_rule(site, {
+                    "api.example.test": {"path": "/api/checkin"}})
+                self.assertEqual(rule["auth"], "api_key")
+                self.assertEqual(rule["api_key_source"], "auto")
+                self.assertEqual(rule["engine"], "http")
+                self.assertFalse(rule["auto_fallback"])
+
+    def test_cookie_site_keeps_cookie_mode_even_if_key_is_present(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                site = make_site(cookie="c=1")
+                rule = core.resolve_rule(site, {
+                    "api.example.test": {"path": "/custom-signin"}})
+                self.assertNotEqual(rule.get("auth"), "api_key")
+                self.assertEqual(rule["path"], "/custom-signin")
+
+    def test_key_only_site_without_explicit_endpoint_does_not_auto_switch(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                site = make_site(cookie="")
+                rule = core.resolve_rule(site, {
+                    "api.example.test": {"success": "ok"}})
+                self.assertNotEqual(rule.get("auth"), "api_key")
+
     def test_login_only_and_sign_only_rules(self):
         for core in CORES:
             with self.subTest(core=core.__name__):
@@ -347,12 +394,13 @@ class ApiKeyPluginTests(unittest.TestCase):
                 self.assertIn("不在本次", row["message"])
                 sign.assert_not_called()
 
-    def test_settings_page_lists_key_only_site(self):
+    def test_settings_page_lists_site_auth_type(self):
         key_site = self.page._Site(99, "纯Key站点", cookie="")
         key_site.apikey = SECRET
+        cookie_site = self.page._Site(100, "纯Cookie站点", cookie="session=1")
         original = list(self.page.SITES)
         try:
-            self.page.SITES[:] = [key_site]
+            self.page.SITES[:] = [key_site, cookie_site]
             for module in self.page.PLUGINS:
                 with self.subTest(plugin=module.__name__):
                     plugin = self._plugin(module, _site_ids=[], _login_site_ids=[],
@@ -362,8 +410,9 @@ class ApiKeyPluginTests(unittest.TestCase):
                                for node in self.page.nodes(form, "VSelect")]
                     site_options = next(props["items"] for props in selects
                                         if props.get("model") == "site_ids")
-                    self.assertIn(99, [item["value"] for item in site_options])
-                    self.assertIn("纯Key站点", [item["title"] for item in site_options])
+                    titles = {item["value"]: item["title"] for item in site_options}
+                    self.assertEqual(titles[99], "纯Key站点（ApiKey）")
+                    self.assertEqual(titles[100], "纯Cookie站点（Cookie）")
         finally:
             self.page.SITES[:] = original
 

@@ -12,7 +12,8 @@ MoviePilot 的 PT 站点自动签到插件，支持 V2 / V3。
 
 - Cookie 站点 HTTP 直连签到，默认 `/attendance.php`，404 时自动查找首页签到入口
 - 内置站点预设（观众、学校、憨憨、SUNNYPT、TTG、HDKylin、AGSVPT、LuckPT 等）按域名匹配，未覆盖的站点写自定义规则
-- API Key / Token 站点按显式固定端点完成登录验证和签到；不探测路径、不访问首页、不加载站点模块、不回退浏览器
+- API Key / Token 站点按固定端点完成登录验证和签到；纯 Key 站点自动识别，不探测路径、不访问首页、不加载站点模块、不回退浏览器
+- 站点选择显示实际认证类型（Cookie / ApiKey / Token），纯 Key 与纯 Cookie 站点都只使用已有的一种凭证
 - 需要交互的人机验证优先用本机 Playwright；本机流程失败或缺少浏览器助手时，可按规则回退到 Browserless 处理验证码 / Cloudflare
 - 签到后读取「最近动向」，包含站点自带的相对时间
 - 详情页分「签到状态」「登录状态」，只展示当前勾选站点，结果列显示奖励或失败原因
@@ -27,7 +28,7 @@ MoviePilot 的 PT 站点自动签到插件，支持 V2 / V3。
 | 保存后立即执行一次 / 清理本日缓存 | 立即跑一轮；清空当天记录，下一轮重签 |
 | 执行周期 / 并发数 / 失败重试 / HTTP 超时 | `25 8 * * *` / 3 / 2 次 5 分钟 / 30 秒 |
 | 读取「最近动向」 | 把动向写入登录状态表 |
-| 签到站点 / 登录站点 | 支持「全部站点」，同时选中时一轮做完 |
+| 签到站点 / 登录站点 | 支持「全部站点」，同时选中时一轮做完；选项带 Cookie / ApiKey / Token 认证标签 |
 | Browserless 地址 / Token | 处理验证码用 |
 | 自定义站点规则 JSON | 未覆盖的站点规则 |
 
@@ -46,13 +47,12 @@ MoviePilot 的 PT 站点自动签到插件，支持 V2 / V3。
 
 ### API Key / Token 登录与签到
 
-站点管理里已保存 `ApiKey` 或 `Token` 时，可在自定义规则中显式声明 API 流程：
+站点管理里只有 `ApiKey` 或 `Token`、没有 Cookie 时，在自定义规则中填写固定端点就会自动使用 API 流程：
 
 ```json
 {
   "api.example.com": {
-    "auth": "api_key",
-    "api_key_source": "apikey",
+    "api_key_source": "auto",
     "api_key_header": "Authorization",
     "api_key_prefix": "Bearer ",
     "credential_check_path": "/api/user/profile",
@@ -69,15 +69,15 @@ MoviePilot 的 PT 站点自动签到插件，支持 V2 / V3。
 
 字段说明：
 
-- `auth`：固定为 `api_key`；声明后强制使用 HTTP，并禁用 Browserless 回退。
-- `api_key_source`：`apikey`（默认）或 `token`，对应站点管理中的字段。
+- `auth`：通常不需要填写。纯 Key 站点配置 `path` 或 `credential_check_path` 后会自动使用 `api_key` 模式；显式填写 `auth: "api_key"` 可强制 API 模式，并禁用 Browserless 回退。
+- `api_key_source`：默认 `auto`，依次使用站点管理里的 `apikey`、`token`；也可明确填 `apikey` 或 `token` 强制指定。
 - `api_key_header` / `api_key_prefix`：默认 `Authorization` + `Bearer `；使用 `X-API-Key` 时默认不加前缀。
 - `credential_check_path`：登录校验端点，只测试登录时可只配置此项；`credential_check_method` 默认 `GET`，`credential_check_success` 可写正则或固定文本。
 - `path`：签到端点，只签到时可只配置此项；`method` 支持 `GET / POST`，`data` 作为表单提交，`json` 作为 JSON body，GET 时两者都会作为查询参数。
 - `success` / `already`：从响应中识别签到成功和今日已签到的正则。
 - `activity_path`：可选的最近动向端点；未配置时不会访问首页。
 
-API Key 模式只访问上述显式配置的端点，不探测路径、不访问首页、不加载站点模块，也不调用本机 Playwright / Browserless。纯 Key 站点没有声明 `auth: "api_key"` 时不会发起任何签到或登录请求；请求异常和结果中的 Key 会自动打码。
+认证方式按站点管理中的实际凭证自动选择：有 Cookie 时继续走 Cookie 流程，即使同时残留 ApiKey / Token 也不会误用；没有 Cookie、只有 ApiKey / Token 时，只有规则明确配置了固定端点才切到 API 模式，避免把 Key 发到默认签到路径。API Key 模式不探测路径、不访问首页、不加载站点模块，也不调用本机 Playwright / Browserless；请求异常和结果中的 Key 会自动打码。
 
 ### 彩虹岛选择题签到
 
@@ -130,7 +130,7 @@ class Example:
 
 - **签到返回 404**：站点签到路径不是 `/attendance.php`，用规则里的 `path` 指定
 - **Cookie 无效**：重新复制 Cookie，或在「登录站点」里填账号密码
-- **纯 Key 站点提示未声明规则**：补上 `auth: "api_key"` 和固定的 `path` / `credential_check_path`；未声明前插件不会发请求
+- **纯 Key 站点提示未声明规则**：补上固定的 `path` / `credential_check_path` 即可，插件会自动识别；不填写端点时不会发请求。`auth: "api_key"` 仅作为可选的强制 API 模式
 - **API Key 站点能否回退 Browserless**：不能。API Key 模式只允许显式固定 HTTP 端点，避免把密钥交给浏览器或探测未知路径
 - **卡在 Cloudflare / Turnstile**：可填写 Browserless 地址与 Token。插件优先用本机 Playwright，失败或缺少浏览器助手时可按规则回退到 Browserless。回退可能发送账号密码，且只调用官方 `solve`，能否通过仍取决于节点出口与站点风控
 - **最近动向未读取到**：提示里会列出试过的页面，可用 `activity_path` 指定

@@ -10,14 +10,15 @@ PT 站点自动签到，支持 V2 / V3。签到默认走 HTTP 直连，支持 Co
 
 - HTTP 直连签到（NexusPHP），默认路径 404 时自动查找签到入口
 - 内置站点预设（观众、学校、憨憨、SUNNYPT、TTG、HDKylin、AGSVPT、LuckPT 等），未覆盖的站点可写自定义规则
-- API Key / Token 站点支持显式固定端点登录验证和签到；只访问配置的端点，不回退浏览器
+- API Key / Token 站点支持固定端点登录验证和签到；纯 Key 站点自动识别，只访问配置的端点，不回退浏览器
+- 站点选择显示实际认证类型（Cookie / ApiKey / Token），无需同时填写两种凭证
 - 普通 Cookie 站点遇验证码 / Cloudflare / Turnstile 时可按规则改用 Browserless
 - 详情页分「签到状态」「登录状态」，结果列显示奖励或失败原因
 - 当天已签到成功的站点跳过，通知只统计成功与失败数量
 
 ### API Key 登录与签到
 
-纯 API Key / Token 站点需在「自定义站点规则」中声明 `auth: "api_key"`，并填写固定的登录验证 / 签到端点。该模式不会探测路径、访问首页、加载站点模块或调用 Browserless；未声明 API 规则的纯 Key 站点不会发起请求。
+纯 API Key / Token 站点只需在「自定义站点规则」中填写固定的 `path` 或 `credential_check_path`，插件会自动切到 API 模式，不再要求写 `auth: "api_key"`。`api_key_source` 默认 `auto`，优先使用站点管理里的 ApiKey，没有时再使用 Token。纯 Cookie 站点始终走 Cookie 流程；纯 Key 站点没有固定端点时不会探测路径或发起请求。API 模式不访问首页、不加载站点模块，也不调用 Browserless。
 
 完整示例和字段说明见 [插件 README](plugins.v2/ptsitesignin/README.md#api-key--token-登录与签到)。
 
