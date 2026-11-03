@@ -113,12 +113,13 @@ def inject_payload(after_html, verify_html=None, diag=None, goto=200):
     return payload
 
 
-def piggo_state(*, actionable=False, already=False, skip=False, login=False,
-                step_up=False, locked=False, disabled=False, present=True,
-                text="签到 · +10", url="https://piggo.me/calendar", calendar=None):
+def browser_flow_state(*, actionable=False, already=False, skip=False, login=False,
+                       step_up=False, locked=False, disabled=False, present=True,
+                       text="签到 · +10", url="https://signin.example.test/calendar",
+                       calendar=None):
     state = {
         "url": url,
-        "title": "猪猪",
+        "title": "示例站点",
         "login": login,
         "locked": locked,
         "stepUp": step_up,
@@ -137,8 +138,47 @@ def piggo_state(*, actionable=False, already=False, skip=False, login=False,
     return state
 
 
-def piggo_value(payload):
+def browser_flow_value(payload):
     return json.dumps(payload, ensure_ascii=False)
+
+
+DEDICATED_BROWSER_FLOW_RULE = {
+    "engine": "playwright",
+    "cookie_mode": "browser",
+    "path": "/calendar",
+    "submit_method": "dom_click",
+    "submit_selector": ".cal-att-pill.act",
+    "submit_text": "签到",
+    "playwright_state_selector": ".cal-att-pill",
+    "playwright_already_texts": ["已签到", "今日已签到", "今天已签到", "已簽到"],
+    "playwright_skip_texts": ["补签", "補簽"],
+    "captcha_response_path": "/v1/web/calendar/attendance",
+    "playwright_captcha_token_selector": "input[name='cf-turnstile-response']",
+    "playwright_captcha_wait": 30000,
+    "playwright_wait_for_ready": True,
+    "playwright_ready_wait": 20000,
+    "playwright_calendar_selector": ".cal-wrap",
+    "playwright_calendar_loading_selector": ".cal-wrap[aria-busy='true']",
+    "playwright_page_ready_selector": (
+        ".cal-att-pill, .cal-wrap:not([aria-busy='true']), "
+        "input[name='username'], form.step-up input[name='password'], "
+        ".denied-page, #idle-lock-title"
+    ),
+    "browser_auth_mode": "login_and_unlock",
+    "browser_login_url": "/login?redirect=/calendar",
+    "browser_login_username_selector": "input[name='username']",
+    "browser_login_password_selector": "input[name='password']",
+    "browser_login_submit_selector": "button.btn",
+    "browser_unlock_password_selector": "form.step-up input[name='password']",
+    "browser_unlock_submit_selector": "form.step-up button[type='submit']",
+    "browserless_fallback_mode": "piggo",
+    "browserless_auth_wait": 12000,
+    "browserless_click_wait": 8000,
+    "browserless_calendar_wait": 20000,
+    "solve_timeout": 60000,
+    "reconnect_wait": 60000,
+    "auto_wait": 30000,
+}
 
 
 class CoreRegressionTests(unittest.TestCase):
@@ -571,34 +611,22 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertIn("获得405个憨豆", result.message)
 
     def test_playwright_engine_presets(self):
-        # 猪猪有异地登录校验、SUNNYPT 是 Next.js：都改用本机 Playwright（IP 与家宽一致）
-        for url in ("https://piggo.me/", "https://sunnypt.top/"):
-            rule = self.core.resolve_rule({"url": url, "cookie": "c=1"}, {})
-            self.assertEqual(rule["engine"], "playwright", url)
-        piggo = self.core.resolve_rule({"url": "https://piggo.me/", "cookie": "c=1"}, {})
-        self.assertEqual(piggo["path"], "/calendar")
-        self.assertEqual(piggo["submit_text"], "签到")
-        self.assertEqual(piggo["playwright_state_selector"], ".cal-att-pill")
-        self.assertEqual(piggo["browser_auth_mode"], "login_and_unlock")
+        # SUNNYPT 是 Next.js：改用本机 Playwright（IP 与家宽一致）
+        url = "https://sunnypt.top/"
+        rule = self.core.resolve_rule({"url": url, "cookie": "c=1"}, {})
+        self.assertEqual(rule["engine"], "playwright", url)
 
     def test_playwright_sign_without_helper(self):
         # 本机没有 Playwright 时返回 None，交给上层换引擎（不报错、不误判）
         self.assertIsNone(self.core.playwright_sign(
-            {"url": "https://piggo.me/", "cookie": "c=1"},
+            {"url": "https://signin.example.test/", "cookie": "c=1"},
             {"engine": "playwright", "path": "/index.php"}))
 
-    def test_piggo_preset(self):
-        # 猪猪改为前后端分离日历：登录、空闲解锁和签到都交给同一个真实浏览器会话。
-        rule = self.core.resolve_rule({"url": "https://piggo.me/", "cookie": "c=1"}, {})
-        self.assertEqual(rule["engine"], "playwright")
-        self.assertEqual(rule["path"], "/calendar")
-        self.assertNotIn("retry_paths", rule)
-        self.assertEqual(rule["submit_selector"], ".cal-att-pill.act")
-        self.assertEqual(rule["submit_text"], "签到")
-        self.assertEqual(rule["submit_method"], "dom_click")
-        self.assertEqual(rule["captcha_response_path"], "/v1/web/calendar/attendance")
-        self.assertEqual(rule["playwright_captcha_wait"], 30000)
-        self.assertEqual(rule["wait"], 15000)
+    def test_piggo_preset_removed(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                self.assertNotIn("piggo.me", core.DEFAULT_RULES)
+                self.assertIsNone(core.preset_for_host("piggo.me"))
 
     def test_waf_page_is_treated_as_challenge(self):
         # 雷池（SafeLine）WAF 安全检测页：按挑战处理，交给浏览器重试
@@ -1482,23 +1510,21 @@ class HtptTests(unittest.TestCase):
 
 
 class SecondFactorTests(unittest.TestCase):
-    """站点要求二级验证时要说清楚原因（猪猪的异地登录验证页）。"""
+    """站点要求二级验证时要说清楚原因。"""
 
-    def test_piggo_second_factor_page(self):
+    def test_second_factor_page(self):
         for core in CORES:
             with self.subTest(core=core.__name__):
-                rule = core.DEFAULT_RULES["piggo.me"]
-                page = ("<title>猪猪 :: 异地登录安全验证</title>"
+                page = ("<title>示例站点 :: 异地登录安全验证</title>"
                         "<div>安全 验证 2FA 忘记二级验证? 点击这里自助解绑 立即提交</div>")
-                result = core.classify(page, rule)
+                result = core.classify(page, {})
                 self.assertEqual(result.status, "failed")
                 self.assertIn("二级验证", result.message)
 
     def test_normal_page_still_works(self):
         for core in CORES:
             with self.subTest(core=core.__name__):
-                rule = core.DEFAULT_RULES["piggo.me"]
-                self.assertEqual(core.classify("<div>签到成功</div>", rule).status, "success")
+                self.assertEqual(core.classify("<div>签到成功</div>", {}).status, "success")
 
 
 class HtptModuleTests(unittest.TestCase):
@@ -1717,9 +1743,9 @@ class ModuleFallbackTests(unittest.TestCase):
         with mock.patch.object(module, "playwright_sign",
                                return_value=module.SignResult("success", "本机签到成功")):
             outcome = plugin._sign_with_engine(
-                {"url": "https://piggo.me", "username": "u", "password": "p"},
+                {"url": "https://signin.example.test", "username": "u", "password": "p"},
                 {"engine": "playwright", "path": "/calendar", "browserless_fallback": True},
-                "playwright", signer, "猪猪")
+                "playwright", signer, "示例站点")
         self.assertEqual(outcome.status, "success")
         self.assertEqual(signer.calls, 0)
 
@@ -1743,9 +1769,9 @@ class ModuleFallbackTests(unittest.TestCase):
         with mock.patch.object(module, "playwright_sign",
                                return_value=module.SignResult("failed", "本机未取得 token")):
             outcome = plugin._sign_with_engine(
-                {"url": "https://piggo.me", "username": "u", "password": "p"},
+                {"url": "https://signin.example.test", "username": "u", "password": "p"},
                 {"engine": "playwright", "path": "/calendar", "browserless_fallback": True},
-                "playwright", signer, "猪猪")
+                "playwright", signer, "示例站点")
         self.assertEqual(outcome.status, "success")
         self.assertIn("本机 Playwright 失败", outcome.message)
         self.assertIn("Browserless", outcome.message)
@@ -1765,9 +1791,9 @@ class ModuleFallbackTests(unittest.TestCase):
 
         with mock.patch.object(module, "playwright_sign", return_value=None):
             outcome = plugin._sign_with_engine(
-                {"url": "https://piggo.me", "username": "u", "password": "p"},
+                {"url": "https://signin.example.test", "username": "u", "password": "p"},
                 {"engine": "playwright", "path": "/calendar", "browserless_fallback": True},
-                "playwright", _Signer(), "猪猪")
+                "playwright", _Signer(), "示例站点")
         self.assertEqual(outcome.status, "success")
         self.assertIn("本机未提供 Playwright", outcome.message)
 
@@ -1785,22 +1811,25 @@ class ModuleFallbackTests(unittest.TestCase):
             def sign(self, info, rule):
                 return module.SignResult("success", "Browserless 签到成功")
 
-        info = {"id": 1, "name": "猪猪", "url": "https://piggo.me",
-                "username": "u", "password": "p"}
+        info = {"id": 1, "name": "示例站点", "url": "https://signin.example.test",
+                "cookie": "c=1"}
+        rules = {"signin.example.test": {
+            "engine": "playwright", "path": "/calendar", "browserless_fallback": True,
+        }}
         with mock.patch.object(module, "run_site_module", return_value=None), \
                 mock.patch.object(module, "playwright_sign",
                                   return_value=module.SignResult("failed", "本机失败")):
-            row = plugin._sign_one(info, {}, _Signer())
+            row = plugin._sign_one(info, rules, _Signer())
         self.assertEqual(row["status"], "success")
         self.assertEqual(row["engine"], "playwright")
         self.assertIn("Browserless", row["message"])
 
 
-class PiggoBrowserlessTests(unittest.TestCase):
-    """猪猪 Browserless：账号登录、空闲解锁、solve 后最多重试一次。"""
+class DedicatedBrowserlessFlowTests(unittest.TestCase):
+    """专用 Browserless 流程：账号登录、空闲解锁、solve 后最多重试一次。"""
 
-    SESSION_1 = "https://sessions.browserless.io/e/piggo-1/bql"
-    SESSION_2 = "https://sessions.browserless.io/e/piggo-2/bql"
+    SESSION_1 = "https://sessions.browserless.io/e/flow-1/bql"
+    SESSION_2 = "https://sessions.browserless.io/e/flow-2/bql"
 
     @classmethod
     def cores(cls):
@@ -1810,10 +1839,10 @@ class PiggoBrowserlessTests(unittest.TestCase):
         return make_stub_signer(core, responses)
 
     def _rule(self, core):
-        return dict(core.DEFAULT_RULES["piggo.me"])
+        return dict(DEDICATED_BROWSER_FLOW_RULE)
 
     def _site(self, cookie="", username="demo-user", password="demo-password"):
-        site = {"url": "https://piggo.me", "cookie": cookie, "ua": "Test UA"}
+        site = {"url": "https://signin.example.test", "cookie": cookie, "ua": "Test UA"}
         if username:
             site["username"] = username
         if password:
@@ -1825,9 +1854,9 @@ class PiggoBrowserlessTests(unittest.TestCase):
         if session is None:
             session = self.SESSION_1
         payload = {
-            "login": {"value": piggo_value({"submitted": login_submitted})},
-            "unlock": {"value": piggo_value({"submitted": unlock_submitted})},
-            "state": {"value": piggo_value(state)},
+            "login": {"value": browser_flow_value({"submitted": login_submitted})},
+            "unlock": {"value": browser_flow_value({"submitted": unlock_submitted})},
+            "state": {"value": browser_flow_value(state)},
             "html": {"html": "<html><body>calendar</body></html>"},
         }
         if session:
@@ -1839,10 +1868,10 @@ class PiggoBrowserlessTests(unittest.TestCase):
         if session is None:
             session = self.SESSION_2
         payload = {
-            "stateBefore": {"value": piggo_value(before or piggo_state(actionable=True))},
-            "click": {"value": piggo_value({"clicked": clicked, "reason": "test"})},
+            "stateBefore": {"value": browser_flow_value(before or browser_flow_state(actionable=True))},
+            "click": {"value": browser_flow_value({"clicked": clicked, "reason": "test"})},
             "solve": {"found": bool(token), "solved": bool(token), "token": token},
-            "stateAfter": {"value": piggo_value(after or piggo_state())},
+            "stateAfter": {"value": browser_flow_value(after or browser_flow_state())},
         }
         if session:
             payload["session"] = {"browserQLEndpoint": session}
@@ -1851,8 +1880,8 @@ class PiggoBrowserlessTests(unittest.TestCase):
     def _submit(self, *, injected=True, clicked=True, after=None,
                 html="<html><body>calendar</body></html>"):
         return {
-            "inject": {"value": piggo_value({"injected": injected, "clicked": clicked})},
-            "stateAfter": {"value": piggo_value(after or piggo_state())},
+            "inject": {"value": browser_flow_value({"injected": injected, "clicked": clicked})},
+            "stateAfter": {"value": browser_flow_value(after or browser_flow_state())},
             "html": {"html": html},
         }
 
@@ -1860,9 +1889,9 @@ class PiggoBrowserlessTests(unittest.TestCase):
         for core in self.cores():
             with self.subTest(core=core.__name__):
                 signer = self._signer(core, [
-                    self._prepare(piggo_state(actionable=True), login_submitted=True),
+                    self._prepare(browser_flow_state(actionable=True), login_submitted=True),
                     self._solve(token="synthetic-turnstile-token"),
-                    self._submit(after=piggo_state(already=True, text="已签到")),
+                    self._submit(after=browser_flow_state(already=True, text="已签到")),
                 ])
                 result = signer.sign(self._site(), self._rule(core))
                 self.assertEqual(result.status, "success")
@@ -1870,8 +1899,8 @@ class PiggoBrowserlessTests(unittest.TestCase):
                                  ["PiggoPrepare", "PiggoSolve", "PiggoSubmit"])
                 self.assertEqual(signer.calls[0][1]["cookies"], [])
                 self.assertEqual(signer.endpoints[0], None)
-                self.assertIn("piggo-1", signer.endpoints[1])
-                self.assertIn("piggo-2", signer.endpoints[2])
+                self.assertIn("flow-1", signer.endpoints[1])
+                self.assertIn("flow-2", signer.endpoints[2])
                 self.assertNotIn("demo-password", result.message)
                 self.assertNotIn("synthetic-turnstile-token", result.message)
                 for query in signer.queries:
@@ -1886,7 +1915,7 @@ class PiggoBrowserlessTests(unittest.TestCase):
         for core in self.cores():
             with self.subTest(core=core.__name__):
                 signer = self._signer(core, [
-                    self._prepare(piggo_state(
+                    self._prepare(browser_flow_state(
                         present=False,
                         calendar={"found": True, "loading": True, "ready": False})),
                 ])
@@ -1900,7 +1929,7 @@ class PiggoBrowserlessTests(unittest.TestCase):
         for core in self.cores():
             with self.subTest(core=core.__name__):
                 signer = self._signer(core, [
-                    self._prepare(piggo_state(
+                    self._prepare(browser_flow_state(
                         present=False,
                         calendar={"found": True, "loading": False, "ready": True})),
                 ])
@@ -1919,7 +1948,7 @@ class PiggoBrowserlessTests(unittest.TestCase):
                 self.assertIn("calendar: {found: !!calendarNode, loading: calendarLoading", script)
                 self.assertIn("ready: !!calendarNode && !calendarLoading", script)
 
-    def test_wait_budget_covers_all_three_piggo_stages(self):
+    def test_wait_budget_covers_all_three_stages(self):
         for core in self.cores():
             with self.subTest(core=core.__name__):
                 rule = self._rule(core)
@@ -1937,7 +1966,7 @@ class PiggoBrowserlessTests(unittest.TestCase):
         for core in self.cores():
             with self.subTest(core=core.__name__):
                 signer = self._signer(core, [
-                    self._prepare(piggo_state(actionable=True)),
+                    self._prepare(browser_flow_state(actionable=True)),
                     self._solve(token=""),
                 ])
                 result = signer.sign(self._site(), self._rule(core))
@@ -1947,11 +1976,11 @@ class PiggoBrowserlessTests(unittest.TestCase):
                 self.assertEqual([call[0] for call in signer.calls],
                                  ["PiggoPrepare", "PiggoSolve"])
 
-    def test_piggo_skip_control_is_not_success(self):
+    def test_skip_control_is_not_success(self):
         for core in self.cores():
             with self.subTest(core=core.__name__):
                 signer = self._signer(core, [
-                    self._prepare(piggo_state(skip=True, text="补签")),
+                    self._prepare(browser_flow_state(skip=True, text="补签")),
                 ])
                 result = signer.sign(self._site(), self._rule(core))
                 self.assertEqual(result.status, "failed")
@@ -1962,10 +1991,10 @@ class PiggoBrowserlessTests(unittest.TestCase):
         for core in self.cores():
             with self.subTest(core=core.__name__):
                 signer = self._signer(core, [
-                    self._prepare(piggo_state(actionable=True)),
+                    self._prepare(browser_flow_state(actionable=True)),
                     self._solve(token="synthetic-turnstile-token"),
                     self._submit(clicked=False,
-                                 after=piggo_state(skip=True, text="补签"),
+                                 after=browser_flow_state(skip=True, text="补签"),
                                  html="<html><body>签到成功</body></html>"),
                 ])
                 result = signer.sign(self._site(), self._rule(core))
@@ -1977,7 +2006,7 @@ class PiggoBrowserlessTests(unittest.TestCase):
         for core in self.cores():
             with self.subTest(core=core.__name__):
                 signer = self._signer(core, [
-                    self._prepare(piggo_state(login=True), login_submitted=True),
+                    self._prepare(browser_flow_state(login=True), login_submitted=True),
                 ])
                 result = signer.sign(self._site(), self._rule(core))
                 self.assertEqual(result.status, "failed")
@@ -1988,7 +2017,7 @@ class PiggoBrowserlessTests(unittest.TestCase):
         for core in self.cores():
             with self.subTest(core=core.__name__):
                 signer = self._signer(core, [
-                    self._prepare(piggo_state(step_up=True, locked=True),
+                    self._prepare(browser_flow_state(step_up=True, locked=True),
                                   unlock_submitted=True),
                 ])
                 result = signer.sign(self._site(), self._rule(core))
@@ -2029,7 +2058,11 @@ class RuleKeyUniquenessTests(unittest.TestCase):
         from collections import Counter
         for directory in PLUGIN_DIRS:
             with self.subTest(plugin=directory.name):
-                text = (directory / "core.py").read_text(encoding="utf-8")
+                # 规则已从 core.py 拆到 default_rules.py；兼容还没有拆分文件的插件目录。
+                rules_file = directory / "default_rules.py"
+                if not rules_file.is_file():
+                    rules_file = directory / "core.py"
+                text = rules_file.read_text(encoding="utf-8")
                 start = text.index("DEFAULT_RULES")
                 brace = text.index("{", start)
                 depth = 0
@@ -2059,13 +2092,6 @@ class PlaywrightPathsTests(unittest.TestCase):
                                  [core.DEFAULT_HTTP_PATH, "/x"])
                 self.assertEqual(core.playwright_paths({}), [core.DEFAULT_HTTP_PATH])
 
-    def test_piggo_rule_uses_single_calendar_path(self):
-        for core in CORES:
-            with self.subTest(core=core.__name__):
-                rule = core.DEFAULT_RULES["piggo.me"]
-                self.assertEqual(core.playwright_paths(rule), ["/calendar"])
-
-
 class DomainAliasTests(unittest.TestCase):
     """站点换域名：通过别名映射沿用原规则（杜比 hddolby.com → uhddolby.com）。"""
 
@@ -2086,37 +2112,31 @@ class DomainAliasTests(unittest.TestCase):
                 self.assertIsNone(core.preset_for_host("unknown.example.invalid"))
 
 
-class PiggoCookieModeTests(unittest.TestCase):
-    """猪猪：Cookie 要写进浏览器 Cookie 存储（add_cookies），而不是固定请求头。"""
+class BrowserCookieModeTests(unittest.TestCase):
+    """浏览器流程的 Cookie 要写进 Cookie 存储，而不是固定请求头。"""
 
-    COOKIE = ("cf_clearance=abc; pigo_np_web_session=xyz; sl-session=qq==; "
+    COOKIE = ("cf_clearance=abc; site_session=xyz; sl-session=qq==; "
               "sl-challenge-server=cloud")
 
     def test_cookie_list(self):
         for core in CORES:
             with self.subTest(core=core.__name__):
-                items = core.cookie_list_for_context(self.COOKIE, "https://piggo.me/index.php")
+                items = core.cookie_list_for_context(
+                    self.COOKIE, "https://signin.example.test/index.php")
                 names = [item["name"] for item in items]
                 self.assertIn("cf_clearance", names)
                 self.assertIn("sl-session", names)
-                self.assertTrue(all(item["url"] == "https://piggo.me/" for item in items))
+                self.assertTrue(all(
+                    item["url"] == "https://signin.example.test/" for item in items))
 
     def test_bad_url_returns_empty(self):
         for core in CORES:
             with self.subTest(core=core.__name__):
                 self.assertEqual(core.cookie_list_for_context(self.COOKIE, ""), [])
 
-    def test_piggo_rule_uses_browser_cookie(self):
-        for core in CORES:
-            with self.subTest(core=core.__name__):
-                rule = core.DEFAULT_RULES["piggo.me"]
-                self.assertEqual(rule["engine"], "playwright")
-                self.assertEqual(rule["cookie_mode"], "browser")
-                self.assertEqual(rule["submit_text"], "签到")
-
 
 class PlaywrightCaptchaTests(unittest.TestCase):
-    """猪猪签到接口要求 Turnstile 时，必须诚实失败且最多提交两次。"""
+    """签到接口要求 Turnstile 时，必须诚实失败且最多提交两次。"""
 
     RULE = {
         "engine": "playwright",
@@ -2155,7 +2175,7 @@ class PlaywrightCaptchaTests(unittest.TestCase):
             self.click_count = 0
             self.listeners = {}
             self.response = PlaywrightCaptchaTests._Response(
-                "https://piggo.me/v1/web/calendar/attendance",
+                "https://signin.example.test/v1/web/calendar/attendance",
                 422,
                 {"code": 422,
                  "data": {"message": "请完成人机验证", "need_captcha": True,
@@ -2223,7 +2243,7 @@ class PlaywrightCaptchaTests(unittest.TestCase):
             def action(self, **kwargs):
                 return kwargs["callback"](page)
 
-        site = {"url": "https://piggo.me", "cookie": "c=1"}
+        site = {"url": "https://signin.example.test", "cookie": "c=1"}
         with mock.patch.object(core, "_load_playwright_helper", return_value=Helper):
             result = core.playwright_sign(site, rule or PlaywrightCaptchaTests.RULE, timeout=1)
         return result, page
@@ -2282,7 +2302,7 @@ class PlaywrightCaptchaTests(unittest.TestCase):
         for core in CORES:
             with self.subTest(core=core.__name__):
                 response = self._Response(
-                    "https://piggo.me/v1/web/calendar/attendance?x=1",
+                    "https://signin.example.test/v1/web/calendar/attendance?x=1",
                     422,
                     {"data": {"message": "请完成人机验证", "need_captcha": True}})
                 result = core.playwright_captcha_response_result(
@@ -2294,7 +2314,7 @@ class PlaywrightCaptchaTests(unittest.TestCase):
                 self.assertNotIn("DO_NOT_OUTPUT", result.message)
 
                 other = self._Response(
-                    "https://piggo.me/v1/web/other", 422,
+                    "https://signin.example.test/v1/web/other", 422,
                     {"data": {"need_captcha": True}})
                 self.assertIsNone(core.playwright_captcha_response_result(
                     "/v1/web/calendar/attendance", other))
