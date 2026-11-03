@@ -1,11 +1,18 @@
 from __future__ import annotations
 
 import re
+import sys
 import threading
+import types
 import unittest
 from unittest import mock
 
-import requests
+try:
+    import requests
+except ModuleNotFoundError:
+    requests = types.ModuleType("requests")
+    requests.Session = lambda: None
+    sys.modules["requests"] = requests
 
 from tests.v3.ptsitesignin.test_core import CORES
 from tests.v3.ptsitesignin.test_plugin_page import PLUGINS
@@ -183,6 +190,7 @@ class SiteSelectionTests(unittest.TestCase):
         item._stop_event = threading.Event()
         item._read_activity = True
         item._timeout = 3
+        item._site_rules = "{}"
         return item
 
     def test_site_id_string_is_not_split(self):
@@ -214,21 +222,29 @@ class SiteSelectionTests(unittest.TestCase):
             self.assertIn("不在本次", activity[1])
             self.assertEqual(calls, [])
 
-    def test_key_only_site_does_not_issue_network_request(self):
+    def test_key_only_site_uses_common_login_and_sign_flow(self):
         for module in self.each_plugin():
             item = self.plugin(module)
-            calls = []
+            item._read_activity = False
             info = {"id": 12, "name": "Key站", "url": "https://key.example/",
-                    "apikey": "api-key", "cookie": ""}
-            with mock.patch.object(module, "site_login", side_effect=lambda *a, **k: calls.append("login")), \
-                    mock.patch.object(module, "http_sign_auto", side_effect=lambda *a, **k: calls.append("sign")), \
-                    mock.patch.object(module, "read_activity", side_effect=lambda *a, **k: calls.append("activity")):
+                    "apikey": "test-api-key-not-real", "cookie": ""}
+            with mock.patch.object(
+                    module, "http_check_api_key",
+                    return_value=module.LoginResult("success", "API Key 有效")) as check_api, \
+                    mock.patch.object(
+                        module, "http_sign_auto",
+                        return_value=module.SignResult("success", "签到成功")) as sign_api, \
+                    mock.patch.object(
+                        module, "site_login",
+                        side_effect=AssertionError("纯 Key 站点不得走账号密码登录")), \
+                    mock.patch.object(module, "run_site_module", return_value=None) as run:
                 sign = item._sign_one(info, {}, None, run_id=7, allowed_site_ids={12})
                 login = item._login_one(info, run_id=7, allowed_site_ids={12})
-            self.assertEqual(sign["status"], "failed")
-            self.assertEqual(login["status"], "failed")
-            self.assertIn("API Key", sign["message"])
-            self.assertEqual(calls, [])
+            self.assertEqual(sign["status"], "success")
+            self.assertEqual(login["status"], "login")
+            check_api.assert_called_once()
+            sign_api.assert_called_once()
+            run.assert_called_once()
 
     def test_quiz_rule_skips_site_module_and_browser_fallback(self):
         for module in self.each_plugin():

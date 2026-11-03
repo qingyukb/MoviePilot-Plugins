@@ -476,7 +476,7 @@ class PTSiteSignIn(_PluginBase):
         rules_hint = ('键为域名或站点 ID。HTTP：{"path":"/attendance.php","success":"正则","already":"正则"}；'
                       'API Key：{"api_key_source":"auto","path":"/api/checkin",'
                       '"credential_check_path":"/api/profile"}（纯 Key 站点会自动识别，不再要求填写 auth；'
-                      '固定端点，不探测、不回退浏览器）；'
+                      '默认 /attendance.php，端点可覆盖；与 Cookie 共用签到和页面发现，不回退浏览器）；'
                       'Browserless：{"engine":"browserless","mode":"cloudflare|image|trigger_image|altcha|open_page", ...}；'
                       '页面内嵌 Turnstile、验证通过后由站点自己提交（如观众）用 {"submit_method":"auto"}；'
                       '点签到后跳 WAF / Cloudflare 检测页时用 {"wait": 12000} 等它放行；'
@@ -789,7 +789,7 @@ class PTSiteSignIn(_PluginBase):
 
     @staticmethod
     def _key_only_site(info: Dict[str, Any]) -> bool:
-        """站点只有 API Key / Token、没有 Cookie。是否可执行由显式 API 规则决定。"""
+        """站点只有 API Key / Token、没有 Cookie。"""
         cookie = str(info.get("cookie") or "").strip()
         credential = (str(info.get("apikey") or "").strip()
                       or str(info.get("token") or "").strip())
@@ -894,39 +894,6 @@ class PTSiteSignIn(_PluginBase):
                 return True
         return False
 
-    def _sign_api_key_one(self, info: Dict[str, Any], rule: Dict[str, Any],
-                          run_id: Optional[int], allowed_site_ids: Optional[Set[int]]) -> Dict[str, str]:
-        """执行显式 API Key 签到；不登录、不加载站点模块、不调用浏览器。"""
-        guard = self._site_guard(info, run_id, allowed_site_ids, "签到")
-        if guard:
-            return self._skip_result(info, guard)
-        site_name = str(info.get("name") or info.get("url") or "未知站点")
-        dual = bool(info.get("dual"))
-        try:
-            outcome = http_sign_auto(info, rule, timeout=self._timeout,
-                                     proxies=self._proxies_for(info))
-        except Exception:
-            # 异常文本可能带站点回显，不把异常内容写进日志或结果。
-            logger.error("PT站点签到：%s API Key 签到异常", site_name)
-            outcome = SignResult("failed", "API Key 签到出现未预期错误")
-        if outcome.status in {"success", "already"}:
-            logger.info("PT站点签到：%s %s", site_name, outcome.message)
-            login_text = "API Key 已用于签到"
-        else:
-            logger.warning("PT站点签到：%s 失败 - %s", site_name, outcome.message)
-            login_text = "API Key 签到失败"
-        activity_text, activity_source = (
-            self._read_site_activity(info, rule, run_id, allowed_site_ids)
-            if (outcome.status in {"success", "already"} and self._read_activity) else ("", ""))
-        return {"site": site_name, "site_id": str(info.get("id") or ""),
-                "state_key": site_state_key(info), "engine": "http",
-                "status": outcome.status, "message": outcome.message,
-                "login": login_text, "activity": activity_text,
-                "activity_source": activity_source, "ran_at": self._now(),
-                "bonus": message_bonus(outcome.message), "dual": dual,
-                "login_status": (("login" if outcome.status in {"success", "already"}
-                                  else "login_failed") if dual else "")}
-
     def _sign_one(self, info: Dict[str, Any], rules: Dict[str, Dict[str, Any]],
                   signer: Optional[BrowserlessSigner], run_id: Optional[int] = None,
                   allowed_site_ids: Optional[Set[int]] = None) -> Dict[str, str]:
@@ -942,17 +909,12 @@ class PTSiteSignIn(_PluginBase):
         except ValueError as error:
             initial_rule = {}
             initial_rule_error = error
-        if is_api_key_rule(initial_rule):
-            logger.info("PT站点签到：开始 %s（API Key）", site_name)
-            return self._sign_api_key_one(info, initial_rule, run_id, allowed_site_ids)
-        if self._key_only_site(info):
-            reason = ("站点仅有 ApiKey / Token，但自定义规则未声明固定签到或验证端点，已跳过且未发起请求"
-                      "；请在自定义站点规则中补全 path / credential_check_path 等字段")
-            if initial_rule_error is not None:
-                reason += f"；规则错误：{initial_rule_error}"
+        if self._key_only_site(info) and initial_rule_error is not None:
+            reason = f"API Key 规则无效，未发起请求：{initial_rule_error}"
             logger.warning("PT站点签到：%s，跳过站点 %s", reason, site_name)
             return self._skip_result(info, reason)
-        logger.info("PT站点签到：开始 %s", site_name)
+        api_mode = is_api_key_rule(initial_rule)
+        logger.info("PT站点签到：开始 %s%s", site_name, "（API Key）" if api_mode else "")
         engine = "http"
         login_text = ""
         # 同时勾了「签到站点」和「登录站点」的站点：一轮里把真实登录 + 签到 + 读最近动向都做掉，
@@ -970,9 +932,12 @@ class PTSiteSignIn(_PluginBase):
             auth_rule = resolve_rule(info, rules)
         except ValueError:
             auth_rule = {}
+        api_mode = is_api_key_rule(auth_rule)
         browser_auth = str(auth_rule.get("browser_auth_mode") or "").strip().lower()
         playwright_info: Dict[str, Any] = info
-        if browser_auth:
+        if api_mode:
+            login_text = "API Key 已配置" if dual else ""
+        elif browser_auth:
             if account:
                 # 只在交给浏览器回调的临时副本中放账号密码；不写回站点记录/结果。
                 playwright_info = dict(info)
@@ -1067,7 +1032,10 @@ class PTSiteSignIn(_PluginBase):
         except ValueError as error:
             outcome = SignResult("failed", str(error))
         except Exception:
-            logger.exception("PT站点签到失败：%s", site_name)
+            if api_mode:
+                logger.error("PT站点签到失败：%s（API Key 模式异常已隐藏详情）", site_name)
+            else:
+                logger.exception("PT站点签到失败：%s", site_name)
             outcome = SignResult("failed", "签到执行出现未预期错误")
         if outcome.status in {"success", "already"}:
             logger.info("PT站点签到：%s %s", site_name, outcome.message)
@@ -1108,7 +1076,7 @@ class PTSiteSignIn(_PluginBase):
                            info.get("name") or info.get("url") or info.get("id"))
             return self._skip_result(info, guard)
         site_name = str(info.get("name") or info.get("url") or "未知站点")
-        # 仅登录也支持显式 API Key 验证。
+        # API Key 与 Cookie 共用同一套登录结果、最近动向和状态记录流程。
         try:
             settings_rules = parse_rules(self._site_rules)
             login_rule = resolve_rule(info, settings_rules)
@@ -1117,7 +1085,10 @@ class PTSiteSignIn(_PluginBase):
                 return self._skip_result(
                     info, f"API Key 规则无效，未发起请求：{error}")
             login_rule = {}
-        if is_api_key_rule(login_rule):
+        api_mode = is_api_key_rule(login_rule)
+        login_text = ""
+        login_ok = False
+        if api_mode:
             logger.info("PT站点签到：仅登录 %s（API Key）", site_name)
             try:
                 check = http_check_api_key(info, login_rule, timeout=self._timeout,
@@ -1128,25 +1099,13 @@ class PTSiteSignIn(_PluginBase):
                 check = LoginResult("failed", "API Key 验证出现未预期错误")
             login_ok = check.status == "success"
             login_text = check.message
-            guard = self._site_guard(info, run_id, allowed_site_ids, "仅登录")
-            if guard:
-                return self._skip_result(info, guard)
-            activity_text, activity_source = (
-                self._read_site_activity(info, login_rule, run_id, allowed_site_ids)
-                if (login_ok and self._read_activity) else ("", ""))
-            return {"site": site_name, "site_id": str(info.get("id") or ""),
-                    "state_key": site_state_key(info), "engine": "http",
-                    "status": "login" if login_ok else "login_failed",
-                    "message": login_text, "login": "", "activity": activity_text,
-                    "activity_source": activity_source, "ran_at": self._now()}
-        if self._key_only_site(info):
+        elif self._key_only_site(info):
             return self._skip_result(
-                info, "站点仅有 API Key / Token，但未声明 auth=api_key 登录规则，已跳过且未发起请求")
-        logger.info("PT站点签到：仅登录 %s", site_name)
-        login_text = ""
-        login_ok = False
-        account = account_from_site(info)
-        if account_ready(account):
+                info, "站点仅有 API Key / Token，但规则未启用 API Key 认证，已跳过且未发起请求")
+        else:
+            logger.info("PT站点签到：仅登录 %s", site_name)
+            account = account_from_site(info)
+        if not api_mode and not self._key_only_site(info) and account_ready(account):
             proxies = self._proxies_for(info)
             try:
                 login_result = site_login(info, account, timeout=self._timeout, proxies=proxies)
@@ -1160,11 +1119,11 @@ class PTSiteSignIn(_PluginBase):
                     login_text = "成功（已换用新 Cookie）"
                 else:
                     login_text = "失败：" + login_result.message
-        elif account:
+        elif not api_mode and not self._key_only_site(info) and account:
             login_text = "未提供可用的账号密码"
-        elif str(info.get("cookie") or "").strip():
+        elif not api_mode and str(info.get("cookie") or "").strip():
             login_ok = True
-        else:
+        elif not api_mode:
             login_text = "未配置账号密码或 Cookie"
 
         # 登录可能耗时，期间配置可能重载；读取最近动向前再校验一次。
@@ -1173,7 +1132,7 @@ class PTSiteSignIn(_PluginBase):
             logger.warning("PT站点签到：%s，跳过站点 %s", guard, site_name)
             return self._skip_result(info, guard)
         activity_text, activity_source = (
-            self._read_site_activity(info, run_id=run_id,
+            self._read_site_activity(info, login_rule, run_id=run_id,
                                      allowed_site_ids=allowed_site_ids)
             if (login_ok and self._read_activity) else ("", ""))
         return {"site": site_name, "site_id": str(info.get("id") or ""),
@@ -1198,7 +1157,7 @@ class PTSiteSignIn(_PluginBase):
                             rule: Optional[Dict[str, Any]] = None,
                             run_id: Optional[int] = None,
                             allowed_site_ids: Optional[Set[int]] = None) -> Tuple[str, str]:
-        """用登录态 Cookie 打开站点页面，返回（「最近动向」原文, 来源页面）。
+        """用 Cookie / API Key 登录态读取站点页面，返回（「最近动向」原文, 来源页面）。
 
         来源页面写进记录与日志；读不到时把原因（含试过的页面）也带回去，
         方便按站点用 activity_path 指定真正的动向页面。网络请求前统一校验
@@ -1239,7 +1198,7 @@ class PTSiteSignIn(_PluginBase):
 
     def _should_retry_site(self, info: Dict[str, Any],
                            rules: Dict[str, Dict[str, Any]]) -> bool:
-        """纯 Key 站点只有声明了 API 规则才重试；无规则时禁止盲试。"""
+        """Cookie 与 API Key 站点使用相同的失败重试策略；无效规则不盲试。"""
         if not self._key_only_site(info):
             return True
         try:
@@ -1294,7 +1253,8 @@ class PTSiteSignIn(_PluginBase):
                 page_html = fetch_page(target_url(str(info.get("url") or "").rstrip("/"),
                                                   str(rule.get("path") or DEFAULT_HTTP_PATH)),
                                        str(info.get("cookie") or ""), self._timeout,
-                                       self._proxies_for(info), str(info.get("ua") or ""))
+                                       self._proxies_for(info), str(info.get("ua") or ""),
+                                       site=info, rule=rule)
             fallback = fallback_rule(rule, outcome.challenge, page_html)
         except ValueError as error:
             return SignResult("failed", f"{outcome.message}；回退规则无效：{error}"), "http"
@@ -1303,7 +1263,8 @@ class PTSiteSignIn(_PluginBase):
         base_url = str(info.get("url") or "").rstrip("/")
         discovered = discover_signin_target(
             fetch_page(target_url(base_url, DEFAULT_INDEX_PATH), str(info.get("cookie") or ""),
-                       self._timeout, self._proxies_for(info), str(info.get("ua") or "")),
+                       self._timeout, self._proxies_for(info), str(info.get("ua") or ""),
+                       site=info, rule=rule),
             base_url)
         if discovered.get("path"):
             fallback = dict(fallback, path=str(discovered["path"]))

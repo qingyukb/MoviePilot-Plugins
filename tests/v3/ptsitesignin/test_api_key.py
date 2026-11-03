@@ -177,13 +177,14 @@ class ApiKeyCoreTests(unittest.TestCase):
                 self.assertNotEqual(rule.get("auth"), "api_key")
                 self.assertEqual(rule["path"], "/custom-signin")
 
-    def test_key_only_site_without_explicit_endpoint_does_not_auto_switch(self):
+    def test_key_only_site_without_explicit_endpoint_uses_default_path(self):
         for core in CORES:
             with self.subTest(core=core.__name__):
                 site = make_site(cookie="")
                 rule = core.resolve_rule(site, {
                     "api.example.test": {"success": "ok"}})
-                self.assertNotEqual(rule.get("auth"), "api_key")
+                self.assertEqual(rule["auth"], "api_key")
+                self.assertEqual(rule["path"], core.DEFAULT_HTTP_PATH)
 
     def test_login_only_and_sign_only_rules(self):
         for core in CORES:
@@ -191,7 +192,7 @@ class ApiKeyCoreTests(unittest.TestCase):
                 site = make_site()
                 login_rule = api_rule(core, site, credential_check_path="/api/profile",
                                       credential_check_success="ok")
-                self.assertNotIn("path", login_rule)
+                self.assertEqual(login_rule["path"], core.DEFAULT_HTTP_PATH)
                 check_session = FakeSession(
                     lambda method, url, kwargs: FakeResponse("{\"ok\":true}"))
                 with mock.patch.dict(sys.modules,
@@ -208,27 +209,35 @@ class ApiKeyCoreTests(unittest.TestCase):
                     signed = core.http_sign(site, sign_rule, timeout=5)
                 self.assertEqual(signed.status, "success")
 
-    def test_missing_operation_endpoint_fails_before_request(self):
+    def test_default_endpoints_and_invalid_methods(self):
         for core in CORES:
-            with self.subTest(core=core.__name__):
+            with self.subTest(core=core.__name__, case="sign default"):
                 site = make_site()
-                login_only = api_rule(core, site, credential_check_path="/api/profile")
-                sign_session = FakeSession(lambda *args: self.fail("不应发起签到请求"))
+                login_only = api_rule(
+                    core, site, credential_check_path="/api/profile",
+                    credential_check_success="ok")
+                sign_session = FakeSession(
+                    lambda method, url, kwargs: FakeResponse('{"success":true}'))
                 with mock.patch.dict(sys.modules,
                                      {"requests": fake_requests(sign_session)}):
                     signed = core.http_sign(site, login_only, timeout=5)
-                self.assertEqual(signed.status, "failed")
-                self.assertIn("未配置 path", signed.message)
-                self.assertEqual(sign_session.calls, [])
+                self.assertEqual(signed.status, "success")
+                self.assertEqual(sign_session.calls[0]["url"],
+                                 core.target_url(BASE_URL, core.DEFAULT_HTTP_PATH))
 
+            with self.subTest(core=core.__name__, case="check fallback"):
                 sign_only = api_rule(core, site, path="/api/checkin")
-                check_session = FakeSession(lambda *args: self.fail("不应发起验证请求"))
+                check_session = FakeSession(
+                    lambda method, url, kwargs: FakeResponse('{"success":true}'))
                 with mock.patch.dict(sys.modules,
                                      {"requests": fake_requests(check_session)}):
                     checked = core.http_check_api_key(site, sign_only, timeout=5)
-                self.assertEqual(checked.status, "failed")
-                self.assertIn("credential_check_path", checked.message)
-                self.assertEqual(check_session.calls, [])
+                self.assertEqual(checked.status, "success")
+                self.assertEqual(check_session.calls[0]["url"],
+                                 core.target_url(BASE_URL, "/api/checkin"))
+
+            with self.assertRaises(ValueError):
+                api_rule(core, site, method="PUT")
 
     def test_key_is_redacted_from_response_and_exception(self):
         for core in CORES:
@@ -270,17 +279,20 @@ class ApiKeyCoreTests(unittest.TestCase):
                 self.assertEqual(result.status, "success")
                 sign.assert_called_once_with(site, rule, timeout=5, proxies=None)
 
-    def test_activity_without_explicit_path_does_not_fetch_index(self):
+    def test_activity_uses_common_page_discovery(self):
         for core in CORES:
             with self.subTest(core=core.__name__):
                 site = make_site()
                 rule = api_rule(core, site, path="/api/checkin")
-                session = FakeSession(lambda *args: self.fail("不应读取首页"))
+                page = ("<html><body><table><tr><td>最近动向</td>"
+                        "<td>2026-11-04 12:00:00</td></tr></table></body></html>")
+                session = FakeSession(
+                    lambda method, url, kwargs: FakeResponse(page))
                 with mock.patch.dict(sys.modules, {"requests": fake_requests(session)}):
                     result = core.read_activity(site, "", timeout=5, rule=rule)
-                self.assertEqual(result.status, "failed")
-                self.assertIn("activity_path", result.message)
-                self.assertEqual(session.calls, [])
+                self.assertEqual(result.status, "success")
+                self.assertEqual(session.calls[0]["url"],
+                                 core.target_url(BASE_URL, core.DEFAULT_INDEX_PATH))
 
     def test_cross_origin_redirect_stops_without_second_request(self):
         for core in CORES:
@@ -329,11 +341,12 @@ class ApiKeyCoreTests(unittest.TestCase):
                     "auth": "api_key", "credential_check_path": "/api/profile"}}
                 rule = core.resolve_rule(site, custom)
                 self.assertEqual(rule["auth"], "api_key")
-                self.assertNotIn("path", rule)
+                self.assertEqual(rule["path"], core.DEFAULT_HTTP_PATH)
                 self.assertFalse(rule["auto_fallback"])
 
-                with self.assertRaises(ValueError):
-                    core.resolve_rule(site, {"audiences.me": {"auth": "api_key"}})
+                default_rule = core.resolve_rule(
+                    site, {"audiences.me": {"auth": "api_key"}})
+                self.assertEqual(default_rule["path"], core.DEFAULT_HTTP_PATH)
 
 
 class ApiKeyPluginTests(unittest.TestCase):
@@ -355,20 +368,24 @@ class ApiKeyPluginTests(unittest.TestCase):
             setattr(plugin, key, value)
         return plugin
 
-    def test_only_key_site_without_rule_makes_no_request(self):
+    def test_only_key_site_without_rule_uses_common_flow(self):
         info = make_site(apikey=SECRET, cookie="")
         for module in self.page.PLUGINS:
             with self.subTest(plugin=module.__name__):
                 plugin = self._plugin(module)
-                with mock.patch.object(module, "http_sign_auto",
-                                       side_effect=AssertionError("不应联网")) as sign, \
+                with mock.patch.object(
+                        module, "http_sign_auto",
+                        return_value=module.SignResult("success", "签到成功")) as sign, \
                         mock.patch.object(module, "run_site_module",
-                                          side_effect=AssertionError("不应加载模块")) as run:
+                                          return_value=None) as run:
                     row = plugin._sign_one(info, {}, None, run_id=1)
-                self.assertEqual(row["status"], "failed")
-                self.assertIn("未声明", row["message"])
-                sign.assert_not_called()
-                run.assert_not_called()
+                self.assertEqual(row["status"], "success")
+                sign.assert_called_once()
+                called_rule = sign.call_args.args[1]
+                self.assertEqual(called_rule["auth"], "api_key")
+                self.assertEqual(called_rule["path"], "/attendance.php")
+                self.assertFalse(called_rule["auto_fallback"])
+                run.assert_called_once()
 
     def test_api_key_rules_skip_browserless_initialization(self):
         info = make_site(cookie="c=1")
@@ -388,8 +405,8 @@ class ApiKeyPluginTests(unittest.TestCase):
                 plugin = self._plugin(module)
                 with mock.patch.object(module, "http_sign_auto",
                                        side_effect=AssertionError("不应联网")) as sign:
-                    row = plugin._sign_api_key_one(info, rule, run_id=1,
-                                                   allowed_site_ids={99})
+                    row = plugin._sign_one(info, {}, None, run_id=1,
+                                           allowed_site_ids={99})
                 self.assertEqual(row["status"], "failed")
                 self.assertIn("不在本次", row["message"])
                 sign.assert_not_called()

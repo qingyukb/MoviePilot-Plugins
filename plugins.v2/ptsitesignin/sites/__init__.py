@@ -18,45 +18,102 @@ from __future__ import annotations
 
 import json
 from typing import Any, Mapping, Optional, Tuple
+import urllib.parse
 
 DEFAULT_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 
 
 class SignContext:
-    """给站点模块用的小工具：带 Cookie 的 GET / POST、取图片、OCR。"""
+    """给站点模块用的小工具：带 Cookie / API Key 的 GET / POST、取图片、OCR。"""
 
     def __init__(self, site: Mapping[str, Any], timeout: int = 30,
-                 proxies: Optional[Mapping[str, str]] = None, logger: Any = None) -> None:
+                 proxies: Optional[Mapping[str, str]] = None, logger: Any = None,
+                 rule: Optional[Mapping[str, Any]] = None) -> None:
         self.site = site
         self.cookie = str(site.get("cookie") or "").strip()
         self.ua = str(site.get("ua") or "").strip() or DEFAULT_UA
         self.timeout = timeout
         self.proxies = dict(proxies) if proxies else None
         self.logger = logger
+        self.rule = dict(rule or {})
+        self.api_mode = str(self.rule.get("auth") or "").strip().lower() == "api_key"
+        self.api_key_header = str(self.rule.get("api_key_header") or "Authorization").strip()
+        source = str(self.rule.get("api_key_source") or "auto").strip().lower()
+        if source == "token":
+            self.api_key = str(site.get("token") or "").strip()
+        elif source == "apikey":
+            self.api_key = str(site.get("apikey") or "").strip()
+        else:
+            self.api_key = (str(site.get("apikey") or "").strip()
+                            or str(site.get("token") or "").strip())
+        default_prefix = "" if self.api_key_header.lower() == "x-api-key" else "Bearer "
+        self.api_key_prefix = str(self.rule.get("api_key_prefix", default_prefix))
 
     # ---------------- 基础请求 ----------------
     def _session(self):
         import requests
-        session = requests.Session()
-        session.headers.update({"User-Agent": self.ua, "Cookie": self.cookie,
-                                "Accept": "text/html,application/json,*/*;q=0.8"})
-        return session
+        return requests.Session()
+
+    def _same_origin(self, url: str) -> bool:
+        def origin(value: str):
+            parts = urllib.parse.urlparse(str(value or ""))
+            scheme = parts.scheme.lower()
+            host = str(parts.hostname or "").lower()
+            port = parts.port or (443 if scheme == "https" else 80 if scheme == "http" else None)
+            return scheme, host, port
+        base = str(self.site.get("url") or "")
+        return bool(base and origin(base) == origin(url) and origin(url)[1])
+
+    def _request(self, method: str, url: str, **kwargs):
+        if self.api_mode and (not self.api_key or not self._same_origin(url)):
+            return None
+        headers = dict(kwargs.pop("headers", None) or {})
+        headers.setdefault("User-Agent", self.ua)
+        headers.setdefault("Accept", "text/html,application/json,*/*;q=0.8")
+        if self.api_mode:
+            headers[self.api_key_header] = self.api_key_prefix + self.api_key
+        elif self.cookie:
+            headers["Cookie"] = self.cookie
+        try:
+            session = self._session()
+            if not self.api_mode:
+                return session.request(method, url, timeout=self.timeout,
+                                       allow_redirects=True, proxies=self.proxies,
+                                       headers=headers, **kwargs)
+            current_url = url
+            current_method = method.upper()
+            redirects = 0
+            while True:
+                response = session.request(current_method, current_url,
+                                           timeout=self.timeout,
+                                           allow_redirects=False,
+                                           proxies=self.proxies, headers=headers,
+                                           **kwargs)
+                status = int(getattr(response, "status_code", 0) or 0)
+                location = str((getattr(response, "headers", {}) or {}).get("Location") or "").strip()
+                if status not in {301, 302, 303, 307, 308} or not location:
+                    return response
+                if redirects >= 3:
+                    return None
+                next_url = urllib.parse.urljoin(current_url, location)
+                if not self._same_origin(next_url):
+                    return None
+                redirects += 1
+                if status in {301, 302, 303} and current_method != "GET":
+                    current_method = "GET"
+                    kwargs.pop("data", None)
+                    kwargs.pop("json", None)
+                current_url = next_url
+        except Exception:
+            return None
 
     def get(self, url: str, **kwargs):
-        try:
-            return self._session().get(url, timeout=self.timeout, allow_redirects=True,
-                                       proxies=self.proxies, **kwargs)
-        except Exception:
-            return None
+        return self._request("GET", url, **kwargs)
 
     def post(self, url: str, data=None, json_body=None, headers=None, **kwargs):
-        try:
-            return self._session().post(url, data=data, json=json_body, headers=headers,
-                                        timeout=self.timeout, allow_redirects=True,
-                                        proxies=self.proxies, **kwargs)
-        except Exception:
-            return None
+        return self._request("POST", url, data=data, json=json_body,
+                             headers=headers, **kwargs)
 
     def page(self, url: str, **kwargs) -> str:
         response = self.get(url, **kwargs)
