@@ -74,7 +74,7 @@ class FakeSession:
         self.calls = []
 
     def _handle(self, method: str, url: str, **kwargs):
-        self.calls.append((method, url, kwargs.get("data"), dict(kwargs)))
+        self.calls.append((method, url, kwargs.get("data")))
         for target, handler in sorted(self.routes.items(), key=lambda item: -len(item[0])):
             if target in url:
                 return handler(self, url)
@@ -152,7 +152,7 @@ class LoginCoreTests(unittest.TestCase):
                                         {"username": "u", "password": "p"}, timeout=5)
                 self.assertEqual(result.status, "success")
                 self.assertIn("c_secure_uid=123", result.cookie)
-                method, url, data, _ = session.calls[-1]
+                method, url, data = session.calls[-1]
                 self.assertEqual(method, "POST")
                 self.assertTrue(url.endswith("/takelogin.php"))
                 self.assertEqual(data["username"], "u")
@@ -452,9 +452,9 @@ class LoginCoreTests(unittest.TestCase):
                                                 rule, proxies=None)
                 self.assertIsNotNone(result, session.calls)
                 self.assertEqual(result.status, "success", result.message)
-                posted = [call for call in session.calls if call[0] == "POST"][0]
-                self.assertEqual(posted[3]["headers"].get("x-csrf-token"), "csrf123")
-                self.assertEqual(posted[2], b'{"all": 1, "resetModal": "true"}')
+                self.assertEqual(session.headers.get("x-csrf-token"), "csrf123")
+                posted = [call for call in session.calls if call[0] == "POST"][0][2]
+                self.assertEqual(posted, b'{"all": 1, "resetModal": "true"}')
 
     def test_http_two_step_posts_captured_token(self):
         # TTG 式：首页 JS 里有 token，POST 到 /signed.php 才算签到

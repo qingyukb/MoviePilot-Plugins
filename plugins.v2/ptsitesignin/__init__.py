@@ -85,9 +85,27 @@ from .core import (
     target_url,
 )
 
+# 日志里的失败原因最多保留多少字。
+LOG_TEXT_LIMIT = 120
+
+
 def mask_proxy(host: str) -> str:
     """代理地址可能带账号密码，日志里把凭据打码。"""
     return re.sub(r"//[^@/]+@", "//***@", str(host or ""))
+
+
+def compact_text(value: Any, limit: int = LOG_TEXT_LIMIT) -> str:
+    """
+    把日志文本压成单行，并限制最大长度。
+
+    :param value: 待压缩的日志内容
+    :param limit: 单条日志允许保留的最大字符数
+    :return: 去除多余空白并截断后的单行文本
+    """
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if len(text) <= limit:
+        return text
+    return text[:max(0, limit - 1)].rstrip() + "…"
 
 
 # ---------------------------------------------------------------- 常量
@@ -182,7 +200,7 @@ class PTSiteSignIn(_PluginBase):
     plugin_name = "PT站点签到"
     plugin_desc = ("PT 站点自动签到，支持 Cookie / 账号密码 / API Key 登录并读取最近动向；验证码或 Cloudflare 可按规则改用浏览器。")
     plugin_icon = "signin.png"
-    plugin_version = "2.0.5"
+    plugin_version = "2.0.6"
     plugin_author = "qingyukb"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "ptsignin_"
@@ -358,7 +376,7 @@ class PTSiteSignIn(_PluginBase):
         index = [str(item) for item in (self.get_data("history_index") or [])
                  if isinstance(item, str)]
         self.save_data("history_index", [item for item in index if item != key])
-        logger.info("PT站点签到：已清理本日缓存（%s 的记录），下一轮会重新签到", stamp)
+        logger.info(f"PT站点签到：已清理本日缓存（{stamp} 的记录），下一轮会重新签到")
 
     def _sites_to_run(self, infos: List[Dict[str, Any]]
                       ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
@@ -413,7 +431,7 @@ class PTSiteSignIn(_PluginBase):
         try:
             trigger = CronTrigger.from_crontab(self._cron)
         except ValueError:
-            logger.error("PT站点签到：Cron 表达式无效：%s", self._cron)
+            logger.error(f"PT站点签到：Cron 表达式无效：{self._cron}")
             return []
         return [{"id": "PTSiteSignIn.Run", "name": "PT站点签到", "trigger": trigger,
                  "func": self.run_sign_in, "kwargs": {}}]
@@ -476,7 +494,7 @@ class PTSiteSignIn(_PluginBase):
         rules_hint = ('键为域名或站点 ID。HTTP：{"path":"/attendance.php","success":"正则","already":"正则"}；'
                       'API Key：{"api_key_source":"auto","path":"/api/checkin",'
                       '"credential_check_path":"/api/profile"}（纯 Key 站点会自动识别，不再要求填写 auth；'
-                      '默认 /attendance.php，端点可覆盖；与 Cookie 共用签到和页面发现，不回退浏览器）；'
+                      '固定端点，不探测、不回退浏览器）；'
                       'Browserless：{"engine":"browserless","mode":"cloudflare|image|trigger_image|altcha|open_page", ...}；'
                       '页面内嵌 Turnstile、验证通过后由站点自己提交（如观众）用 {"submit_method":"auto"}；'
                       '点签到后跳 WAF / Cloudflare 检测页时用 {"wait": 12000} 等它放行；'
@@ -789,7 +807,7 @@ class PTSiteSignIn(_PluginBase):
 
     @staticmethod
     def _key_only_site(info: Dict[str, Any]) -> bool:
-        """站点只有 API Key / Token、没有 Cookie。"""
+        """站点只有 API Key / Token、没有 Cookie。是否可执行由显式 API 规则决定。"""
         cookie = str(info.get("cookie") or "").strip()
         credential = (str(info.get("apikey") or "").strip()
                       or str(info.get("token") or "").strip())
@@ -811,11 +829,46 @@ class PTSiteSignIn(_PluginBase):
             return f"站点不在本次{action}选择中，已跳过"
         return ""
 
-    def _skip_result(self, info: Dict[str, Any], reason: str) -> Dict[str, str]:
+    def _site_result(self, info: Dict[str, Any], *, engine: str, status: str,
+                     message: str, login: str = "", activity: str = "",
+                     activity_source: str = "", bonus: str = "", dual: bool = False,
+                     login_status: str = "") -> Dict[str, Any]:
+        """
+        统一构造站点结果。
+
+        :param info: MoviePilot 站点信息
+        :param engine: 实际执行的签到引擎
+        :param status: 签到或登录状态
+        :param message: 结果说明
+        :param login: 登录补充说明
+        :param activity: 最近动向
+        :param activity_source: 最近动向来源
+        :param bonus: 奖励信息
+        :param dual: 是否同时执行登录和签到
+        :param login_status: 双任务站点的登录状态
+        :return: 可保存和展示的统一结果字典
+        """
         return {"site": str(info.get("name") or info.get("url") or "未知站点"),
                 "site_id": str(info.get("id") or ""), "state_key": site_state_key(info),
-                "engine": "-", "status": "failed", "message": reason,
-                "login": "", "activity": "", "activity_source": "", "ran_at": self._now()}
+                "engine": engine, "status": status, "message": message,
+                "login": login, "activity": activity, "activity_source": activity_source,
+                "ran_at": self._now(), "bonus": bonus, "dual": dual,
+                "login_status": login_status}
+
+    @staticmethod
+    def _log_failure(site_name: str, message: str) -> None:
+        """
+        输出单行失败日志。
+
+        :param site_name: 站点名称
+        :param message: 失败原因，完整内容仍保存在结果页
+        """
+        logger.warning(f"PT站点签到：{site_name} 失败：{compact_text(message)}")
+
+    def _skip_result(self, info: Dict[str, Any], reason: str) -> Dict[str, Any]:
+        return self._site_result(info, engine="-", status="failed", message=reason,
+                                 dual=bool(info.get("dual")),
+                                 login_status="login_failed" if info.get("dual") else "")
 
     def _finish_current(self, run_id: int, results: List[Dict[str, str]]) -> None:
         if not self._is_run_current(run_id):
@@ -839,7 +892,7 @@ class PTSiteSignIn(_PluginBase):
                 if allow_fallback and signer is not None:
                     reason = ("本机未提供 Playwright" if outcome is None
                               else f"本机 Playwright 失败：{outcome.message}")
-                    logger.info("PT站点签到：%s %s，改用 Browserless", site_name, reason)
+                    logger.info(f"PT站点签到：{site_name} {reason}，改用 Browserless")
                     fallback = signer.sign(info, rule)
                     if fallback.status in {"success", "already"}:
                         return SignResult(fallback.status,
@@ -894,100 +947,129 @@ class PTSiteSignIn(_PluginBase):
                 return True
         return False
 
-    def _sign_one(self, info: Dict[str, Any], rules: Dict[str, Dict[str, Any]],
-                  signer: Optional[BrowserlessSigner], run_id: Optional[int] = None,
-                  allowed_site_ids: Optional[Set[int]] = None) -> Dict[str, str]:
+    def _sign_api_key_one(self, info: Dict[str, Any], rule: Dict[str, Any],
+                          run_id: Optional[int], allowed_site_ids: Optional[Set[int]]) -> Dict[str, Any]:
+        """
+        执行显式 API Key 签到。
+
+        仅访问规则声明的端点，不触发站点登录、站点模块或浏览器回退。
+
+        :param info: MoviePilot 站点信息
+        :param rule: 已解析的 API Key 规则
+        :param run_id: 当前任务轮次
+        :param allowed_site_ids: 本轮允许访问的站点 ID
+        :return: 统一签到结果
+        """
+        site_name = str(info.get("name") or info.get("url") or "未知站点")
         guard = self._site_guard(info, run_id, allowed_site_ids, "签到")
         if guard:
-            logger.warning("PT站点签到：%s，跳过站点 %s", guard,
-                           info.get("name") or info.get("url") or info.get("id"))
+            logger.debug(f"PT站点签到：{site_name} 跳过（{guard}）")
             return self._skip_result(info, guard)
-        site_name = str(info.get("name") or info.get("url") or "未知站点")
+        dual = bool(info.get("dual"))
         try:
-            initial_rule = resolve_rule(info, rules)
-            initial_rule_error = None
+            outcome = http_sign_auto(info, rule, timeout=self._timeout,
+                                     proxies=self._proxies_for(info))
+        except Exception:
+            # 异常文本可能带站点回显，不把异常内容写进日志或结果。
+            logger.error(f"PT站点签到：{site_name} API Key 签到异常")
+            outcome = SignResult("failed", "API Key 签到出现未预期错误")
+        if outcome.status not in {"success", "already"}:
+            self._log_failure(site_name, outcome.message)
+        activity_text, activity_source = (
+            self._read_site_activity(info, rule, run_id, allowed_site_ids)
+            if (outcome.status in {"success", "already"} and self._read_activity) else ("", ""))
+        return self._site_result(
+            info, engine="http", status=outcome.status, message=outcome.message,
+            login="API Key 已用于签到" if outcome.status in {"success", "already"}
+            else "API Key 签到失败",
+            activity=activity_text, activity_source=activity_source,
+            bonus=message_bonus(outcome.message), dual=dual,
+            login_status=(("login" if outcome.status in {"success", "already"}
+                           else "login_failed") if dual else ""))
+
+    def _sign_one(self, info: Dict[str, Any], rules: Dict[str, Dict[str, Any]],
+                  signer: Optional[BrowserlessSigner], run_id: Optional[int] = None,
+                  allowed_site_ids: Optional[Set[int]] = None) -> Dict[str, Any]:
+        """
+        执行单个站点的登录、签到和最近动向读取。
+
+        :param info: MoviePilot 站点信息
+        :param rules: 已解析的全部自定义规则
+        :param signer: Browserless 执行器
+        :param run_id: 当前任务轮次
+        :param allowed_site_ids: 本轮允许访问的站点 ID
+        :return: 统一签到结果
+        """
+        site_name = str(info.get("name") or info.get("url") or "未知站点")
+        guard = self._site_guard(info, run_id, allowed_site_ids, "签到")
+        if guard:
+            logger.debug(f"PT站点签到：{site_name} 跳过（{guard}）")
+            return self._skip_result(info, guard)
+
+        try:
+            rule = resolve_rule(info, rules)
         except ValueError as error:
-            initial_rule = {}
-            initial_rule_error = error
-        if self._key_only_site(info) and initial_rule_error is not None:
-            reason = f"API Key 规则无效，未发起请求：{initial_rule_error}"
-            logger.warning("PT站点签到：%s，跳过站点 %s", reason, site_name)
+            reason = f"API Key 规则无效，未发起请求：{error}" if self._key_only_site(info) else str(error)
+            self._log_failure(site_name, reason)
             return self._skip_result(info, reason)
-        api_mode = is_api_key_rule(initial_rule)
-        logger.info("PT站点签到：开始 %s%s", site_name, "（API Key）" if api_mode else "")
+
+        if is_api_key_rule(rule):
+            return self._sign_api_key_one(info, rule, run_id, allowed_site_ids)
+        if self._key_only_site(info):
+            reason = ("站点仅有 API Key / Token，但自定义规则未声明固定签到或验证端点，已跳过且未发起请求"
+                      "；请在自定义站点规则中补全 path / credential_check_path 等字段")
+            self._log_failure(site_name, reason)
+            return self._skip_result(info, reason)
+
         engine = "http"
         login_text = ""
-        # 同时勾了「签到站点」和「登录站点」的站点：一轮里把真实登录 + 签到 + 读最近动向都做掉，
-        # 记录带 dual 标记，详情页的「签到状态」与「登录状态」都能看到它。
-        dual = bool(info.get("dual"))
         login_broken = False
-        rule: Dict[str, Any] = {}
-        # 站点登录：凭证只取 MoviePilot「站点管理」里该站的附加信息 / 账号字段；
-        # 没有账号密码时直接复用站点管理保存的 Cookie 签到。登录失败不直接判整站失败
-        # ——仍用旧 Cookie 试一次，并如实记录原因。
+        dual = bool(info.get("dual"))
         account = account_from_site(info)
-        # 先解析一次规则，识别必须在真实浏览器里完成登录/解锁的站点。猪猪是前后端分离
-        # 站点，通用 NexusPHP site_login() 会错误访问 /login.php，必须跳过。
-        try:
-            auth_rule = resolve_rule(info, rules)
-        except ValueError:
-            auth_rule = {}
-        api_mode = is_api_key_rule(auth_rule)
-        browser_auth = str(auth_rule.get("browser_auth_mode") or "").strip().lower()
+        browser_auth = str(rule.get("browser_auth_mode") or "").strip().lower()
         playwright_info: Dict[str, Any] = info
-        if api_mode:
-            login_text = "API Key 已配置" if dual else ""
-        elif browser_auth:
+
+        if browser_auth:
             if account:
-                # 只在交给浏览器回调的临时副本中放账号密码；不写回站点记录/结果。
                 playwright_info = dict(info)
                 playwright_info.update(account)
             if account_ready(account):
                 login_text = "浏览器内自动登录"
             elif account:
                 login_text = "账号信息不完整，将尝试复用站点管理 Cookie"
-                logger.info("PT站点签到：%s 的浏览器登录账号信息不完整，先尝试已有 Cookie", site_name)
             elif str(info.get("cookie") or "").strip():
                 login_text = "复用站点管理 Cookie" if dual else ""
             else:
                 login_text = "未配置账号密码或 Cookie"
         elif account_ready(account):
-            proxies = self._proxies_for(info)
             try:
-                login_result = site_login(info, account, timeout=self._timeout, proxies=proxies)
-            except Exception:
-                logger.exception("PT站点签到：%s 真实登录异常", site_name)
+                login_result = site_login(info, account, timeout=self._timeout,
+                                          proxies=self._proxies_for(info))
+            except Exception as error:
+                logger.error(f"PT站点签到：{site_name} 登录异常：{compact_text(error)}")
                 login_text = "异常：真实登录出现未预期错误"
             else:
                 if login_result.status == "success":
                     info = dict(info, cookie=login_result.cookie)
                     login_text = "成功（已换用新 Cookie）"
-                    logger.info("PT站点签到：%s 真实登录成功，改用新 Cookie", site_name)
                 else:
                     login_text = "失败：" + login_result.message
                     login_broken = True
-                    logger.warning("PT站点签到：%s 真实登录失败 - %s", site_name,
-                                   login_result.message)
+                    self._log_failure(site_name, login_text)
         elif account:
-            # 站点管理里只写了半截凭证（比如只有用户名），没法做真实登录
             login_text = "未提供可用的账号密码"
             login_broken = True
-            logger.info("PT站点签到：%s 的账号信息不完整，只复用站点管理里的 Cookie", site_name)
         elif str(info.get("cookie") or "").strip():
-            # 站点管理里只有 Cookie：直接拿它签到；dual 站点要把结论写进「登录状态」
             login_text = "复用站点管理 Cookie" if dual else ""
 
-        # 登录可能耗时，期间配置可能重载；进入任何签到网络操作前再校验一次。
         guard = self._site_guard(info, run_id, allowed_site_ids, "签到")
         if guard:
-            logger.warning("PT站点签到：%s，跳过站点 %s", guard, site_name)
+            logger.debug(f"PT站点签到：{site_name} 跳过（{guard}）")
             return self._skip_result(info, guard)
+
         try:
-            rule = resolve_rule(info, rules)
             engine = str(rule["engine"])
             quiz_mode = str(rule.get("form_mode") or "").lower() == "quiz"
-            # 规则表达不了的站点（图片验证码 / 答题选海报 / API Token）有专门模块，
-            # 放在插件目录 sites/ 下，优先于规则执行。quiz 规则自带完整流程，不交给模块。
             module_outcome = (None if quiz_mode else
                               run_site_module(info, timeout=self._timeout,
                                               proxies=self._proxies_for(info), logger=logger,
@@ -995,13 +1077,8 @@ class PTSiteSignIn(_PluginBase):
             if module_outcome is not None and module_outcome.status != "failed":
                 outcome = module_outcome
                 engine = "module"
-                logger.info("PT站点签到：%s 使用站点模块", site_name)
             elif module_outcome is not None:
-                # 站点模块失败时不能被它挡住：按规则引擎再走一遍（天空就是这样：
-                # 先 HTTP + OCR，失败才用 Browserless 弹窗流程），两边的说明都保留
                 module_note = f"模块：{module_outcome.message}"
-                logger.info("PT站点签到：%s 站点模块失败（%s），改用规则引擎重试",
-                            site_name, module_outcome.message)
                 outcome = self._sign_with_engine(playwright_info, rule, engine, signer, site_name)
                 if outcome is None:
                     outcome = module_outcome
@@ -1015,15 +1092,11 @@ class PTSiteSignIn(_PluginBase):
                                          f"{module_note}；规则引擎：{outcome.message}")
                     engine = str(rule["engine"])
             elif engine == "playwright":
-                # 本机浏览器优先：IP 与家宽一致，站点不会判异地登录，也不消耗 Browserless 额度。
-                # 本机失败或助手缺失时才按规则回退；记录仍保留 playwright，方便区分额度来源。
                 outcome = self._sign_with_engine(playwright_info, rule, engine, signer, site_name)
                 engine = "playwright"
             elif engine == "browserless":
-                if signer is None:
-                    outcome = SignResult("failed", "未配置 Browserless 地址或 Token")
-                else:
-                    outcome = signer.sign(info, rule)
+                outcome = (SignResult("failed", "未配置 Browserless 地址或 Token")
+                           if signer is None else signer.sign(info, rule))
             else:
                 outcome = http_sign_auto(info, rule, timeout=self._timeout,
                                          proxies=self._proxies_for(info))
@@ -1031,17 +1104,12 @@ class PTSiteSignIn(_PluginBase):
                     outcome, engine = self._maybe_fallback(info, rule, outcome, signer)
         except ValueError as error:
             outcome = SignResult("failed", str(error))
-        except Exception:
-            if api_mode:
-                logger.error("PT站点签到失败：%s（API Key 模式异常已隐藏详情）", site_name)
-            else:
-                logger.exception("PT站点签到失败：%s", site_name)
+        except Exception as error:
+            logger.error(f"PT站点签到：{site_name} 异常：{compact_text(error)}")
             outcome = SignResult("failed", "签到执行出现未预期错误")
-        if outcome.status in {"success", "already"}:
-            logger.info("PT站点签到：%s %s", site_name, outcome.message)
-        else:
-            logger.warning("PT站点签到：%s 失败 - %s", site_name, outcome.message)
 
+        if outcome.status not in {"success", "already"}:
+            self._log_failure(site_name, outcome.message)
         if browser_auth and dual:
             if outcome.status in {"success", "already"}:
                 login_text = ("浏览器内登录成功" if account_ready(account)
@@ -1049,68 +1117,79 @@ class PTSiteSignIn(_PluginBase):
             else:
                 login_broken = True
 
-        # 签到完成后、读取最近动向前再次确认配置仍有效且站点仍在白名单。
         guard = self._site_guard(info, run_id, allowed_site_ids, "签到")
         if guard:
-            logger.warning("PT站点签到：%s，跳过站点 %s", guard, site_name)
+            logger.debug(f"PT站点签到：{site_name} 跳过（{guard}）")
             return self._skip_result(info, guard)
         activity_text, activity_source = (
             self._read_site_activity(info, rule, run_id, allowed_site_ids)
             if self._read_activity else ("", ""))
-        return {"site": site_name, "site_id": str(info.get("id") or ""),
-                "state_key": site_state_key(info), "engine": engine,
-                "status": outcome.status, "message": outcome.message,
-                "login": login_text, "activity": activity_text,
-                "activity_source": activity_source, "ran_at": self._now(),
-                "bonus": message_bonus(outcome.message),
-                "dual": dual,
-                # dual 站点在「登录状态」里要显示登录结论，而不是签到结论
-                "login_status": ("login_failed" if login_broken else "login") if dual else ""}
+        return self._site_result(
+            info, engine=engine, status=outcome.status, message=outcome.message,
+            login=login_text, activity=activity_text, activity_source=activity_source,
+            bonus=message_bonus(outcome.message), dual=dual,
+            login_status=("login_failed" if login_broken else "login") if dual else "")
 
     def _login_one(self, info: Dict[str, Any], run_id: Optional[int] = None,
-                   allowed_site_ids: Optional[Set[int]] = None) -> Dict[str, str]:
-        """仅登录站点：真实登录（或复用站点管理 Cookie）后读取最近动向，不触发签到。"""
+                   allowed_site_ids: Optional[Set[int]] = None) -> Dict[str, Any]:
+        """
+        执行仅登录站点。
+
+        真实登录或复用 Cookie 后读取最近动向，不触发签到。
+
+        :param info: MoviePilot 站点信息
+        :param run_id: 当前任务轮次
+        :param allowed_site_ids: 本轮允许访问的站点 ID
+        :return: 统一登录结果
+        """
+        site_name = str(info.get("name") or info.get("url") or "未知站点")
         guard = self._site_guard(info, run_id, allowed_site_ids, "仅登录")
         if guard:
-            logger.warning("PT站点签到：%s，跳过站点 %s", guard,
-                           info.get("name") or info.get("url") or info.get("id"))
+            logger.debug(f"PT站点签到：{site_name} 跳过（{guard}）")
             return self._skip_result(info, guard)
-        site_name = str(info.get("name") or info.get("url") or "未知站点")
-        # API Key 与 Cookie 共用同一套登录结果、最近动向和状态记录流程。
+
         try:
-            settings_rules = parse_rules(self._site_rules)
-            login_rule = resolve_rule(info, settings_rules)
+            login_rule = resolve_rule(info, parse_rules(self._site_rules))
         except ValueError as error:
             if self._key_only_site(info):
                 return self._skip_result(
                     info, f"API Key 规则无效，未发起请求：{error}")
             login_rule = {}
-        api_mode = is_api_key_rule(login_rule)
-        login_text = ""
-        login_ok = False
-        if api_mode:
-            logger.info("PT站点签到：仅登录 %s（API Key）", site_name)
+
+        if is_api_key_rule(login_rule):
             try:
                 check = http_check_api_key(info, login_rule, timeout=self._timeout,
                                            proxies=self._proxies_for(info))
             except Exception:
                 # 不记录异常原文，避免站点回显 API Key 时进入日志。
-                logger.error("PT站点签到：%s API Key 验证异常", site_name)
+                logger.error(f"PT站点签到：{site_name} API Key 验证异常")
                 check = LoginResult("failed", "API Key 验证出现未预期错误")
             login_ok = check.status == "success"
-            login_text = check.message
-        elif self._key_only_site(info):
+            if not login_ok:
+                self._log_failure(site_name, check.message)
+            guard = self._site_guard(info, run_id, allowed_site_ids, "仅登录")
+            if guard:
+                return self._skip_result(info, guard)
+            activity_text, activity_source = (
+                self._read_site_activity(info, login_rule, run_id, allowed_site_ids)
+                if (login_ok and self._read_activity) else ("", ""))
+            return self._site_result(
+                info, engine="http", status="login" if login_ok else "login_failed",
+                message=check.message, activity=activity_text,
+                activity_source=activity_source)
+        if self._key_only_site(info):
             return self._skip_result(
-                info, "站点仅有 API Key / Token，但规则未启用 API Key 认证，已跳过且未发起请求")
-        else:
-            logger.info("PT站点签到：仅登录 %s", site_name)
-            account = account_from_site(info)
-        if not api_mode and not self._key_only_site(info) and account_ready(account):
-            proxies = self._proxies_for(info)
+                info, "站点仅有 API Key / Token，但未声明 auth=api_key 登录规则，已跳过且未发起请求")
+
+        login_text = ""
+        login_ok = False
+        account = account_from_site(info)
+        if account_ready(account):
             try:
-                login_result = site_login(info, account, timeout=self._timeout, proxies=proxies)
-            except Exception:
-                logger.exception("PT站点签到：%s 真实登录异常", site_name)
+                login_result = site_login(info, account, timeout=self._timeout,
+                                          proxies=self._proxies_for(info))
+            except Exception as error:
+                logger.error(f"PT站点签到：{site_name} 登录异常：{compact_text(error)}")
                 login_text = "异常：真实登录出现未预期错误"
             else:
                 if login_result.status == "success":
@@ -1119,27 +1198,25 @@ class PTSiteSignIn(_PluginBase):
                     login_text = "成功（已换用新 Cookie）"
                 else:
                     login_text = "失败：" + login_result.message
-        elif not api_mode and not self._key_only_site(info) and account:
+        elif account:
             login_text = "未提供可用的账号密码"
-        elif not api_mode and str(info.get("cookie") or "").strip():
+        elif str(info.get("cookie") or "").strip():
             login_ok = True
-        elif not api_mode:
+        else:
             login_text = "未配置账号密码或 Cookie"
+        if not login_ok:
+            self._log_failure(site_name, login_text)
 
-        # 登录可能耗时，期间配置可能重载；读取最近动向前再校验一次。
         guard = self._site_guard(info, run_id, allowed_site_ids, "仅登录")
         if guard:
-            logger.warning("PT站点签到：%s，跳过站点 %s", guard, site_name)
             return self._skip_result(info, guard)
         activity_text, activity_source = (
-            self._read_site_activity(info, login_rule, run_id=run_id,
+            self._read_site_activity(info, run_id=run_id,
                                      allowed_site_ids=allowed_site_ids)
             if (login_ok and self._read_activity) else ("", ""))
-        return {"site": site_name, "site_id": str(info.get("id") or ""),
-                "state_key": site_state_key(info), "engine": "http",
-                "status": "login" if login_ok else "login_failed",
-                "message": login_text, "login": "", "activity": activity_text,
-                "activity_source": activity_source, "ran_at": self._now()}
+        return self._site_result(
+            info, engine="http", status="login" if login_ok else "login_failed",
+            message=login_text, activity=activity_text, activity_source=activity_source)
 
     def _run_login_batch(self, infos: List[Dict[str, Any]],
                          run_id: Optional[int] = None,
@@ -1157,9 +1234,9 @@ class PTSiteSignIn(_PluginBase):
                             rule: Optional[Dict[str, Any]] = None,
                             run_id: Optional[int] = None,
                             allowed_site_ids: Optional[Set[int]] = None) -> Tuple[str, str]:
-        """用 Cookie / API Key 登录态读取站点页面，返回（「最近动向」原文, 来源页面）。
+        """用登录态 Cookie 打开站点页面，返回（「最近动向」原文, 来源页面）。
 
-        来源页面写进记录与日志；读不到时把原因（含试过的页面）也带回去，
+        来源页面写进记录；读不到时把原因（含试过的页面）也带回去，
         方便按站点用 activity_path 指定真正的动向页面。网络请求前统一校验
         轮次与站点白名单，避免配置重载或误选后继续访问站点。
         """
@@ -1187,18 +1264,16 @@ class PTSiteSignIn(_PluginBase):
                                      paths=paths, rule=rule)
         except Exception:
             # 异常原文可能包含站点回显，API Key 模式下尤其不能写进日志。
-            logger.error("PT站点签到：读取最近动向异常")
+            logger.debug(f"PT站点签到：{site_name} 读取最近动向异常")
             return "", ""
         if activity.status != "success":
-            logger.info("PT站点签到：%s 未读到最近动向（%s）", site_name, activity.message)
+            logger.debug(f"PT站点签到：{site_name} 未读到最近动向（{compact_text(activity.message)}）")
             return "", activity.message
-        value = activity.last_seen or activity.snippet or "已读取"
-        logger.info("PT站点签到：%s 最近动向 ← %s：%s", site_name, activity.source, value)
-        return value, activity.source
+        return activity.last_seen or activity.snippet or "已读取", activity.source
 
     def _should_retry_site(self, info: Dict[str, Any],
                            rules: Dict[str, Dict[str, Any]]) -> bool:
-        """Cookie 与 API Key 站点使用相同的失败重试策略；无效规则不盲试。"""
+        """纯 Key 站点只有声明了 API 规则才重试；无规则时禁止盲试。"""
         if not self._key_only_site(info):
             return True
         try:
@@ -1245,7 +1320,7 @@ class PTSiteSignIn(_PluginBase):
         if signer is None:
             return SignResult("failed", f"{outcome.message}；检测到{label}，但未配置 Browserless 地址或 Token"), "http"
         site_name = str(info.get("name") or info.get("url") or "未知站点")
-        logger.info("PT站点签到：%s 检测到%s，自动改用 Browserless 重试", site_name, label)
+        logger.info(f"PT站点签到：{site_name} 检测到{label}，自动改用 Browserless 重试")
         try:
             # 验证码站点要按页面推导选择器交给 Browserless 的 solveImageCaptcha
             page_html = ""
@@ -1253,8 +1328,7 @@ class PTSiteSignIn(_PluginBase):
                 page_html = fetch_page(target_url(str(info.get("url") or "").rstrip("/"),
                                                   str(rule.get("path") or DEFAULT_HTTP_PATH)),
                                        str(info.get("cookie") or ""), self._timeout,
-                                       self._proxies_for(info), str(info.get("ua") or ""),
-                                       site=info, rule=rule)
+                                       self._proxies_for(info), str(info.get("ua") or ""))
             fallback = fallback_rule(rule, outcome.challenge, page_html)
         except ValueError as error:
             return SignResult("failed", f"{outcome.message}；回退规则无效：{error}"), "http"
@@ -1263,12 +1337,11 @@ class PTSiteSignIn(_PluginBase):
         base_url = str(info.get("url") or "").rstrip("/")
         discovered = discover_signin_target(
             fetch_page(target_url(base_url, DEFAULT_INDEX_PATH), str(info.get("cookie") or ""),
-                       self._timeout, self._proxies_for(info), str(info.get("ua") or ""),
-                       site=info, rule=rule),
+                       self._timeout, self._proxies_for(info), str(info.get("ua") or "")),
             base_url)
         if discovered.get("path"):
             fallback = dict(fallback, path=str(discovered["path"]))
-            logger.info("PT站点签到：%s 的签到入口改为 %s", site_name, discovered["path"])
+            logger.info(f"PT站点签到：{site_name} 的签到入口改为 {discovered['path']}")
         retry = signer.sign(info, fallback)
         if retry.status in {"success", "already"}:
             return SignResult(retry.status, f"{retry.message}（已自动改用浏览器引擎通过{label}）"), "browserless"
@@ -1285,18 +1358,20 @@ class PTSiteSignIn(_PluginBase):
             return None
         host = self._proxy_host()
         if not host:
-            logger.warning("PT站点签到：站点勾选了「使用代理访问」，但 MoviePilot（设置 → 系统 → 代理）"
-                           "与 HTTP_PROXY / HTTPS_PROXY 都没有配置，本次仍走直连")
+            if not getattr(self, "_proxy_missing_logged", False):
+                self._proxy_missing_logged = True
+                logger.warning("PT站点签到：站点勾选代理，但 MoviePilot 未配置代理，本次直连")
             return None
+        self._proxy_missing_logged = False
         if host != getattr(self, "_proxy_logged", ""):
             self._proxy_logged = host
-            logger.info("PT站点签到：站点勾选「使用代理访问」，HTTP 引擎走代理 %s", mask_proxy(host))
+            logger.info(f"PT站点签到：站点勾选「使用代理访问」，HTTP 引擎走代理 {mask_proxy(host)}")
         return {"http": host, "https": host}
 
     @staticmethod
     def _proxy_host() -> str:
         """取 MoviePilot 的全局代理地址：不同版本的模块路径与配置项名都试一遍，最后看环境变量。"""
-        for module_name in ("app.core.config", "app.sdk.config", "app.core.settings",
+        for module_name in ("app.sdk.config", "app.core.config", "app.core.settings",
                             "app.core.config.base"):
             try:
                 module = importlib.import_module(module_name)
@@ -1377,9 +1452,8 @@ class PTSiteSignIn(_PluginBase):
 
         missing_ids = sorted((set(signin_requested) | set(login_requested)) - set(all_sites))
         if missing_ids:
-            logger.warning("PT站点签到：配置中的站点 ID 已不存在，已忽略：%s", missing_ids)
-        logger.info("PT站点签到：本轮签到 IDs=%s，仅登录 IDs=%s；实际执行签到 %s 个、仅登录 %s 个",
-                    sorted(signin_ids), sorted(login_only_ids), len(selected), len(login_selected))
+            logger.warning(f"PT站点签到：配置中的站点 ID 已不存在，已忽略：{missing_ids}")
+        logger.info(f"PT站点签到：开始，签到 {len(selected)} 个，仅登录 {len(login_selected)} 个")
         if not selected and not login_selected:
             message = (f"未选择可用的 MoviePilot 站点（签到 IDs={sorted(signin_ids)}，"
                        f"仅登录 IDs={sorted(login_only_ids)}）")
@@ -1400,9 +1474,7 @@ class PTSiteSignIn(_PluginBase):
                  for site, sid in zip(selected, signin_order)]
         infos, skipped_rows = self._sites_to_run(infos)
         if skipped_rows:
-            logger.info("PT站点签到：跳过今天已签到的 %s 个站点（%s）",
-                        len(skipped_rows),
-                        "、".join(str(row.get("site") or "") for row in skipped_rows))
+            logger.info(f"PT站点签到：跳过今日已签到 {len(skipped_rows)} 个")
         if not infos and not login_selected:
             logger.info("PT站点签到：今天的站点都已签到，本轮跳过（要重跑请打开一次「清理本日缓存」）")
             return
@@ -1420,8 +1492,7 @@ class PTSiteSignIn(_PluginBase):
                     signer = BrowserlessPool(self._browserless_url, tokens,
                                              self._browserless_timeout, logger=logger)
                     if len(tokens) > 1:
-                        logger.info("PT站点签到：已配置 %s 个 Browserless Token，额度用尽时自动切换",
-                                    len(tokens))
+                        logger.info(f"PT站点签到：已配置 {len(tokens)} 个 Browserless Token，额度用尽时自动切换")
                 except ValueError as error:
                     self._finish_current(run_id, [{"site": "配置", "status": "failed", "engine": "-",
                                                    "message": str(error),
@@ -1464,8 +1535,7 @@ class PTSiteSignIn(_PluginBase):
             except Exception:
                 pass
         delay = max(1, self._retry_delay_minutes) * 60
-        logger.info("PT站点签到：失败站点将在 %s 分钟后重试（第 %s/%s 次）",
-                    self._retry_delay_minutes, attempt, self._retry_count)
+        logger.info(f"PT站点签到：失败站点将在 {self._retry_delay_minutes} 分钟后重试（第 {attempt}/{self._retry_count} 次）")
         add_once = getattr(scheduler_sdk, "add_plugin_once_job", None) if scheduler_sdk else None
         if callable(add_once):
             try:
@@ -1498,19 +1568,17 @@ class PTSiteSignIn(_PluginBase):
             return
         # 重试是后台线程；若刚好有新一轮在跑，最多等 5 分钟再决定是否放弃。
         if not PTSiteSignIn._run_lock.acquire(timeout=300):
-            logger.warning("PT站点签到：执行线程繁忙，跳过第 %s 次失败重试", attempt)
+            logger.warning(f"PT站点签到：执行线程繁忙，跳过第 {attempt} 次失败重试")
             return
         try:
             if not self._is_run_current(run_id):
                 logger.info("PT站点签到：任务已停止或被新一轮取代，取消重试")
                 return
-            logger.info("PT站点签到：开始第 %s/%s 次失败重试（%s 个站点）",
-                        attempt, self._retry_count,
-                        sum(1 for info in infos
-                            if result_by_key.get(site_state_key(info), {}).get("status") == "failed"))
             failed_infos = [info for info in infos
                             if result_by_key.get(site_state_key(info), {}).get("status") == "failed"
                             and self._should_retry_site(info, rules)]
+            logger.info(f"PT站点签到：开始第 {attempt}/{self._retry_count} 次失败重试"
+                        f"（{len(failed_infos)} 个站点）")
             if not failed_infos:
                 self._finish_current(run_id, list(result_by_key.values()))
                 return
@@ -1546,8 +1614,7 @@ class PTSiteSignIn(_PluginBase):
         already = sum(item.get("status") == "already" for item in results)
         login_ok = sum(item.get("status") == "login" for item in results)
         failed = len(results) - signed - already - login_ok
-        logger.info("PT站点签到：完成，新签到 %s，今日已签到 %s，仅登录 %s，失败 %s",
-                    signed, already, login_ok, failed)
+        logger.info(f"PT站点签到：完成，新签到 {signed}，今日已签到 {already}，仅登录 {login_ok}，失败 {failed}")
         self._notify(results)
 
     def _save_results(self, results: List[Dict[str, str]]) -> List[Dict[str, str]]:
@@ -1588,7 +1655,7 @@ class PTSiteSignIn(_PluginBase):
                 remover(key)
                 return
             except Exception:
-                logger.warning("PT站点签到：删除历史数据 %s 失败，将改为清空", key)
+                logger.warning(f"PT站点签到：删除历史数据 {key} 失败，将改为清空")
         self.save_data(key, None)
 
     def _notify(self, results: List[Dict[str, str]]) -> None:

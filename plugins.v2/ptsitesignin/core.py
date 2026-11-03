@@ -33,6 +33,7 @@ def _load_sibling_module(name: str) -> Any:
 
 
 if __package__:
+    from .http import new_http_session
     from .default_rules import DEFAULT_RULES
     from .piggo import (
         _piggo_click_script,
@@ -47,6 +48,8 @@ if __package__:
         build_piggo_submit_query,
     )
 else:
+    _http_module = _load_sibling_module("http")
+    new_http_session = _http_module.new_http_session
     _default_rules_module = _load_sibling_module("default_rules")
     _piggo_module = _load_sibling_module("piggo")
     DEFAULT_RULES = _default_rules_module.DEFAULT_RULES
@@ -317,82 +320,6 @@ def _api_request(session: Any, method: str, url: str, headers: Mapping[str, str]
         current_url = next_url
 
 
-def _auth_headers(site: Mapping[str, Any], rule: Mapping[str, Any], *,
-                  referer: str = "", accept: str = "") -> Dict[str, str]:
-    """构造 Cookie 或 API Key 认证头；两种认证走同一套请求函数。"""
-    if is_api_key_rule(rule):
-        headers = _api_headers(site, rule)
-    else:
-        cookie = str(site.get("cookie") or "").strip()
-        if not cookie:
-            raise ValueError("站点没有 Cookie 或 API Key 凭证")
-        headers = {
-            "User-Agent": str(site.get("ua") or "").strip() or DEFAULT_USER_AGENT,
-            "Cookie": cookie,
-            "Accept": accept or "text/html,application/json,*/*;q=0.8",
-            "X-Requested-With": "XMLHttpRequest",
-        }
-    if accept:
-        headers["Accept"] = accept
-    if referer:
-        headers["Referer"] = referer
-    return headers
-
-
-def _auth_request(session: Any, site: Mapping[str, Any], rule: Mapping[str, Any],
-                  method: str, url: str, headers: Mapping[str, str],
-                  timeout: int, proxies: Optional[Dict[str, str]],
-                  data: Any = None,
-                  json_body: Optional[Mapping[str, Any]] = None,
-                  params: Optional[Mapping[str, Any]] = None) -> Any:
-    """按认证类型发送请求；API Key 只跟随同源重定向。"""
-    method = method.upper()
-    if is_api_key_rule(rule) and not _same_origin(
-            str(site.get("url") or ""), url):
-        raise ApiRequestError("API Key 只能发送到站点同源地址，已阻止跨域请求")
-    # 调用方传入的通常只是 Referer 等内容头；认证头在这里统一补齐，避免
-    # API Key 模式的临时请求头把 Authorization / X-API-Key 覆盖掉。
-    request_headers = _auth_headers(site, rule)
-    request_headers.update({str(name): str(value) for name, value in headers.items()})
-    if is_api_key_rule(rule):
-        # 密钥头是认证边界，不允许调用方传入的临时头将其覆盖。
-        auth_header = _api_key_config(rule)["header"]
-        credential_headers = _auth_headers(site, rule)
-        request_headers[auth_header] = credential_headers[auth_header]
-        return _api_request(session, method, url, request_headers, timeout, proxies,
-                            data=data, json_body=json_body, params=params)
-    if method == "POST":
-        if json_body is not None:
-            return session.post(url, headers=request_headers, json=json_body, timeout=timeout,
-                                allow_redirects=True, proxies=proxies)
-        return session.post(url, headers=request_headers, data=data, timeout=timeout,
-                            allow_redirects=True, proxies=proxies)
-    return session.get(url, headers=request_headers, params=params, timeout=timeout,
-                       allow_redirects=True, proxies=proxies)
-
-
-def _judge_auth_response(content: str, rule: Mapping[str, Any], secret: str = "") -> SignResult:
-    """统一判定 HTML / JSON 响应；API Key 模式不会误报成 Cookie 失效。"""
-    text = str(content or "")
-    if cloudflare_pending(text):
-        return SignResult("failed", "站点返回 Cloudflare / WAF 验证页",
-                          challenge="cloudflare")
-    if is_api_key_rule(rule):
-        if login_page(text):
-            return SignResult("failed", "API Key 无效或已过期（站点返回登录页）")
-        try:
-            payload = json.loads(text.strip())
-        except (TypeError, ValueError):
-            payload = None
-        if isinstance(payload, Mapping):
-            return judge_api_response(text, rule, secret)
-        result = judge_http(text, rule)
-        if "Cookie 无效" in result.message:
-            return SignResult("failed", _redact_api_secret("API Key 无效或已过期", secret))
-        return result
-    return judge_http(text, rule)
-
-
 def normalize_site_ids(raw: Any) -> List[int]:
     """把 MoviePilot 多选配置统一成去重后的正整数站点 ID 列表。
 
@@ -490,18 +417,21 @@ def resolve_rule(site: Mapping[str, Any], custom_rules: Mapping[str, Mapping[str
     host = normalize_host(str(site.get("url") or ""))
     custom = (custom_rules.get(str(site.get("id"))) or custom_rules.get(host)
               or custom_rules.get("www." + host) or {})
-    # 凭证二选一：有 Cookie 时优先 Cookie；只有 ApiKey / Token 时自动切到 API Key
-    # 认证。两种认证共用同一套签到、路径发现、登录验证和最近动向流程。
-    explicit_api = is_api_key_rule(custom)
-    auto_api = is_api_key_site(site) and not str(custom.get("auth") or "").strip()
-    preset = preset_for_host(host)
-    rule = dict(preset or {})
-    rule.update(custom)
-    if explicit_api or auto_api:
-        # 内置预设面向 Cookie / 浏览器流程；API Key 只继承用户显式配置，
-        # 避免把 Key 发到预设中的 Cookie 登录路径。
+    # 站点管理里的凭证二选一：Cookie 站点走页面流程，纯 ApiKey / Token 站点走 API。
+    # 纯 Key 站点只有在自定义规则明确给出固定端点时才自动切到 API 模式，避免把 Key
+    # 发到默认的 /attendance.php 或内置 Cookie 签到路径。
+    auto_api = (is_api_key_site(site)
+                and not str(custom.get("auth") or "").strip()
+                and any(custom.get(name) for name in _API_KEY_ENDPOINT_KEYS))
+    if is_api_key_rule(custom) or auto_api:
+        # API Key 规则只使用用户显式声明的固定端点，不继承内置站点的普通签到路径。
         rule = dict(custom)
-        rule["auth"] = API_KEY_AUTH
+        if auto_api:
+            rule["auth"] = API_KEY_AUTH
+    else:
+        preset = preset_for_host(host)
+        rule = dict(preset or {})
+        rule.update(custom)
     # 只有用户在自定义规则里显式声明 engine 才算「手工指定」；内置预设声明的 http
     # 仍允许在遇盾 / 验证码时自动回退到浏览器引擎
     user_engine = str(custom.get("engine") or "").strip().lower()
@@ -511,11 +441,9 @@ def resolve_rule(site: Mapping[str, Any], custom_rules: Mapping[str, Mapping[str
         raise ValueError("签到引擎只能是 http、browserless 或 playwright")
     rule["auto_fallback"] = not user_engine
     if is_api_key_rule(rule):
-        # API Key 与 Cookie 共用 HTTP 流程，但浏览器无法安全携带自定义认证头，
-        # 因此不自动回退 Browserless。
+        # API Key 模式只能访问显式配置的固定端点，绝不探测路径或回退浏览器。
         rule["engine"] = "http"
         rule["auto_fallback"] = False
-        rule.setdefault("path", DEFAULT_HTTP_PATH)
         rule.setdefault("success", DEFAULT_SUCCESS_PATTERN)
         rule.setdefault("already", DEFAULT_ALREADY_PATTERN)
     elif rule["engine"] in {"http", "playwright"}:
@@ -579,8 +507,13 @@ def validate_rule(rule: Mapping[str, Any]) -> Dict[str, Any]:
 def _validate_api_key_rule(result: Dict[str, Any]) -> None:
     if str(result.get("engine") or "").strip().lower() != "http":
         raise ValueError("API Key 规则只能使用 http 引擎")
+    # 签到与登录可以分开配置：只登录的站点可以仅提供 credential_check_path，
+    # 只签到的站点可以仅提供 path。缺少对应端点时由执行函数在联网前明确失败。
     path = str(result.get("path") or "").strip()
-    result["path"] = _validate_site_path(path or DEFAULT_HTTP_PATH, "API 签到 path")
+    if path:
+        result["path"] = _validate_site_path(path, "API 签到 path")
+    else:
+        result.pop("path", None)
     method = str(result.get("method") or "GET").strip().upper()
     if method not in {"GET", "POST"}:
         raise ValueError("API Key 签到 method 只能是 GET 或 POST")
@@ -605,6 +538,8 @@ def _validate_api_key_rule(result: Dict[str, Any]) -> None:
     if check_path:
         result["credential_check_path"] = _validate_site_path(
             check_path, "credential_check_path ")
+    if not path and not check_path:
+        raise ValueError("API Key 规则至少需要 path（签到）或 credential_check_path（登录验证）")
     check_method = str(result.get("credential_check_method") or "GET").strip().upper()
     if check_method not in {"GET", "POST"}:
         raise ValueError("credential_check_method 只能是 GET 或 POST")
@@ -707,8 +642,7 @@ def _quiz_already_result(content: str, rule: Mapping[str, Any]) -> Optional[Sign
 
 def http_quiz_sign(session: Any, url: str, content: str, base_url: str,
                    rule: Mapping[str, Any], timeout: int,
-                   proxies: Optional[Dict[str, str]],
-                   site: Optional[Mapping[str, Any]] = None) -> SignResult:
+                   proxies: Optional[Dict[str, str]]) -> SignResult:
     """完成 bakatest 选择题签到，并在提交后强制回读页面确认结果。"""
     form = extract_quiz_form(content)
     already = _quiz_already_result(content, rule)
@@ -718,8 +652,7 @@ def http_quiz_sign(session: Any, url: str, content: str, base_url: str,
     if checked.challenge:
         return checked
     if login_page(content) or "Cookie 无效" in checked.message:
-        return SignResult("failed", "API Key 无效或已过期" if is_api_key_rule(rule)
-                          else "Cookie 无效或已过期")
+        return SignResult("failed", "Cookie 无效或已过期")
     if not form:
         return SignResult("failed", f"未找到彩虹岛答题表单；{page_hint(content)}")
 
@@ -734,13 +667,8 @@ def http_quiz_sign(session: Any, url: str, content: str, base_url: str,
     post_error = ""
     result_content = ""
     try:
-        request_headers = {"Referer": url}
-        if site is None:
-            response = session.post(url, headers=request_headers, data=payload,
-                                    timeout=timeout, allow_redirects=True, proxies=proxies)
-        else:
-            response = _auth_request(session, site, rule, "POST", url, request_headers,
-                                     timeout, proxies, data=payload)
+        response = session.post(url, headers={"Referer": url}, data=payload,
+                                timeout=timeout, allow_redirects=True, proxies=proxies)
         result_content = response.text or ""
         if response.status_code >= 400:
             post_error = f"答题提交失败（HTTP {response.status_code}）"
@@ -752,13 +680,8 @@ def http_quiz_sign(session: Any, url: str, content: str, base_url: str,
     verify_path = str(rule.get("verify_success_path") or rule.get("path") or "/bakatest.php")
     verify_url = target_url(base_url, verify_path)
     try:
-        request_headers = {"Referer": url}
-        if site is None:
-            verify_response = session.get(verify_url, headers=request_headers, timeout=timeout,
-                                          allow_redirects=True, proxies=proxies)
-        else:
-            verify_response = _auth_request(session, site, rule, "GET", verify_url,
-                                            request_headers, timeout, proxies)
+        verify_response = session.get(verify_url, headers={"Referer": url}, timeout=timeout,
+                                      allow_redirects=True, proxies=proxies)
     except Exception as error:
         detail = f"答题已提交，但回读签到状态异常：{error}"
         return SignResult("failed", f"{post_error}；{detail}" if post_error else detail,
@@ -781,8 +704,7 @@ def http_quiz_sign(session: Any, url: str, content: str, base_url: str,
     if verified.challenge:
         return verified
     if login_page(verify_content) or "Cookie 无效" in verified.message:
-        return SignResult("failed", "API Key 无效或已过期" if is_api_key_rule(rule)
-                          else "Cookie 无效或已过期")
+        return SignResult("failed", "Cookie 无效或已过期")
     detail = ("答题已提交，但回读页面未出现「今天已经签过到了」，无法确认签到成功；"
               + page_hint(verify_content))
     return SignResult("failed", f"{post_error}；{detail}" if post_error else detail)
@@ -829,37 +751,59 @@ def judge_api_response(content: str, rule: Mapping[str, Any],
 
 def http_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: int = 30,
               proxies: Optional[Dict[str, str]] = None) -> SignResult:
-    """直接 HTTP 请求签到接口；Cookie 与 API Key 共用同一套流程。"""
-    import requests
+    """直接 HTTP 请求签到接口；API Key 规则只访问显式固定端点。"""
 
     base_url = str(site.get("url") or "").rstrip("/")
     if not base_url:
         return SignResult("failed", "站点地址为空")
     api_mode = is_api_key_rule(rule)
     secret = ""
-    if api_mode:
-        secret = _api_key_value(site, rule)
-    elif not str(site.get("cookie") or "").strip():
-        return SignResult("failed", "站点没有 Cookie 或 API Key 凭证")
+    if not api_mode and not str(site.get("cookie") or "").strip():
+        return SignResult("failed", "站点地址或 Cookie 为空")
     try:
-        path = _validate_site_path(rule.get("path") or DEFAULT_HTTP_PATH, "签到路径")
+        path = str(rule.get("path") or "").strip()
+        if api_mode:
+            if not path:
+                return SignResult("failed", "API Key 规则未配置 path，无法签到")
+            secret = _api_key_value(site, rule)
+            path = _validate_site_path(path, "API 签到 path")
+        elif not path:
+            path = DEFAULT_HTTP_PATH
         url = target_url(base_url, path)
-        headers = {"Referer": f"{base_url}{DEFAULT_INDEX_PATH}",
-                   "Accept": "application/json, text/javascript, text/html, */*"}
-        session = requests.Session()
+        if api_mode:
+            headers = _api_headers(site, rule)
+        else:
+            headers = {
+                "User-Agent": str(site.get("ua") or "").strip() or DEFAULT_USER_AGENT,
+                "Referer": f"{base_url}/index.php",
+                "Cookie": str(site.get("cookie") or "").strip(),
+                "Accept": "application/json, text/javascript, text/html, */*",
+                "X-Requested-With": "XMLHttpRequest",
+            }
+        session = new_http_session()
+        session.headers.update(headers)
         method = str(rule.get("method") or "GET").upper()
-        if method not in {"GET", "POST"}:
-            return SignResult("failed", "签到 method 只能是 GET 或 POST")
+        if api_mode and method not in {"GET", "POST"}:
+            return SignResult("failed", "API Key 签到 method 只能是 GET 或 POST")
         data = rule.get("data") if isinstance(rule.get("data"), Mapping) else None
         json_body = rule.get("json") if isinstance(rule.get("json"), Mapping) else None
-        if method == "GET":
-            response = _auth_request(
-                session, site, rule, method, url, headers, timeout, proxies,
-                params=data if data is not None else json_body)
+        if api_mode:
+            if method == "GET":
+                response = _api_request(session, method, url, headers, timeout, proxies,
+                                        params=data if data is not None else json_body)
+            else:
+                response = _api_request(session, method, url, headers, timeout, proxies,
+                                        data=data, json_body=json_body)
+        elif method == "POST":
+            if json_body is not None:
+                response = session.post(url, json=json_body, timeout=timeout,
+                                        allow_redirects=True, proxies=proxies)
+            else:
+                response = session.post(url, data=data, timeout=timeout,
+                                        allow_redirects=True, proxies=proxies)
         else:
-            response = _auth_request(
-                session, site, rule, method, url, headers, timeout, proxies,
-                data=data, json_body=json_body)
+            response = session.get(url, params=data, timeout=timeout,
+                                   allow_redirects=True, proxies=proxies)
     except ApiRequestError as error:
         return SignResult("failed", _redact_api_secret(error, secret))
     except ValueError as error:
@@ -868,15 +812,24 @@ def http_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: int = 3
         if _is_transient(error):
             try:
                 longer = max(15, int(timeout * 1.5))
-                session = requests.Session()
-                if method == "GET":
-                    response = _auth_request(
-                        session, site, rule, method, url, headers, longer, proxies,
-                        params=data if data is not None else json_body)
+                session = new_http_session()
+                session.headers.update(headers)
+                if api_mode:
+                    if method == "GET":
+                        response = _api_request(session, method, url, headers, longer, proxies,
+                                                params=data if data is not None else json_body)
+                    else:
+                        response = _api_request(session, method, url, headers, longer, proxies,
+                                                data=data, json_body=json_body)
+                elif method == "POST" and json_body is not None:
+                    response = session.post(url, json=json_body, timeout=longer,
+                                            allow_redirects=True, proxies=proxies)
+                elif method == "POST":
+                    response = session.post(url, data=data, timeout=longer,
+                                            allow_redirects=True, proxies=proxies)
                 else:
-                    response = _auth_request(
-                        session, site, rule, method, url, headers, longer, proxies,
-                        data=data, json_body=json_body)
+                    response = session.get(url, params=data, timeout=longer,
+                                           allow_redirects=True, proxies=proxies)
             except Exception as retry_error:
                 return SignResult("failed",
                                   _redact_api_secret(f"请求异常：{retry_error}", secret))
@@ -884,14 +837,13 @@ def http_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: int = 3
             return SignResult("failed", _redact_api_secret(f"请求异常：{error}", secret))
     content = str(getattr(response, "text", "") or "")
     if int(getattr(response, "status_code", 0) or 0) >= 400:
-        if api_mode and response.status_code in {401, 403}:
-            return SignResult("failed", "API Key 无效或没有权限")
         return SignResult("failed", f"请求失败（HTTP {response.status_code}）",
                           missing_path=response.status_code in {404, 405})
+    if api_mode:
+        return judge_api_response(content, rule, secret)
     if str(rule.get("form_mode") or "").lower() == "quiz":
-        return http_quiz_sign(session, url, content, base_url, rule, timeout, proxies,
-                              site=site)
-    return _judge_auth_response(content, rule, secret)
+        return http_quiz_sign(session, url, content, base_url, rule, timeout, proxies)
+    return judge_http(content, rule)
 
 
 def find_signin_form(html: str, base_url: str,
@@ -944,41 +896,36 @@ def http_sign_form(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: in
 
     找不到表单（或表单是 GET 链）时返回 None，交给上层继续用 GET 结果。
     """
-    import requests
 
     base_url = str(site.get("url") or "").rstrip("/")
-    api_mode = is_api_key_rule(rule)
-    if not base_url or (not api_mode and not str(site.get("cookie") or "").strip()):
+    cookie = str(site.get("cookie") or "").strip()
+    if not base_url or not cookie:
         return None
     path = str(rule.get("path") or DEFAULT_HTTP_PATH)
     page_url = target_url(base_url, path)
-    headers = {"Referer": f"{base_url}{DEFAULT_INDEX_PATH}",
-               "Accept": "text/html,application/xhtml+xml,*/*;q=0.8"}
-    secret = _api_key_value(site, rule) if api_mode else ""
+    headers = {
+        "User-Agent": str(site.get("ua") or "").strip() or DEFAULT_USER_AGENT,
+        "Referer": f"{base_url}/index.php",
+        "Cookie": cookie,
+        "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+    }
     try:
-        session = requests.Session()
-        page = _auth_request(session, site, rule, "GET", page_url, headers,
-                             timeout, proxies)
+        session = new_http_session()
+        session.headers.update(headers)
+        page = session.get(page_url, timeout=timeout, allow_redirects=True, proxies=proxies)
         if page.status_code >= 400:
-            if api_mode and page.status_code in {401, 403}:
-                return SignResult("failed", "API Key 无效或没有权限")
             return None
         form = find_signin_form(page.text or "", base_url, str(rule.get("submit_text") or ""))
         if not form or form["method"] != "POST":
             return None
         post_url = target_url(base_url, form["action"])
-        response = _auth_request(session, site, rule, "POST", post_url,
-                                 {"Referer": page_url}, timeout, proxies,
-                                 data=form["data"])
-    except (ApiRequestError, ValueError) as error:
-        return SignResult("failed", _redact_api_secret(error, secret))
+        response = session.post(post_url, data=form["data"], timeout=timeout,
+                                allow_redirects=True, proxies=proxies)
     except Exception:
         return None
     if response.status_code >= 400:
-        if api_mode and response.status_code in {401, 403}:
-            return SignResult("failed", "API Key 无效或没有权限")
         return None
-    return _judge_auth_response(response.text or "", rule, secret)
+    return judge_http(response.text or "", rule)
 
 
 def random_form_fields(html: str) -> Dict[str, str]:
@@ -1115,20 +1062,17 @@ def http_two_step(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: int
     ``signin_data``（固定字段）、``signin_token_patterns``（{字段: 正则}，从首页抓）、
     ``signin_absent_status``（第二段页面上 absent_keywords 消失时判什么状态）。
     """
-    import requests
 
     signin_path = str(rule.get("signin_path") or "").strip()
     if not signin_path:
         return None
     base_url = str(site.get("url") or "").rstrip("/")
-    api_mode = is_api_key_rule(rule)
     cookie = str(site.get("cookie") or "").strip()
-    if not base_url or (not api_mode and not cookie):
+    if not base_url or not cookie:
         return None
-    secret = _api_key_value(site, rule) if api_mode else ""
+    ua = str(site.get("ua") or "").strip() or DEFAULT_USER_AGENT
     first_url = target_url(base_url, str(rule.get("path") or DEFAULT_HTTP_PATH))
-    first = fetch_page(first_url, cookie, timeout, proxies,
-                       str(site.get("ua") or ""), site=site, rule=rule)
+    first = fetch_page(first_url, cookie, timeout, proxies, ua)
     if not first:
         return None
 
@@ -1151,7 +1095,7 @@ def http_two_step(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: int
 
     method = str(rule.get("signin_method") or ("POST" if data else "GET")).upper()
     url = target_url(base_url, signin_path)
-    headers = {"Referer": first_url,
+    headers = {"User-Agent": ua, "Cookie": cookie, "Referer": first_url,
                "Accept": "text/html,application/json,*/*;q=0.8"}
     extra_headers = rule.get("signin_headers")
     if isinstance(extra_headers, Mapping):
@@ -1163,23 +1107,19 @@ def http_two_step(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: int
                 headers[str(name)] = str(value)
     raw_body = rule.get("signin_json_raw")
     try:
-        session = requests.Session()
+        session = new_http_session()
+        session.headers.update(headers)
         if raw_body:
-            response = _auth_request(session, site, rule, "POST", url, headers,
-                                     timeout, proxies,
-                                     data=str(raw_body).encode("utf-8"))
+            response = session.post(url, data=str(raw_body).encode("utf-8"),
+                                    timeout=timeout, allow_redirects=True, proxies=proxies)
         elif method == "POST":
-            response = _auth_request(session, site, rule, "POST", url, headers,
-                                     timeout, proxies, data=data or None)
+            response = session.post(url, data=data or None, timeout=timeout,
+                                    allow_redirects=True, proxies=proxies)
         else:
-            response = _auth_request(session, site, rule, "GET", url, headers,
-                                     timeout, proxies, params=data or None)
-    except (ApiRequestError, ValueError) as error:
-        return SignResult("failed", _redact_api_secret(error, secret))
-    except Exception as error:
-        return SignResult("failed", _redact_api_secret(f"第二段签到请求异常：{error}", secret))
-    if api_mode and response.status_code in {401, 403}:
-        return SignResult("failed", "API Key 无效或没有权限")
+            response = session.get(url, params=data or None, timeout=timeout,
+                                   allow_redirects=True, proxies=proxies)
+    except Exception:
+        return None
     if response.status_code >= 400:
         return None
 
@@ -1187,14 +1127,13 @@ def http_two_step(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: int
     probe = dict(rule)
     if rule.get("signin_absent_status"):
         probe["absent_status"] = rule["signin_absent_status"]
-    judged = _judge_auth_response(response.text or "", probe, secret)
+    judged = judge_http(response.text or "", probe)
     if judged.status in {"success", "already"}:
         return SignResult(judged.status, f"{judged.message}（{signin_path}）")
     # 答题式签到（52PT / CHDBits / U2）：答错不算签到成功，换一个选项再来，最多试 3 次
     if picks and str(rule.get("signin_pick") or "").lower() == "random":
         for _ in range(2):
-            page = fetch_page(first_url, cookie, timeout, proxies,
-                              str(site.get("ua") or ""), site=site, rule=rule)
+            page = fetch_page(first_url, cookie, timeout, proxies, ua)
             if not page:
                 break
             retry_data = {key: value for key, value in data.items() if key not in picks}
@@ -1203,16 +1142,15 @@ def http_two_step(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: int
                 break
             retry_data.update(retry_picks)
             try:
-                session = requests.Session()
-                retry = _auth_request(session, site, rule, "POST", url, headers,
-                                      timeout, proxies, data=retry_data or None)
+                session = new_http_session()
+                session.headers.update(headers)
+                retry = session.post(url, data=retry_data or None, timeout=timeout,
+                                     allow_redirects=True, proxies=proxies)
             except Exception:
                 break
-            if api_mode and retry.status_code in {401, 403}:
-                return SignResult("failed", "API Key 无效或没有权限")
             if retry.status_code >= 400:
                 break
-            judged = _judge_auth_response(retry.text or "", probe, secret)
+            judged = judge_http(retry.text or "", probe)
             if judged.status in {"success", "already"}:
                 return SignResult(judged.status, f"{judged.message}（{signin_path}）")
     return None
@@ -1222,17 +1160,15 @@ def http_confirm(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: int 
                  proxies: Optional[Dict[str, str]] = None) -> Optional[SignResult]:
     """回读签到页确认结果：有的站点提交后返回 302 / 空白页，只有再打开一次才看得到状态。"""
     base_url = str(site.get("url") or "").rstrip("/")
-    api_mode = is_api_key_rule(rule)
     cookie = str(site.get("cookie") or "").strip()
-    if not base_url or (not api_mode and not cookie):
+    if not base_url or not cookie:
         return None
     path = str(rule.get("path") or DEFAULT_HTTP_PATH)
     html = fetch_page(target_url(base_url, path), cookie, timeout, proxies,
-                      str(site.get("ua") or ""), site=site, rule=rule)
+                      str(site.get("ua") or ""))
     if not html:
         return None
-    secret = _api_key_value(site, rule) if api_mode else ""
-    return _judge_auth_response(html, rule, secret)
+    return judge_http(html, rule)
 
 
 # 常见签到入口路径：默认路径 404 时按顺序再试，仍然找不到就从站点首页自动发现
@@ -1248,28 +1184,15 @@ _BUTTON_TEXT_RE = re.compile(r"<button\b[^>]*>(.*?)</button>", re.IGNORECASE | r
 
 
 def fetch_page(url: str, cookie: str, timeout: int = 30,
-               proxies: Optional[Dict[str, str]] = None, user_agent: str = "",
-               *, site: Optional[Mapping[str, Any]] = None,
-               rule: Optional[Mapping[str, Any]] = None) -> str:
+               proxies: Optional[Dict[str, str]] = None, user_agent: str = "") -> str:
     """GET 一个页面并返回 HTML（失败返回空串），用于发现签到入口。"""
-    import requests
 
-    session = requests.Session()
-    headers = {"Accept": "text/html,application/xhtml+xml,*/*;q=0.8"}
+    session = new_http_session()
+    session.headers.update({"User-Agent": user_agent or DEFAULT_USER_AGENT,
+                            "Cookie": str(cookie or ""),
+                            "Accept": "text/html,application/xhtml+xml,*/*;q=0.8"})
     try:
-        if site is not None and rule is not None:
-            request_site = dict(site)
-            if str(cookie or "").strip():
-                request_site["cookie"] = str(cookie).strip()
-            if str(user_agent or "").strip():
-                request_site["ua"] = str(user_agent).strip()
-            response = _auth_request(session, request_site, rule, "GET", url, headers,
-                                     timeout, proxies)
-        else:
-            session.headers.update({"User-Agent": user_agent or DEFAULT_USER_AGENT,
-                                    "Cookie": str(cookie or ""), **headers})
-            response = session.get(url, timeout=timeout, allow_redirects=True,
-                                   proxies=proxies)
+        response = session.get(url, timeout=timeout, allow_redirects=True, proxies=proxies)
     except Exception:
         return ""
     if response.status_code >= 400:
@@ -2339,26 +2262,19 @@ def run_site_module(site: Mapping[str, Any], timeout: int = 30,
                     proxies: Optional[Dict[str, str]] = None,
                     logger: Any = None,
                     rule: Optional[Mapping[str, Any]] = None) -> Optional[SignResult]:
-    """有匹配的站点模块就执行它；Cookie / API Key 由模块上下文统一认证。"""
+    """有匹配的站点模块就执行它；API Key 规则始终跳过模块。"""
+    if rule is not None and is_api_key_rule(rule):
+        return None
     api = _sites_api()
     if api is None:
         return None
     module = site_module_for(str(site.get("url") or ""))
     if module is None:
         return None
-    credential = (str(site.get("cookie") or "").strip()
-                  or str(site.get("apikey") or "").strip()
-                  or str(site.get("token") or "").strip())
-    if not credential:
-        return SignResult("failed", "站点没有 Cookie 或 API Key，无法签到")
-    context = api.SignContext(site, timeout=timeout, proxies=proxies,
-                              logger=logger, rule=rule)
+    if not str(site.get("cookie") or "").strip() and not str(site.get("token") or "").strip():
+        return SignResult("failed", "站点没有 Cookie，无法签到")
+    context = api.SignContext(site, timeout=timeout, proxies=proxies, logger=logger)
     ok, message = api.sign_via_module(module, site, context)
-    if rule is not None and is_api_key_rule(rule):
-        try:
-            message = _redact_api_secret(message, _api_key_value(site, rule))
-        except ValueError:
-            message = "站点模块认证配置无效"
     if ok:
         return SignResult("already" if "已签到" in message else "success", message or "签到成功")
     return SignResult("failed", message or "签到失败")
@@ -2372,10 +2288,9 @@ def http_sign_auto(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: in
     碰上没有 `/attendance.php` 的站点只会得到一句「请求失败（HTTP 404）」。现在的顺序是：
     先试规则里的 path → 从站点首页「签到」链接自动发现 → 再试几个常见路径。
     """
+    if is_api_key_rule(rule):
+        return http_sign(site, rule, timeout=timeout, proxies=proxies)
     result = http_sign(site, rule, timeout=timeout, proxies=proxies)
-    if is_api_key_rule(rule) and "API Key 无效" in str(result.message or ""):
-        # 认证已经失败，继续试表单 / 首页 / 其他路径只会产生无意义请求。
-        return result
     if str(rule.get("form_mode") or "").lower() == "quiz":
         # 彩虹岛答题只允许一条确定路径：POST 后 GET 回读确认。失败时不能
         # 再走二次提交、首页猜链接或 Browserless，否则会在答题结果未知时重复签到。
@@ -2411,8 +2326,7 @@ def http_sign_auto(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: in
     tried = [str(rule.get("path") or DEFAULT_HTTP_PATH)]
     # 首页里可能挂着「每日签到」表单（学校 BTSCHOOL 就是这种）或一个签到链接
     target = discover_signin_target(
-        fetch_page(target_url(base_url, DEFAULT_INDEX_PATH), cookie, timeout, proxies,
-                   user_agent, site=site, rule=rule),
+        fetch_page(target_url(base_url, DEFAULT_INDEX_PATH), cookie, timeout, proxies, user_agent),
         base_url)
     attempts: List[Dict[str, Any]] = []
     discovered = str(target.get("path") or "")
@@ -2695,67 +2609,46 @@ class ActivityResult:
 def http_check_api_key(site: Mapping[str, Any], rule: Mapping[str, Any],
                        timeout: int = 30,
                        proxies: Optional[Dict[str, str]] = None) -> LoginResult:
-    """验证 API Key，并与签到共用同一套 HTTP 路径发现和请求方式。
-
-    验证顺序为 ``credential_check_path`` → 签到 ``path`` → ``/attendance.php``。
-    401/403 会立即判定 Key 无效；404/405 或未匹配显式成功标记时继续尝试下一个
-    同源地址。所有重定向都由通用请求层限制在站点同源范围内。
-    """
+    """用显式 credential_check_path 验证 API Key；不会访问任何猜测路径。"""
     if not is_api_key_rule(rule):
         return LoginResult("failed", "站点规则未声明 auth=api_key，无法用 API Key 验证登录")
+    path = str(rule.get("credential_check_path") or "").strip()
+    if not path:
+        return LoginResult("failed", "API Key 规则未配置 credential_check_path，无法验证登录")
     base_url = str(site.get("url") or "").rstrip("/")
     if not base_url:
         return LoginResult("failed", "站点地址为空")
-    paths: List[str] = []
-    for value in (rule.get("credential_check_path"), rule.get("path"), DEFAULT_HTTP_PATH):
-        path = str(value or "").strip()
-        if path and path not in paths:
-            paths.append(path)
     secret = ""
     try:
         secret = _api_key_value(site, rule)
+        path = _validate_site_path(path, "credential_check_path ")
+        url = target_url(base_url, path)
+        headers = _api_headers(site, rule)
         method = str(rule.get("credential_check_method") or "GET").upper()
         if method not in {"GET", "POST"}:
             return LoginResult("failed", "API Key 验证 method 只能是 GET 或 POST")
-        import requests
-        session = requests.Session()
-        headers = {"Accept": "application/json, text/html, */*"}
-        expected = str(rule.get("credential_check_success") or "").strip()
-        notes: List[str] = []
-        for candidate in paths:
-            path = _validate_site_path(candidate, "API Key 验证路径")
-            response = _auth_request(
-                session, site, rule, method, target_url(base_url, path), headers,
-                timeout, proxies, data=rule.get("data") if method == "POST" else None,
-                json_body=rule.get("json") if method == "POST" else None)
-            status_code = int(getattr(response, "status_code", 0) or 0)
-            if status_code in {401, 403}:
-                return LoginResult("failed", "API Key 无效或没有权限")
-            if status_code >= 400:
-                notes.append(f"{path}：HTTP {status_code}")
-                continue
-            content = str(getattr(response, "text", "") or "")
-            if expected:
-                try:
-                    matched = bool(re.search(expected, content, re.IGNORECASE))
-                except re.error:
-                    matched = expected in content
-                if matched:
-                    return LoginResult("success", f"API Key 验证成功（{path}）")
-                notes.append(f"{path}：未匹配 credential_check_success")
-                continue
-            judged = _judge_auth_response(content, rule, secret)
-            if judged.status in {"success", "already"}:
-                return LoginResult("success", f"API Key 验证成功（{path}）")
-            if "API Key 无效" in judged.message:
-                return LoginResult("failed", judged.message)
-            notes.append(f"{path}：{judged.message}")
-        detail = "；".join(notes) or "没有可用的验证地址"
-        return LoginResult("failed", _redact_api_secret(f"API Key 验证失败：{detail}", secret))
+        session = new_http_session()
+        session.headers.update(headers)
+        response = _api_request(session, method, url, headers, timeout, proxies)
     except (ApiRequestError, ValueError) as error:
         return LoginResult("failed", _redact_api_secret(error, secret))
     except Exception as error:
         return LoginResult("failed", _redact_api_secret(f"API Key 验证请求异常：{error}", secret))
+    status_code = int(getattr(response, "status_code", 0) or 0)
+    if status_code in {401, 403}:
+        return LoginResult("failed", "API Key 无效或没有权限")
+    if status_code >= 400:
+        return LoginResult("failed", f"API Key 验证失败（HTTP {status_code}）")
+    expected = str(rule.get("credential_check_success") or "").strip()
+    content = str(getattr(response, "text", "") or "")
+    if expected:
+        try:
+            matched = bool(re.search(expected, content, re.IGNORECASE))
+        except re.error:
+            matched = expected in content
+        if not matched:
+            return LoginResult("failed", "API Key 验证失败：响应未匹配 credential_check_success")
+    return LoginResult("success", "API Key 验证成功")
 
 
 def parse_accounts(raw: Any) -> Dict[str, Dict[str, Any]]:
@@ -2889,7 +2782,7 @@ def find_login_form(html: str) -> Dict[str, Any]:
 
 
 def cookie_header(session: Any) -> str:
-    """把 requests.Session 的 Cookie 拼成请求头字符串。"""
+    """把会话 Cookie 拼成请求头字符串。"""
     return "; ".join(f"{cookie.name}={cookie.value}" for cookie in session.cookies)
 
 
@@ -2907,14 +2800,13 @@ def login(site: Mapping[str, Any], account: Mapping[str, Any], timeout: int = 30
     password = str(account.get("password") or "")
     if not username or not password:
         return LoginResult("failed", "未配置账号或密码")
-    import requests
     login_path = str(account.get("login_path") or DEFAULT_LOGIN_PATH)
     login_action = str(account.get("login_action") or DEFAULT_LOGIN_ACTION)
     username_field = str(account.get("username_field") or DEFAULT_USERNAME_FIELD)
     password_field = str(account.get("password_field") or DEFAULT_PASSWORD_FIELD)
     headers = {"User-Agent": str(site.get("ua") or "").strip() or DEFAULT_USER_AGENT,
                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"}
-    session = requests.Session()
+    session = new_http_session()
     try:
         page = session.get(target_url(base_url, login_path), headers=headers,
                            timeout=timeout, allow_redirects=True, proxies=proxies)
@@ -2972,12 +2864,7 @@ def is_zero_time(value: str) -> bool:
     不是真的最近动向；皇后那条假时间就是它。
     """
     moments = str(value or "").strip()
-    clock = re.search(r"(?:[ T])(\d{1,2}):(\d{2})(?::(\d{2}))?\s*$", moments)
-    if clock is None:
-        return False
-    hour, minute, second = clock.groups()
-    # 只排除真正的零点；不能把 12:00:00 这类整点误判成补零日期。
-    return int(hour) == 0 and minute == "00" and second in {None, "00"}
+    return moments.endswith("00:00:00") or moments.endswith("00:00")
 
 
 def activity_value(text: str, match: Any) -> str:
@@ -3133,72 +3020,74 @@ def read_activity(site: Mapping[str, Any], cookie: str, timeout: int = 30,
                   path: Optional[str] = None,
                   paths: Optional[Sequence[str]] = None,
                   rule: Optional[Mapping[str, Any]] = None) -> ActivityResult:
-    """读取最近动向；Cookie / API Key 共用同一套页面候选与 JSON 字段解析。"""
+    """读取最近动向；API Key 规则只访问显式 activity_path，不访问首页。"""
     base_url = str(site.get("url") or "").rstrip("/")
     if not base_url:
         return ActivityResult("failed", "站点地址为空")
-    auth_rule = dict(rule or {})
-    api_mode = is_api_key_rule(auth_rule)
-    cookie = str(cookie or "").strip()
-    if not api_mode and not cookie:
-        return ActivityResult("failed", "站点地址或 Cookie 为空")
-    secret = ""
-    try:
-        secret = _api_key_value(site, auth_rule) if api_mode else ""
-    except ValueError as error:
-        return ActivityResult("failed", str(error))
-    import requests
-    session = requests.Session()
-    request_site = site if api_mode else dict(site, cookie=cookie)
-    index_url = target_url(base_url, DEFAULT_INDEX_PATH)
-    headers = {"Referer": base_url + DEFAULT_INDEX_PATH,
-               "Accept": "text/html,application/xhtml+xml,application/json,*/*;q=0.8"}
-    try:
-        index = _auth_request(session, request_site, auth_rule, "GET", index_url, headers,
-                              timeout, proxies)
-    except (ApiRequestError, ValueError) as error:
-        return ActivityResult("failed", _redact_api_secret(error, secret))
-    except Exception as error:
-        return ActivityResult(
-            "failed", _redact_api_secret(f"读取站点首页失败：{error}", secret))
-    status_code = int(getattr(index, "status_code", 0) or 0)
-    if status_code in {401, 403}:
-        return ActivityResult("failed", "API Key 无效或没有权限" if api_mode
-                              else f"读取站点首页失败（HTTP {status_code}）")
-    index_html = index.text or ""
-    notes: List[str] = []
-    if status_code >= 400:
-        if not api_mode:
-            return ActivityResult("failed", f"读取站点首页失败（HTTP {status_code}）")
-        notes.append(f"首页：HTTP {status_code}")
-    elif login_page(index_html):
-        if not api_mode:
-            return ActivityResult("failed", "登录态无效：站点把请求跳回了登录页")
-        notes.append("首页：被要求登录")
-    elif cloudflare_pending(index_html):
-        notes.append("首页：Cloudflare 挑战页")
-    else:
-        found = _activity_from_api_payload(index_html)
+    api_rule = rule or {}
+    if is_api_key_rule(api_rule):
+        activity_path = str(api_rule.get("activity_path") or "").strip()
+        if not activity_path:
+            return ActivityResult("failed", "API Key 规则未配置 activity_path，未读取最近动向")
+        secret = ""
+        try:
+            secret = _api_key_value(site, api_rule)
+            activity_path = _validate_site_path(activity_path, "activity_path ")
+            url = target_url(base_url, activity_path)
+            headers = _api_headers(site, api_rule)
+            session = new_http_session()
+            session.headers.update(headers)
+            response = _api_request(session, "GET", url, headers, timeout, proxies)
+        except (ApiRequestError, ValueError) as error:
+            return ActivityResult("failed", _redact_api_secret(error, secret))
+        except Exception as error:
+            return ActivityResult("failed",
+                                  _redact_api_secret(f"读取 API 最近动向异常：{error}", secret))
+        status_code = int(getattr(response, "status_code", 0) or 0)
+        if status_code >= 400:
+            return ActivityResult("failed", f"读取 API 最近动向失败（HTTP {status_code}）")
+        found = _activity_from_api_payload(str(getattr(response, "text", "") or ""))
         if found:
-            return ActivityResult("success", "已读取最近动向（首页）",
+            return ActivityResult("success", f"已读取最近动向（{activity_path}）",
                                   last_seen=found.get("last_seen", ""),
                                   snippet=found.get("snippet", ""),
-                                  source=DEFAULT_INDEX_PATH)
+                                  source=activity_path)
+        return ActivityResult("failed",
+                              _redact_api_secret(
+                                  f"API 响应里没有「最近动向」字段（{activity_path}）", secret))
+    cookie = str(cookie or "").strip()
+    if not cookie:
+        return ActivityResult("failed", "站点地址或 Cookie 为空")
+    session = new_http_session()
+    session.headers.update({"User-Agent": str(site.get("ua") or "").strip() or DEFAULT_USER_AGENT,
+                            "Cookie": cookie,
+                            "Referer": base_url + DEFAULT_INDEX_PATH,
+                            "Accept": "text/html,application/xhtml+xml,xml;q=0.9,*/*;q=0.8"})
+    try:
+        index = session.get(target_url(base_url, DEFAULT_INDEX_PATH),
+                            timeout=timeout, allow_redirects=True, proxies=proxies)
+    except Exception as error:
+        return ActivityResult("failed", f"读取站点首页失败：{error}")
+    if index.status_code >= 400:
+        return ActivityResult("failed", f"读取站点首页失败（HTTP {index.status_code}）")
+    index_html = index.text or ""
+    if login_page(index_html):
+        return ActivityResult("failed", "登录态无效：站点把请求跳回了登录页")
+    if cloudflare_pending(index_html):
+        return ActivityResult("failed", "站点首页返回 Cloudflare 验证页，未能读取最近动向")
     # 用户页优先：先试调用方给的 activity_path / 签到页，再试能定位到的 userdetails.php
     candidates: List[str] = []
     if path:
         candidates.append(str(path))
-    if auth_rule.get("activity_path"):
-        candidates.append(str(auth_rule["activity_path"]))
     for extra in paths or ():
         value = str(extra or "").strip()
         if value:
             candidates.append(value)
-    match = _UID_RE.search(index_html) if not api_mode else None
+    match = _UID_RE.search(index_html)
     # 优先用 Cookie 里的 c_secure_uid：那才是「你自己」；首页里的 userdetails.php?id= 链接
     # 常常指向**别人**（论坛帖作者、最新注册用户、版主），拿它去开资料页会读到别人的「最近动向」
     # （皇后那条 2026-05-06 00:00:00 就是这么来的）。Cookie 里解不出 uid 时才退回首页链接。
-    own_uid = cookie_uid(cookie) if not api_mode else ""
+    own_uid = cookie_uid(cookie)
     uid = own_uid or (match.group(1) if match else "")
     if uid:
         candidates.append(f"{DEFAULT_USERDETAILS_PATH}?id={uid}")
@@ -3207,25 +3096,19 @@ def read_activity(site: Mapping[str, Any], cookie: str, timeout: int = 30,
     candidates.append(DEFAULT_USERDETAILS_PATH)
     candidates.append(DEFAULT_INDEX_PATH)
     seen: set = set()
+    notes: List[str] = []
     for candidate in candidates:
         if candidate in seen:
             continue
         seen.add(candidate)
         try:
-            candidate_path = _validate_site_path(candidate, "最近动向路径")
-            page = _auth_request(
-                session, request_site, auth_rule, "GET", target_url(base_url, candidate_path),
-                {"Referer": index_url, "Accept": headers["Accept"]}, timeout, proxies)
-        except (ApiRequestError, ValueError) as error:
-            notes.append(f"{candidate}：{_redact_api_secret(error, secret)}")
-            continue
+            page = session.get(target_url(base_url, candidate),
+                               timeout=timeout, allow_redirects=True, proxies=proxies)
         except Exception as error:
-            notes.append(f"{candidate}：请求失败（{_redact_api_secret(error, secret)}）")
+            notes.append(f"{candidate}：请求失败（{type(error).__name__}）")
             continue
         body = page.text or ""
         if page.status_code >= 400:
-            if api_mode and page.status_code in {401, 403}:
-                return ActivityResult("failed", "API Key 无效或没有权限")
             notes.append(f"{candidate}：HTTP {page.status_code}")
             continue
         if cloudflare_pending(body):
@@ -3233,18 +3116,16 @@ def read_activity(site: Mapping[str, Any], cookie: str, timeout: int = 30,
             notes.append(f"{candidate}：Cloudflare 挑战页")
             continue
         if login_page(body):
-            notes.append(f"{candidate}：被要求登录" if api_mode
-                         else f"{candidate}：被要求登录（Cookie 可能失效）")
+            notes.append(f"{candidate}：被要求登录（Cookie 可能失效）")
             continue
-        found = _activity_from_api_payload(body)
+        found = extract_activity(body)
         if found:
             return ActivityResult("success", f"已读取最近动向（{candidate}）",
                                   last_seen=found.get("last_seen", ""),
                                   snippet=found.get("snippet", ""),
                                   source=str(candidate))
         notes.append(f"{candidate}：{len(plain_text(body))} 字，没有「最近动向」")
-    origin = ("API Key 认证" if api_mode
-              else f"自己的 uid={own_uid}（取自 Cookie）" if own_uid
+    origin = (f"自己的 uid={own_uid}（取自 Cookie）" if own_uid
               else f"uid={uid}（取自首页链接）" if uid
               else "Cookie 里没解析到 uid 也没有首页链接")
     return ActivityResult("failed",
