@@ -16,12 +16,6 @@ PT 站点自动签到，支持 V2 / V3。签到默认走 HTTP 直连，支持 Co
 - 详情页分「签到状态」「登录状态」，结果列显示奖励或失败原因
 - 当天已签到成功的站点跳过，通知只统计成功与失败数量
 
-### API Key 登录与签到
-
-纯 API Key / Token 站点只需在「自定义站点规则」中填写固定的 `path` 或 `credential_check_path`，插件会自动切到 API 模式，不再要求写 `auth: "api_key"`。`api_key_source` 默认 `auto`，优先使用站点管理里的 ApiKey，没有时再使用 Token。纯 Cookie 站点始终走 Cookie 流程；纯 Key 站点没有固定端点时不会探测路径或发起请求。API 模式不访问首页、不加载站点模块，也不调用 Browserless。
-
-完整示例和字段说明见 [插件 README](plugins.v2/ptsitesignin/README.md#api-key--token-登录与签到)。
-
 ### Browserless Token
 
 不配置也能签普通站点。需要时：<https://browserless.io/signup/email?plan=free> 注册 → 打开 <https://browserless.io/account/> 复制 API Key → 填入插件设置，地址留 `https://production-sfo.browserless.io`。
