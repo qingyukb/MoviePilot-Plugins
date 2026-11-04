@@ -18,45 +18,39 @@ PLUGINS = {
 MANIFESTS = ("package.json", "package.v2.json", "package.v3.json")
 
 
-def plugin_files(directory: Path):
-    return sorted(path.relative_to(directory) for path in directory.rglob("*")
-                  if path.is_file() and "__pycache__" not in path.parts)
-
-
 class RepoConsistencyTests(unittest.TestCase):
-    def test_v2_and_v3_plugin_directories_identical(self):
+    def test_v2_and_v3_plugin_directories_exist(self):
+        """V3 使用独立实现，同时保留 V2 兼容目录。"""
         for name in PLUGINS:
-            v2 = ROOT / "plugins.v2" / name
-            v3 = ROOT / "plugins.v3" / name
-            if not (v2.is_dir() and v3.is_dir()):
-                # 官方仓库只放 plugins.v3 一份，没有 V2 副本时跳过对比
-                continue
-            with self.subTest(plugin=name):
-                v2_files = plugin_files(v2)
-                self.assertEqual(v2_files, plugin_files(v3), name)
-                for relative in v2_files:
-                    self.assertEqual((v2 / relative).read_bytes(), (v3 / relative).read_bytes(),
-                                     f"{name}/{relative} differs between plugins.v2 and plugins.v3")
+            for generation in ("v2", "v3"):
+                init_file = ROOT / f"plugins.{generation}" / name / "__init__.py"
+                self.assertTrue(init_file.is_file(), f"缺少 {init_file}")
 
     def test_manifest_version_and_history_match_plugin(self):
+        """V2/V3 各自匹配对应索引，V3 使用独立主版本。"""
+        def plugin_version(init_file: Path) -> str:
+            match = re.search(r'plugin_version\s*=\s*"([^"]+)"',
+                              init_file.read_text(encoding="utf-8"))
+            self.assertIsNotNone(match, str(init_file))
+            return match.group(1)
+
         for name, key in PLUGINS.items():
-            versions = []
-            for init_file in (ROOT / "plugins.v2" / name / "__init__.py",
-                              ROOT / "plugins.v3" / name / "__init__.py"):
-                if not init_file.is_file():
-                    continue
-                match = re.search(r'plugin_version\s*=\s*"([^"]+)"',
-                                  init_file.read_text(encoding="utf-8"))
-                self.assertIsNotNone(match, str(init_file))
-                versions.append(match.group(1))
-            if len(versions) > 1:
-                self.assertEqual(len(set(versions)), 1, name)
-            version = versions[0]
-            for manifest in MANIFESTS:
-                data = json.loads((ROOT / manifest).read_text(encoding="utf-8"))
-                entry = data[key]
-                self.assertEqual(entry["version"], version, f"{name} @ {manifest}")
-                self.assertIn(f"v{version}", entry["history"], f"{name} @ {manifest}")
+            v2_version = plugin_version(ROOT / "plugins.v2" / name / "__init__.py")
+            v3_version = plugin_version(ROOT / "plugins.v3" / name / "__init__.py")
+            v2_major = int(v2_version.split(".", 1)[0])
+            self.assertEqual(v3_version, f"{v2_major + 1}.0.0",
+                             f"{name} 的 V3 版本应使用下一个主版本")
+
+            for manifest in ("package.json", "package.v2.json"):
+                entry = json.loads((ROOT / manifest).read_text(encoding="utf-8"))[key]
+                self.assertEqual(entry["version"], v2_version, f"{name} @ {manifest}")
+                self.assertIn(f"v{v2_version}", entry["history"], f"{name} @ {manifest}")
+                self.assertIs(entry.get("v3"), False,
+                              f"{key} @ {manifest} 应禁用 V3 回退")
+
+            entry = json.loads((ROOT / "package.v3.json").read_text(encoding="utf-8"))[key]
+            self.assertEqual(entry["version"], v3_version, f"{name} @ package.v3.json")
+            self.assertIn(f"v{v3_version}", entry["history"], f"{name} @ package.v3.json")
 
     def test_every_plugin_directory_is_listed_in_manifests(self):
         for name in sorted(path.name for path in (ROOT / "plugins.v2").iterdir()

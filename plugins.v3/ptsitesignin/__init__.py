@@ -1,4 +1,4 @@
-"""PT 站点签到插件（MoviePilot V2/V3）
+"""PT 站点签到插件（MoviePilot V3）
 
 双引擎：
   1. HTTP 引擎 —— 直接请求站点签到接口（如 NexusPHP attendance.php），轻量快速；
@@ -200,7 +200,7 @@ class PTSiteSignIn(_PluginBase):
     plugin_name = "PT站点签到"
     plugin_desc = ("PT 站点自动签到，支持 Cookie 登录并读取最近动向；验证码或 Cloudflare 可按规则改用浏览器。")
     plugin_icon = "signin.png"
-    plugin_version = "2.0.6"
+    plugin_version = "3.0.0"
     plugin_author = "qingyukb"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "ptsignin_"

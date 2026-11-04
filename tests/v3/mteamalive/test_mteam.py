@@ -309,8 +309,12 @@ class KeepaliveFlowTests(unittest.TestCase):
                 oper = type("FakeSiteOper", (), {"list_order_by_pri": lambda self: [site]})()
                 app_db = types.ModuleType("app.db.site_oper")
                 app_db.SiteOper = lambda: oper
+                app_db_v3 = types.ModuleType("app.db.oper.site")
+                app_db_v3.SiteOper = lambda: oper
                 original = sys.modules.get("app.db.site_oper")
+                original_v3 = sys.modules.get("app.db.oper.site")
                 sys.modules["app.db.site_oper"] = app_db
+                sys.modules["app.db.oper.site"] = app_db_v3
                 seen = {}
 
                 calls = {"n": 0}
@@ -334,6 +338,10 @@ class KeepaliveFlowTests(unittest.TestCase):
                         sys.modules.pop("app.db.site_oper", None)
                     else:
                         sys.modules["app.db.site_oper"] = original
+                    if original_v3 is None:
+                        sys.modules.pop("app.db.oper.site", None)
+                    else:
+                        sys.modules["app.db.oper.site"] = original_v3
                 self.assertEqual(seen.get("key"), "site-key")
                 self.assertTrue(record["ok"], record["message"])
 

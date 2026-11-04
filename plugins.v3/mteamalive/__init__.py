@@ -34,12 +34,11 @@ except ImportError:
     scheduler_sdk = None
 
 try:
-    from app.sdk.events import Event, EventType, eventmanager
+    from app.sdk.events import Event, eventmanager
 except ImportError:
     from app.core.event import Event, eventmanager
-    from app.schemas.types import EventType
 
-from app.schemas.types import NotificationType
+from app.schemas.types import EventType, NotificationType
 
 from .mteam import (DEFAULT_API_BASE, DEFAULT_SITE, activity_minutes_ago, fetch_profile,
                     format_activity, keepalive_login, last_activity, parse_datetime,
@@ -75,7 +74,7 @@ class MTeamAlive(_PluginBase):
     plugin_name = "馒头保活"
     plugin_desc = "定时用真实浏览器登录 M-Team（账号密码 + TOTP），避免长期不登录被删号；顺带读取分享率与魔力。"
     plugin_icon = "https://raw.githubusercontent.com/qingyukb/MoviePilot-Plugins/main/icons/mteamalive.png"
-    plugin_version = "1.3.7"
+    plugin_version = "2.0.0"
     plugin_author = "qingyukb"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "mteamalive_"
@@ -158,10 +157,10 @@ class MTeamAlive(_PluginBase):
     def site_apikey() -> str:
         """从 MoviePilot 站点管理里找 M-Team 的 API Key（站点里填过就不用再单独配）。"""
         try:
-            from app.db.site_oper import SiteOper
+            from app.db.oper.site import SiteOper
         except Exception:
             try:
-                from app.db.oper.site import SiteOper  # 兼容旧路径
+                from app.db.site_oper import SiteOper  # 兼容旧路径
             except Exception:
                 return ""
         try:
