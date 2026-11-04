@@ -46,7 +46,7 @@ http://192.168.1.10:3000/chromium/bql
 
 ## 注意事项
 
-- Browserless 回退可能会发送站点账号密码，请确认服务地址可信。
+- Browserless 回退会把站点 Cookie 发送到配置的 Browserless 服务，请确认服务地址可信。
 - 能否通过 Cloudflare / Turnstile 仍取决于站点风控和 Browserless 节点。
 - 普通站点优先使用本机 Playwright 或 HTTP，不会主动消耗远程额度。
 

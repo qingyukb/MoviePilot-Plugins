@@ -12,7 +12,6 @@
 
 - 重新复制站点 Cookie。
 - 确认 Cookie 没有过期。
-- 或者在「登录站点」中配置账号密码，让插件重新登录。
 
 ## 卡在 Cloudflare / Turnstile
 

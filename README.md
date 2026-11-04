@@ -4,7 +4,7 @@ MoviePilot 第三方插件仓库。
 
 ## PT站点签到
 
-PT 站点自动签到，支持 V2 / V3。签到默认走 HTTP 直连，支持 Cookie 和账号密码凭证；验证码或 Cloudflare 可按规则改用 Browserless，签完读取站点「最近动向」。
+PT 站点自动签到，支持 V2 / V3。签到默认走 HTTP 直连，支持 Cookie 凭证；验证码或 Cloudflare 可按规则改用 Browserless，签完读取站点「最近动向」。
 
 主要功能：
 

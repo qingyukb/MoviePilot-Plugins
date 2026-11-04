@@ -2,7 +2,7 @@
 
 MoviePilot 的 PT 站点自动签到插件，支持 V2 / V3。
 
-签到默认走 HTTP 直连，支持 Cookie 和账号密码凭证；验证码、Cloudflare / Turnstile 等场景可交给本机 Playwright 或 Browserless 处理。签到后会读取站点「最近动向」，写入登录状态表。
+签到默认走 HTTP 直连，支持 Cookie 凭证；验证码、Cloudflare / Turnstile 等场景可交给本机 Playwright 或 Browserless 处理。签到后会读取站点「最近动向」，写入登录状态表。
 
 ## 功能概览
 
@@ -18,7 +18,7 @@ MoviePilot 的 PT 站点自动签到插件，支持 V2 / V3。
 
 1. 在 MoviePilot 插件市场添加本仓库。
 2. 搜索并安装「PT站点签到」。
-3. 在站点管理中配置 Cookie 或账号密码。
+3. 在站点管理中配置 Cookie。
 4. 勾选需要签到 / 登录的站点。
 5. 设置执行周期，保存并启用插件。
 
@@ -33,6 +33,6 @@ MoviePilot 的 PT 站点自动签到插件，支持 V2 / V3。
 
 ---
 
-如果内置规则已经覆盖你的站点，通常只需要配置 Cookie 或账号密码，无需编写额外规则。
+如果内置规则已经覆盖你的站点，通常只需要配置 Cookie，无需编写额外规则。
 
 [查看完整使用说明](docs/usage.md)

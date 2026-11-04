@@ -1,7 +1,7 @@
 {
   "PTSiteSignIn": {
     "name": "PT站点签到",
-    "description": "PT 站点自动签到，支持 Cookie / 账号密码 / API Key 登录并读取最近动向；验证码或 Cloudflare 可按规则改用浏览器。",
+    "description": "PT 站点自动签到，支持 Cookie 登录并读取最近动向；验证码或 Cloudflare 可按规则改用浏览器。",
     "labels": "站点,签到",
     "version": "2.0.6",
     "icon": "https://raw.githubusercontent.com/qingyukb/MoviePilot-Plugins/main/icons/ptsignin.png",
