@@ -136,13 +136,7 @@ M-Team 登录页改版了。把页面截图发我，我更新选择器（`#usern
 
 ## 图标不显示怎么办
 
-图标用文件名（如 `mteamalive.png`）时，MP 前端是从容器里的 `/public/plugin_icon/` 直接读的，
-所以把插件目录里的同名 png 拷过去即可（拷一次，重启容器后仍在）：
+当前版本已使用完整图标 URL，不再依赖 `/public/plugin_icon/` 手动复制。
 
-```bash
-docker cp mteamalive.png moviepilot-v3:/public/plugin_icon/
-```
-
-如果填的是完整 URL，则走 MP 的图片代理（`/api/v1/system/img/…`），**由容器出网去抓**；
-容器访问不了 GitHub 时就会回退成默认的拼图图标，作者头像同理。
+图标仍不显示时，通常是 MoviePilot 容器无法访问 `raw.githubusercontent.com`。请检查容器的 DNS、代理或外网访问能力；离线部署可把图标放到 `/public/plugin_icon/`，并在本地副本中把 `plugin_icon` 改回文件名 `mteamalive.png`。
 

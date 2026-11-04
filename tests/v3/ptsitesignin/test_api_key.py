@@ -394,7 +394,7 @@ class ApiKeyPluginTests(unittest.TestCase):
                 self.assertIn("不在本次", row["message"])
                 sign.assert_not_called()
 
-    def test_settings_page_lists_site_auth_type(self):
+    def test_settings_page_lists_site_names(self):
         key_site = self.page._Site(99, "纯Key站点", cookie="")
         key_site.apikey = SECRET
         cookie_site = self.page._Site(100, "纯Cookie站点", cookie="session=1")
@@ -411,8 +411,8 @@ class ApiKeyPluginTests(unittest.TestCase):
                     site_options = next(props["items"] for props in selects
                                         if props.get("model") == "site_ids")
                     titles = {item["value"]: item["title"] for item in site_options}
-                    self.assertEqual(titles[99], "纯Key站点（ApiKey）")
-                    self.assertEqual(titles[100], "纯Cookie站点（Cookie）")
+                    self.assertEqual(titles[99], "纯Key站点")
+                    self.assertEqual(titles[100], "纯Cookie站点")
         finally:
             self.page.SITES[:] = original
 

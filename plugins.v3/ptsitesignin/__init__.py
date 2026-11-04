@@ -443,22 +443,14 @@ class PTSiteSignIn(_PluginBase):
         except Exception:
             sites = []
         # 第一个选项是哨兵值 all：等于「全部站点，且自动包含以后新增的站点」
-        def auth_label(site: Any) -> str:
-            if str(getattr(site, "cookie", None) or "").strip():
-                return "Cookie"
-            if (str(getattr(site, "apikey", None) or "").strip()
-                    and str(getattr(site, "token", None) or "").strip()):
-                return "ApiKey + Token"
-            if str(getattr(site, "apikey", None) or "").strip():
-                return "ApiKey"
-            if str(getattr(site, "token", None) or "").strip():
-                return "Token"
-            return ""
+        def has_auth(site: Any) -> bool:
+            return any(str(getattr(site, field, None) or "").strip()
+                       for field in ("cookie", "apikey", "token"))
 
         options: List[Dict[str, Any]] = [{"title": "全部站点（含后续新增）", "value": ALL_SITES}]
-        options += [{"title": f"{site.name}（{auth_label(site)}）", "value": site.id}
+        options += [{"title": str(site.name), "value": site.id}
                     for site in sites
-                    if auth_label(site)]
+                    if has_auth(site)]
 
         def field(kind: str, model: str, label: str, md: int = 6,
                   **props: Any) -> Dict[str, Any]:
