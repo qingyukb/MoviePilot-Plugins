@@ -9,6 +9,7 @@ import importlib.util
 import sys
 import types
 import unittest
+from unittest import mock
 from datetime import datetime
 from pathlib import Path
 
@@ -199,6 +200,60 @@ class PagePluginTests(unittest.TestCase):
             return plugin.get_page(), plugin
         finally:
             plugin.get_data = original                        # type: ignore[method-assign]
+
+    def test_run_batch_separates_http_and_browser_work(self):
+        rules = {
+            "http.example": {"engine": "http", "path": "/attendance.php"},
+            "browser.example": {
+                "engine": "browserless", "mode": "open_page",
+                "path": "/attendance.php", "submit_selector": "button",
+            },
+        }
+        infos = [
+            {"id": index, "name": f"HTTP{index}", "url": f"https://http.example/{index}", "cookie": "c=1"}
+            for index in range(1, 6)
+        ] + [
+            {"id": index, "name": f"浏览器{index}", "url": f"https://browser.example/{index}", "cookie": "c=1"}
+            for index in range(6, 9)
+        ]
+        for module in PLUGINS:
+            with self.subTest(plugin=module.__name__):
+                plugin = module.PTSiteSignIn.__new__(module.PTSiteSignIn)
+                plugin._concurrency = 8
+                calls = []
+
+                def fake_batch(group, rules_arg, signer, run_id, allowed, workers):
+                    calls.append(([int(item["id"]) for item in group], workers))
+                    return [{"site_id": str(item["id"]), "state_key": item["url"],
+                             "status": "success"} for item in group]
+
+                plugin._run_site_batch = fake_batch
+                results = plugin._run_batch(infos, rules, None)
+                self.assertEqual([int(item["site_id"]) for item in results],
+                                 list(range(1, 9)))
+                call_map = {tuple(ids): workers for ids, workers in calls}
+                self.assertEqual(call_map[(1, 2, 3, 4, 5)], 5)
+                self.assertEqual(call_map[(6, 7, 8)], 2)
+
+    def test_failed_non_dual_site_does_not_read_activity(self):
+        info = {"id": 1, "name": "失败站点", "url": "https://failure.example",
+                "cookie": "c=1"}
+        rules = {"failure.example": {"engine": "http", "path": "/attendance.php"}}
+        for module in PLUGINS:
+            with self.subTest(plugin=module.__name__):
+                plugin = module.PTSiteSignIn.__new__(module.PTSiteSignIn)
+                plugin._concurrency = 1
+                plugin._timeout = 5
+                plugin._read_activity = True
+                plugin._site_rules = ""
+                plugin._run_id = 1
+                plugin._stop_event = None
+                with mock.patch.object(module, "run_site_module", return_value=None),                         mock.patch.object(module, "http_sign_auto",
+                                          return_value=module.SignResult("failed", "签到失败")),                         mock.patch.object(plugin, "_read_site_activity",
+                                          side_effect=AssertionError("失败站点不应读取最近动向")) as activity:
+                    row = plugin._sign_one(info, rules, None, run_id=1)
+                self.assertEqual(row["status"], "failed")
+                activity.assert_not_called()
 
     def test_clear_today_is_one_shot_and_removes_today_records(self):
         today = self._today("08:30:00")

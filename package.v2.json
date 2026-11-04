@@ -3,7 +3,7 @@
     "name": "PT站点签到",
     "description": "PT 站点自动签到，支持 Cookie 登录并读取最近动向；验证码或 Cloudflare 可按规则改用浏览器。",
     "labels": "站点,签到",
-    "version": "2.0.7",
+    "version": "2.0.8",
     "icon": "https://raw.githubusercontent.com/qingyukb/MoviePilot-Plugins/main/icons/ptsignin.png",
     "author": "qingyukb",
     "level": 2,
@@ -12,7 +12,7 @@
     "v2": true,
     "system_version": ">=2.0.0,<3.0.0",
     "history": {
-      "v2.0.7": "修复「清理本日缓存」一次性开关未自动关闭的问题；清理当天记录后可正常重新签到。"
+      "v2.0.8": "性能优化：HTTP 与 Browserless 分组并行，默认最大并发提升到 6、上限 12；每个 Browserless Token 独立 2 并发；失败且非双任务站点不再读取最近动向。"
     }
   },
   "MTeamAlive": {

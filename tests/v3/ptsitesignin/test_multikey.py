@@ -91,6 +91,22 @@ class BrowserlessPoolTests(unittest.TestCase):
                 self.assertTrue(pool)
                 self.assertEqual(pool.tokens, [""])
 
+    def test_per_token_concurrency_and_round_robin(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                pool = core.BrowserlessPool(
+                    "https://example.test", ["k1", "k2", "k3"], 60, max_concurrency=2)
+                self.assertEqual(pool.max_concurrency, 6)
+                seen = []
+                ok = core.SignResult("success", "签到成功")
+                for token, signer in pool._signers:
+                    signer.sign = lambda site, rule, _token=token: (
+                        seen.append(_token) or ok)
+                for _ in range(4):
+                    self.assertEqual(pool.sign({}, {"path": "/attendance.php"}).status,
+                                     "success")
+                self.assertEqual(seen, ["k1", "k2", "k3", "k1"])
+
     def test_token_dedup(self):
         for core in CORES:
             with self.subTest(core=core.__name__):

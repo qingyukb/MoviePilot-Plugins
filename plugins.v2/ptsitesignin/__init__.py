@@ -200,7 +200,7 @@ class PTSiteSignIn(_PluginBase):
     plugin_name = "PT站点签到"
     plugin_desc = ("PT 站点自动签到，支持 Cookie 登录并读取最近动向；验证码或 Cloudflare 可按规则改用浏览器。")
     plugin_icon = "signin.png"
-    plugin_version = "2.0.7"
+    plugin_version = "2.0.8"
     plugin_author = "qingyukb"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "ptsignin_"
@@ -215,7 +215,7 @@ class PTSiteSignIn(_PluginBase):
     _login_site_ids: List[int] = []
     _all_sites = False          # 签到站点勾了「全部站点」
     _all_login_sites = False    # 登录站点勾了「全部站点」
-    _concurrency = 2
+    _concurrency = 6
     _timeout = 30
     _retry_delay_minutes = 10
     _retry_count = 1
@@ -253,7 +253,7 @@ class PTSiteSignIn(_PluginBase):
         self._site_ids, self._all_sites = self._parse_site_ids(config.get("site_ids"))
         self._login_site_ids, self._all_login_sites = self._parse_site_ids(
             config.get("login_site_ids"))
-        self._concurrency = max(1, min(int(config.get("concurrency") or 2), 5))
+        self._concurrency = max(1, min(int(config.get("concurrency") or 6), 12))
         self._timeout = max(5, min(int(config.get("timeout") or 30), 120))
         retry_count = config.get("retry_count")
         self._retry_count = max(0, min(int(1 if retry_count in (None, "") else retry_count), 5))
@@ -505,8 +505,9 @@ class PTSiteSignIn(_PluginBase):
                            "打开并保存后清空今天的签到记录（一次性动作，会自动关闭），下一轮重新签", 4)),
             row(field("VCronField", "cron", "执行周期",
                       placeholder="5 位 Cron；例如 25 8 * * *"),
-                hint_field("VTextField", "concurrency", "并发数", "Browserless 按额度计费，建议 1–2",
-                           type="number", min=1, max=5)),
+                hint_field("VTextField", "concurrency", "最大并发数",
+                           "普通站点建议 4–8；Browserless / Playwright 每个 Token 最多同时 2 个",
+                           type="number", min=1, max=12)),
             row(hint_field("VTextField", "retry_count", "失败重试次数", "0 为关闭，默认 1 次",
                            type="number", min=0, max=5),
                 hint_field("VTextField", "retry_delay_minutes", "失败后等待分钟数",
@@ -1116,9 +1117,11 @@ class PTSiteSignIn(_PluginBase):
         if guard:
             logger.debug(f"PT站点签到：{site_name} 跳过（{guard}）")
             return self._skip_result(info, guard)
+        read_activity = (self._read_activity
+                         and (outcome.status in {"success", "already"} or dual))
         activity_text, activity_source = (
             self._read_site_activity(info, rule, run_id, allowed_site_ids)
-            if self._read_activity else ("", ""))
+            if read_activity else ("", ""))
         return self._site_result(
             info, engine=engine, status=outcome.status, message=outcome.message,
             login=login_text, activity=activity_text, activity_source=activity_source,
@@ -1386,12 +1389,25 @@ class PTSiteSignIn(_PluginBase):
                 return value
         return ""
 
-    def _run_batch(self, infos: List[Dict[str, Any]], rules: Dict[str, Dict[str, Any]],
-                   signer: Optional[BrowserlessSigner], run_id: Optional[int] = None,
-                   allowed_site_ids: Optional[Set[int]] = None) -> List[Dict[str, str]]:
+    @staticmethod
+    def _uses_browser_engine(info: Dict[str, Any], rules: Dict[str, Dict[str, Any]]) -> bool:
+        """判断站点是否会进入本地浏览器或 Browserless 流程。"""
+        try:
+            rule = resolve_rule(info, rules)
+        except ValueError:
+            return False
+        if is_api_key_rule(rule):
+            return False
+        if str(rule.get("browser_auth_mode") or "").strip():
+            return True
+        return str(rule.get("engine") or "http").lower() in {"browserless", "playwright"}
+
+    def _run_site_batch(self, infos: List[Dict[str, Any]], rules: Dict[str, Dict[str, Any]],
+                        signer: Optional[BrowserlessSigner], run_id: Optional[int],
+                        allowed_site_ids: Optional[Set[int]], workers: int) -> List[Dict[str, str]]:
+        """使用指定并发数执行一组站点。"""
         if not infos:
             return []
-        workers = min(self._concurrency, len(infos))
         if workers <= 1:
             return [self._sign_one(info, rules, signer, run_id, allowed_site_ids)
                     for info in infos]
@@ -1399,6 +1415,41 @@ class PTSiteSignIn(_PluginBase):
             return list(executor.map(
                 lambda info: self._sign_one(info, rules, signer, run_id, allowed_site_ids),
                 infos))
+
+    def _run_batch(self, infos: List[Dict[str, Any]], rules: Dict[str, Dict[str, Any]],
+                   signer: Optional[BrowserlessSigner], run_id: Optional[int] = None,
+                   allowed_site_ids: Optional[Set[int]] = None) -> List[Dict[str, str]]:
+        """HTTP 与浏览器任务分组并发，避免慢速浏览器站点阻塞大批普通站点。"""
+        if not infos:
+            return []
+        http_infos: List[Dict[str, Any]] = []
+        browser_infos: List[Dict[str, Any]] = []
+        for info in infos:
+            target = browser_infos if self._uses_browser_engine(info, rules) else http_infos
+            target.append(info)
+        groups = []
+        if http_infos:
+            groups.append((http_infos, min(self._concurrency, len(http_infos))))
+        if browser_infos:
+            browser_capacity = int(getattr(signer, "max_concurrency", 2) or 2)
+            browser_workers = min(self._concurrency, max(1, browser_capacity),
+                                  len(browser_infos))
+            groups.append((browser_infos, browser_workers))
+        if len(groups) == 1:
+            group, workers = groups[0]
+            return self._run_site_batch(group, rules, signer, run_id, allowed_site_ids, workers)
+        with ThreadPoolExecutor(max_workers=len(groups)) as coordinator:
+            futures = [
+                coordinator.submit(self._run_site_batch, group, rules, signer,
+                                   run_id, allowed_site_ids, workers)
+                for group, workers in groups
+            ]
+            grouped = [future.result() for future in futures]
+        by_key = {
+            str(result.get("site_id") or result.get("state_key")): result
+            for group in grouped for result in group
+        }
+        return [by_key[str(info.get("id") or site_state_key(info))] for info in infos]
 
     def run_sign_in(self, allow_retry: bool = True) -> None:
         """执行一轮签到。

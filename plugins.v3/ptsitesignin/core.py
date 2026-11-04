@@ -19,6 +19,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from html import unescape as _html_unescape
+from threading import BoundedSemaphore, Lock
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 # 内置规则与猪猪专用脚本拆成独立模块；按文件路径加载 core.py 时（测试 / 工具）
 # 没有包上下文，因此提供同目录动态加载兜底。
@@ -4290,7 +4291,7 @@ class BrowserlessPool:
     """
 
     def __init__(self, address: str, tokens: Sequence[str], timeout: int = 100,
-                 logger: Any = None):
+                 logger: Any = None, max_concurrency: int = 2):
         cleaned: List[str] = []
         for token in tokens:
             value = str(token or "").strip()
@@ -4302,6 +4303,12 @@ class BrowserlessPool:
         self.tokens = cleaned
         self._logger = logger
         self._index = 0
+        self._next_index = 0
+        self._index_lock = Lock()
+        self._token_concurrency = max(1, int(max_concurrency))
+        self._request_slots = [
+            BoundedSemaphore(self._token_concurrency) for _ in cleaned
+        ]
         self._signers = [(token, BrowserlessSigner(address, token, timeout))
                          for token in cleaned]
 
@@ -4314,23 +4321,39 @@ class BrowserlessPool:
     @property
     def active_index(self) -> int:
         """当前正在用的 Token 序号（从 1 开始，给日志用）。"""
-        return self._index + 1
+        with self._index_lock:
+            return self._index + 1
 
     def _log(self, message: str, *args: Any) -> None:
         if self._logger is not None:
             self._logger.info(message, *args)
 
+    @property
+    def max_concurrency(self) -> int:
+        """所有 Token 合计可用的浏览器并发数。"""
+        return len(self._request_slots) * self._token_concurrency
+
     def sign(self, site: Mapping[str, Any], rule: Mapping[str, Any]) -> SignResult:
+        """按 Token 轮转并在各自并发槽内执行签到。"""
         if not self._signers:
             return SignResult("failed", "没有可用的 Browserless Token")
+        with self._index_lock:
+            start_index = self._next_index
+            self._next_index = (self._next_index + 1) % len(self._signers)
+        return self._sign_rotating(site, rule, start_index)
+
+    def _sign_rotating(self, site: Mapping[str, Any], rule: Mapping[str, Any],
+                       start_index: int) -> SignResult:
         total = len(self._signers)
         last: Optional[SignResult] = None
         for offset in range(total):
-            index = (self._index + offset) % total
+            index = (start_index + offset) % total
             token, signer = self._signers[index]
-            result = signer.sign(site, rule)
+            with self._request_slots[index]:
+                result = signer.sign(site, rule)
             if not _needs_token_switch(result):
-                self._index = index
+                with self._index_lock:
+                    self._index = index
                 return result
             last = result
             if total > 1:
