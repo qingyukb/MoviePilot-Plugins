@@ -38,7 +38,8 @@ class RepoConsistencyTests(unittest.TestCase):
             v2_version = plugin_version(ROOT / "plugins.v2" / name / "__init__.py")
             v3_version = plugin_version(ROOT / "plugins.v3" / name / "__init__.py")
             v2_major = int(v2_version.split(".", 1)[0])
-            self.assertEqual(v3_version, f"{v2_major + 1}.0.0",
+            v3_major = int(v3_version.split(".", 1)[0])
+            self.assertEqual(v3_major, v2_major + 1,
                              f"{name} 的 V3 版本应使用下一个主版本")
 
             for manifest in ("package.json", "package.v2.json"):

@@ -200,7 +200,7 @@ class PTSiteSignIn(_PluginBase):
     plugin_name = "PT站点签到"
     plugin_desc = ("PT 站点自动签到，支持 Cookie 登录并读取最近动向；验证码或 Cloudflare 可按规则改用浏览器。")
     plugin_icon = "signin.png"
-    plugin_version = "3.0.0"
+    plugin_version = "3.0.1"
     plugin_author = "qingyukb"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "ptsignin_"
@@ -247,11 +247,8 @@ class PTSiteSignIn(_PluginBase):
         config = config or {}
         self._enabled = bool(config.get("enabled", False))
         self._notify_enabled = self._parse_notify_switch(config)
-        self._clear_today = bool(config.get("clear_today", False))
-        if self._clear_today:
-            # 一次性动作：清空今天的记录，下一轮（含本次的「立即执行」）会重新签一遍
-            self._clear_today = False
-            self._clear_today_cache()
+        clear_today = bool(config.get("clear_today", False))
+        self._clear_today = False
         self._cron = str(config.get("cron") or "25 8 * * *")
         self._site_ids, self._all_sites = self._parse_site_ids(config.get("site_ids"))
         self._login_site_ids, self._all_login_sites = self._parse_site_ids(
@@ -269,10 +266,16 @@ class PTSiteSignIn(_PluginBase):
         self._browserless_timeout = max(15, min(int(config.get("browserless_timeout") or 100), 300))
         self._site_rules = str(config.get("site_rules") or "")
         self._read_activity = bool(config.get("read_activity", True))
-        self._run_once = bool(config.get("run_once", False))
-        if self._run_once:
+        run_once = bool(config.get("run_once", False))
+        self._run_once = run_once
+        if clear_today:
+            # 一次性动作：清空今天的记录，下一轮（含本次的「立即执行」）会重新签一遍
+            self._clear_today_cache()
+        if clear_today or run_once:
+            # 一次性开关必须写回关闭状态，否则界面会一直显示开启并在重载后重复执行
             self._run_once = False
             self.update_config(self._config())
+        if run_once:
             self._start_run_once()
 
     def _start_run_once(self) -> None:

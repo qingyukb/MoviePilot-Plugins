@@ -3,7 +3,7 @@
     "name": "PT站点签到",
     "description": "PT 站点自动签到，支持 Cookie 登录并读取最近动向；验证码或 Cloudflare 可按规则改用浏览器。",
     "labels": "站点,签到",
-    "version": "2.0.6",
+    "version": "2.0.7",
     "icon": "https://raw.githubusercontent.com/qingyukb/MoviePilot-Plugins/main/icons/ptsignin.png",
     "author": "qingyukb",
     "level": 2,
@@ -11,7 +11,7 @@
     "v2": true,
     "system_version": ">=2.0.0",
     "history": {
-      "v2.0.6": "撤回 API Key 与 Cookie 共用流程：API Key 仅在站点规则显式声明 auth=api_key 时使用；统一结果构造和规则解析，日志只保留轮次摘要、失败原因与重试信息；V3 网络请求优先使用 app.sdk.network。"
+      "v2.0.7": "修复「清理本日缓存」一次性开关未自动关闭的问题；清理当天记录后可正常重新签到。"
     },
     "v3": false
   },

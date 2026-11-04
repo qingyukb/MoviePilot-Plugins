@@ -200,6 +200,56 @@ class PagePluginTests(unittest.TestCase):
         finally:
             plugin.get_data = original                        # type: ignore[method-assign]
 
+    def test_clear_today_is_one_shot_and_removes_today_records(self):
+        today = self._today("08:30:00")
+        old = "2026-10-01 08:00:00"
+        key = "history_" + datetime.now().strftime("%Y%m%d")
+        for module in PLUGINS:
+            with self.subTest(plugin=module.__name__):
+                plugin = module.PTSiteSignIn.__new__(module.PTSiteSignIn)
+                data = {
+                    "latest": [
+                        {"site": "观众", "status": "success", "ran_at": today},
+                        {"site": "学校", "status": "success", "ran_at": old},
+                    ],
+                    "history_index": [key, "history_20261001"],
+                    key: [{"site": "观众", "status": "success", "ran_at": today}],
+                }
+                saved = []
+                plugin.get_data = lambda name, source=data: source.get(name)
+                plugin.save_data = lambda name, value, source=data: source.__setitem__(name, value)
+                plugin.del_data = lambda name, source=data: source.pop(name, None)
+                plugin.update_config = lambda config, target=saved: target.append(config)
+
+                plugin.init_plugin({"enabled": True, "clear_today": True, "run_once": False})
+
+                self.assertFalse(plugin._clear_today)
+                self.assertTrue(saved)
+                self.assertFalse(saved[-1]["clear_today"])
+                self.assertNotIn(key, data)
+                self.assertNotIn(key, data["history_index"])
+                self.assertEqual([row["site"] for row in data["latest"]], ["学校"])
+
+    def test_run_once_still_schedules_after_one_shot_config_save(self):
+        for module in PLUGINS:
+            with self.subTest(plugin=module.__name__):
+                plugin = module.PTSiteSignIn.__new__(module.PTSiteSignIn)
+                data = {}
+                saved = []
+                started = []
+                plugin.get_data = lambda name, source=data: source.get(name)
+                plugin.save_data = lambda name, value, source=data: source.__setitem__(name, value)
+                plugin.del_data = lambda name, source=data: source.pop(name, None)
+                plugin.update_config = lambda config, target=saved: target.append(config)
+                plugin._start_run_once = lambda: started.append(True)
+
+                plugin.init_plugin({"enabled": True, "clear_today": False, "run_once": True})
+
+                self.assertFalse(plugin._run_once)
+                self.assertTrue(saved)
+                self.assertFalse(saved[-1]["run_once"])
+                self.assertEqual(started, [True])
+
     def test_get_page_renders_boxed_tables(self):
         latest = [
             {"site": "观众", "status": "success", "message": "签到成功（获得 20 粒爆米花）",
