@@ -255,17 +255,33 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "signin_token_patterns": {"csrf": "<meta name=\"x-csrf\" content=\"([^\"]+)\""},
         "success_keywords": ["\"state\":\"success\"", "\"state\": \"success\""],
     },
-    # ---- 52PT（52pt.site）：bakatest 答题签到，随机选一个选项 ----
+    # ---- 52PT（52pt.site）：首页点击「做种会员签到处」，完成 Turnstile 后提交 ----
+    # 视频实测入口已从独立答题页变为首页签到处弹窗：先点入口，再等待 Turnstile，
+    # 验证成功后页面出现「验证已通过，点击提交」按钮，最后回首页确认签到状态。
     "52pt.site": {
-        "engine": "http",
-        "method": "GET",
-        "path": "/bakatest.php",
-        "already_keywords": ["今天已经签过到了"],
-        "signin_path": "/bakatest.php",
-        "signin_method": "POST",
-        "signin_pick": "random",
-        "signin_data": {"usercomment": "太难了！", "wantskip": "不会"},
-        "success": "\\d+\\s*点魔力值",
+        "engine": "browserless",
+        "mode": "cloudflare",
+        "path": "/index.php",
+        "preflight_path": "/index.php",
+        "preflight_wait": 3000,
+        "pre_click_selector": "#gamelist a[href*='nebuirobot']",
+        "pre_click_text": "做种会员签到处",
+        "pre_click_wait": 800,
+        "submit_method": "dom_click",
+        "submit_selector": "button, [role='button'], input[type='submit']",
+        "submit_text": "验证已通过，点击提交",
+        # 按钮必须按文字匹配；页面没有该按钮时绝不回退点第一个提交控件
+        "require_submit_text": True,
+        "cloudflare_wait": 12,
+        "solve_timeout": 40000,
+        "wait": 5000,
+        "pending_keywords": ["请先完成人机验证", "等待上方验证通过"],
+        "already_keywords": ["今天已经签过到了", "今日已签到", "今天已经签到", "今天已签到"],
+        "success_keywords": ["签到成功", "簽到成功", "签到完成", "领取成功"],
+        # 首页正文里可能夹杂英文 announcement 的 already；只认本规则明确的状态文案
+        "strict_status_keywords": True,
+        "verify_success_path": "/index.php",
+        "verify_wait": 5000,
     },
     # ---- 彩虹岛（CHDBits）：bakatest 选择题签到 ----
     # 未配置答案时沿用官方 autosignin 的随机策略；固定题可用 quiz_answer 指定
@@ -281,17 +297,21 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "quiz_failure": r"(回答错误|答案错误|请重新|不正确|失去)",
         "quiz_fields": {"usercomment": "太难了！", "wantskip": "不会"},
     },
-    # ---- U2（u2.dmhy.org）：showup 四选一答题，随机点一个提交按钮 ----
+    # ---- U2（u2.dmhy.org）：showup 四选一，提交后必须回读确认 ----
+    # 独立模块负责精确解析 req/hash/form/_csrf 和四个答案按钮；这里保留 HTTP
+    # 兜底规则，但不把 JS 跳转当作成功，避免答错或未真正签到时误报。
     "u2.dmhy.org": {
         "engine": "http",
         "method": "GET",
         "path": "/showup.php",
-        "already": "<a[^>]*href=\"showup.php\"[^>]*>已签到</a>",
+        "already": r"(?:已签到|已簽到|今日已签到|今日已簽到)",
         "signin_path": "/showup.php?action=show",
         "signin_method": "POST",
         "signin_pick": "random",
         "signin_data": {"message": "一切随缘~"},
-        "success_keywords": ["window.location.href = 'showup.php'"],
+        "already_keywords": ["已签到", "已簽到"],
+        "strict_status_keywords": True,
+        "verify_success_path": "/showup.php",
     },
     # ---- 朱雀（zhuque.in）：首页取 x-csrf-token，POST JSON 释放技能（就是它的签到）----
     "zhuque.in": {

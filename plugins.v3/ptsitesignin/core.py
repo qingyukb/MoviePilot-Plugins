@@ -3336,17 +3336,22 @@ def pre_click_script(selector: str = "", text: str = "", wait_ms: int = 800) -> 
       }
       if (!node && %s) node = document.querySelector(%s);
       if (!node) return false;
+      const isLink = node.tagName === 'A' && !!node.getAttribute('href');
       node.click();
+      // 链接点击会触发导航；立即返回，避免执行上下文被销毁后 evaluate 报错。
+      if (isLink) return true;
       await new Promise((resolve) => setTimeout(resolve, %d));
       return true;
     })()""" % (wanted_json, selector_json, selector_json, max(0, int(wait_ms)))
 
 
 def _submit_script(selector: str, method: str, captcha_input: Optional[str] = None,
-                   submit_text: Optional[str] = None, pre_click: str = "") -> str:
+                   submit_text: Optional[str] = None, pre_click: str = "",
+                   require_text: bool = False) -> str:
     selector_json = json.dumps(selector)
     input_json = json.dumps(captcha_input or "")
     text_json = json.dumps(submit_text or "", ensure_ascii=False)
+    require_json = "true" if require_text else "false"
     target_script = """(() => { const wanted = %s.trim();
       if (wanted) {
         // 头像菜单、下拉项这类元素常是 div / li / span，而且默认是隐藏的；
@@ -3363,9 +3368,10 @@ def _submit_script(selector: str, method: str, captcha_input: Optional[str] = No
           hits.sort((left, right) => left.text.length - right.text.length);
           return hits[0].node;
         }
+        if (%s) return null;
       }
       return document.querySelector(%s);
-    })()""" % (text_json, selector_json)
+    })()""" % (text_json, require_json, selector_json)
     if method in {"click", "dom_click", "confirm_click"}:
         confirm = "" if method != "confirm_click" else """
           await new Promise((resolve) => setTimeout(resolve, 150));
@@ -3394,7 +3400,9 @@ def _submit_script(selector: str, method: str, captcha_input: Optional[str] = No
 
 def _altcha_submit_script(rule: Mapping[str, Any]) -> str:
     payload = json.dumps(str(rule["altcha_payload_selector"]))
-    submit = _submit_script(str(rule["submit_selector"]), "dom_click", submit_text=rule.get("submit_text"))
+    submit = _submit_script(str(rule["submit_selector"]), "dom_click",
+                            submit_text=rule.get("submit_text"),
+                            require_text=bool(rule.get("require_submit_text")))
     return """(async () => {
       const ready = () => { const input = document.querySelector(%s); return input && input.value.trim() ? input : null; };
       const deadline = Date.now() + 30000;
@@ -3654,6 +3662,9 @@ def build_query(rule: Mapping[str, Any], user_agent: Optional[str] = None,
     triggered_image = rule["mode"] == "trigger_image"
     altcha = rule["mode"] == "altcha"
     submit_method = str(rule.get("submit_method") or "click")
+    pre_action = pre_click_script(str(rule.get("pre_click_selector") or ""),
+                                  str(rule.get("pre_click_text") or ""),
+                                  int(rule.get("pre_click_wait") or 800))
     auto_submit = submit_method in AUTO_SUBMIT_METHODS
     # auto 提交的核验放在第二段（注入 token 之后）做：这一轮还没有提交动作可核验
     verifies_success = bool(rule.get("verify_success_path")) and not auto_submit
@@ -3716,6 +3727,9 @@ def build_query(rule: Mapping[str, Any], user_agent: Optional[str] = None,
     if extra:
         variable_suffix += " " + extra
     variable_suffix += user_agent_variable
+    if pre_action:
+        variable_suffix += " $preAction:String!"
+    pre_action_step = "preAction:evaluate(content:$preAction){value}\n      " if pre_action else ""
     return """mutation CheckIn($cookies:[CookieInput!]! $url:String! $beforeWait:Float! $wait:Float!%s) {
       %s
       cookies(cookies:$cookies){cookies{name}}
@@ -3726,11 +3740,12 @@ def build_query(rule: Mapping[str, Any], user_agent: Optional[str] = None,
       %s
       %s
       %s
+      %s
       waitAfter:waitForTimeout(time:$wait){time}
       response:evaluate(content:"JSON.stringify(window.__ptsignin_response || null)"){value}
       %s
       after:html{html}%s
-    }""" % (variable_suffix, set_user_agent,
+    }""" % (variable_suffix, set_user_agent, pre_action_step,
             "trigger:evaluate(content:$trigger){value}\n      waitForTrigger:waitForTimeout(time:$triggerWait){time}" if triggered_image else "",
             "altcha:click(selector:$altchaSelector){selector time}" if altcha else "",
             solve,
@@ -4781,12 +4796,16 @@ class BrowserlessSigner:
             # 页面在人机验证通过后自己提交签到，不需要点任何按钮
             pass
         else:
-            pre_click = pre_click_script(str(rule.get("pre_click_selector") or ""),
-                                        str(rule.get("pre_click_text") or ""))
             variables["submit"] = (_altcha_submit_script(rule) if submit_method == "altcha_click"
                                    else _submit_script(rule["submit_selector"], submit_method,
                                                        rule.get("captcha_input_selector"),
-                                                       rule.get("submit_text")))
+                                                       rule.get("submit_text"),
+                                                       require_text=bool(rule.get("require_submit_text"))))
+        pre_action = pre_click_script(str(rule.get("pre_click_selector") or ""),
+                                      str(rule.get("pre_click_text") or ""),
+                                      int(rule.get("pre_click_wait") or 800))
+        if pre_action:
+            variables["preAction"] = pre_action
         if submit_method == "turnstile_click":
             variables["turnstileWait"] = turnstile_wait_ms(rule)
         if submit_method == "altcha_click":

@@ -151,6 +151,8 @@ class QuizSignTests(unittest.TestCase):
         for core in self.each_core():
             calls = []
             original_sign = core.http_sign
+            original_two_step = core.http_two_step
+            original_discover = core.discover_signin_target
             try:
                 core.http_sign = lambda *args, **kwargs: core.SignResult("failed", "答题错误")
                 core.http_two_step = lambda *args, **kwargs: calls.append("two_step")
@@ -158,13 +160,44 @@ class QuizSignTests(unittest.TestCase):
                 result = core.http_sign_auto(self.site, self.rule, timeout=3)
             finally:
                 core.http_sign = original_sign
+                core.http_two_step = original_two_step
+                core.discover_signin_target = original_discover
             self.assertEqual(result.status, "failed")
             self.assertEqual(calls, [])
 
-    def test_52pt_default_success_regex_still_matches(self):
+    def test_52pt_homepage_does_not_false_positive_already(self):
         for core in self.each_core():
-            rule = core.DEFAULT_RULES["52pt.site"]
-            self.assertIsNotNone(re.search(rule["success"], "获得 20 点魔力值"))
+            rule = core.resolve_rule({"url": "https://52pt.site/", "cookie": "c=1"}, {})
+            result = core.classify(
+                "<html><body>做种会员签到处 already</body></html>", rule)
+            self.assertEqual(result.status, "failed")
+
+    def test_52pt_uses_turnstile_modal_flow(self):
+        for core in self.each_core():
+            rule = core.resolve_rule({"url": "https://52pt.site/", "cookie": "c=1"}, {})
+            self.assertEqual(rule["engine"], "browserless")
+            self.assertEqual(rule["mode"], "cloudflare")
+            self.assertEqual(rule["path"], "/index.php")
+            self.assertEqual(rule["pre_click_text"], "做种会员签到处")
+            self.assertEqual(rule["pre_click_selector"], "#gamelist a[href*='nebuirobot']")
+            pre_action = core.pre_click_script(
+                rule["pre_click_selector"], rule["pre_click_text"], rule["pre_click_wait"])
+            self.assertIn("if (isLink) return true;", pre_action)
+            self.assertEqual(rule["submit_method"], "dom_click")
+            self.assertEqual(rule["submit_text"], "验证已通过，点击提交")
+            self.assertTrue(rule.get("require_submit_text"))
+            self.assertTrue(rule.get("strict_status_keywords"))
+            submit_js = core._submit_script(
+                rule["submit_selector"], "dom_click", submit_text=rule["submit_text"],
+                require_text=True)
+            self.assertIn("if (true) return null;", submit_js)
+            query = core.build_query(rule)
+            self.assertLess(query.index("waitBefore:waitForTimeout"),
+                            query.index("before:html"))
+            self.assertLess(query.index("before:html"),
+                            query.index("preAction:evaluate"))
+            self.assertLess(query.index("preAction:evaluate"),
+                            query.index("solve:solve"))
 
 
 class SiteSelectionTests(unittest.TestCase):

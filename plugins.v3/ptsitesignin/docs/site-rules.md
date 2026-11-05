@@ -35,7 +35,10 @@
 | `bonus` | 从页面提取奖励文案的正则 |
 | `activity_path` | 最近动向页面路径 |
 | `submit_text` | 需要点击的按钮文字 |
+| `require_submit_text` | 为 `true` 时必须按文字找到按钮，找不到就不提交（避免误点其它表单） |
+| `strict_status_keywords` | 为 `true` 时只认规则配置的成功/已签到文案，不用通用状态词 |
 | `pre_click_selector` | 点击签到前需要操作的页面元素 |
+| `pre_click_text` | 点击签到前按文字匹配页面元素，例如首页的签到入口 |
 | `wait` | 操作后等待时间，单位毫秒 |
 | `cloudflare_wait` | 等待人机验证放行的时间，单位秒 |
 
@@ -96,6 +99,7 @@
 - `hdsky.py`：OCR 验证码
 - `tjupt.py`：豆瓣海报比对
 - `htpt.py`：海棠PT 表单签到
+- `u2.py`：U2 showup 四选一签到（提交后回读确认）
 - `farm.py`：自由农场滑块处理
 
 模块示例：

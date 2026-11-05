@@ -45,6 +45,8 @@ https://github.com/qingyukb/MoviePilot-Plugins
 当前包含以下类型的预设或专用处理：
 
 - 观众：Turnstile
+- 52PT：首页「做种会员签到处」Turnstile 签到（需站点入口可用）
+- U2：showup 四选一签到（提交后回读确认）
 - 彩虹岛：答题签到
 - AGSVPT：表单签到
 - 学校：首页签到入口
