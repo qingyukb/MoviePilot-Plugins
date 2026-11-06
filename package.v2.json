@@ -3,7 +3,7 @@
     "name": "PT站点签到",
     "description": "PT 站点自动签到，支持 Cookie 登录并读取最近动向；验证码或 Cloudflare 可按规则改用浏览器。",
     "labels": "站点,签到",
-    "version": "2.0.9",
+    "version": "2.0.10",
     "icon": "https://raw.githubusercontent.com/qingyukb/MoviePilot-Plugins/main/icons/ptsignin.png",
     "author": "qingyukb",
     "level": 2,
@@ -12,6 +12,7 @@
     "v2": true,
     "system_version": ">=2.0.0,<3.0.0",
     "history": {
+      "v2.0.10": "修复 52PT 新版 bakatestfinal 签到流程、Turnstile 按钮文案与成功页判定；新增瓷器（HDChina）专用模块，使用站点刷新后的 Cookie 完成 CSRF 签到；修复规则 activity_path 未参与最近动向读取的问题。",
       "v2.0.9": "新增 52PT 首页 Turnstile 签到规则与 U2 showup 四选一模块；U2 提交后回读确认，52PT 仅在站点签到处入口可用时生效。",
       "v2.0.8": "性能优化：HTTP 与 Browserless 分组并行，默认最大并发提升到 6、上限 12；每个 Browserless Token 独立 2 并发；失败且非双任务站点不再读取最近动向。"
     }

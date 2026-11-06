@@ -172,25 +172,22 @@ class QuizSignTests(unittest.TestCase):
                 "<html><body>做种会员签到处 already</body></html>", rule)
             self.assertEqual(result.status, "failed")
 
-    def test_52pt_uses_turnstile_modal_flow(self):
+    def test_52pt_uses_current_bakatestfinal_flow(self):
         for core in self.each_core():
             rule = core.resolve_rule({"url": "https://52pt.site/", "cookie": "c=1"}, {})
             self.assertEqual(rule["engine"], "browserless")
             self.assertEqual(rule["mode"], "cloudflare")
             self.assertEqual(rule["path"], "/index.php")
-            self.assertEqual(rule["pre_click_text"], "做种会员签到处")
-            self.assertEqual(rule["pre_click_selector"], "#gamelist a[href*='nebuirobot']")
+            self.assertNotIn("pre_click_text", rule)
+            self.assertEqual(rule["pre_click_selector"], "a#game[href*='bakatestfinal']")
             pre_action = core.pre_click_script(
-                rule["pre_click_selector"], rule["pre_click_text"], rule["pre_click_wait"])
+                rule["pre_click_selector"], "", rule["pre_click_wait"])
             self.assertIn("if (isLink) return true;", pre_action)
-            self.assertEqual(rule["submit_method"], "dom_click")
-            self.assertEqual(rule["submit_text"], "验证已通过，点击提交")
-            self.assertTrue(rule.get("require_submit_text"))
+            self.assertEqual(rule["submit_method"], "auto")
+            self.assertEqual(rule["auto_wait"], 30000)
+            self.assertIn("请先完成人机验证", rule["pending_keywords"])
             self.assertTrue(rule.get("strict_status_keywords"))
-            submit_js = core._submit_script(
-                rule["submit_selector"], "dom_click", submit_text=rule["submit_text"],
-                require_text=True)
-            self.assertIn("if (true) return null;", submit_js)
+            self.assertNotIn("verify_success_path", rule)
             query = core.build_query(rule)
             self.assertLess(query.index("waitBefore:waitForTimeout"),
                             query.index("before:html"))
@@ -198,6 +195,30 @@ class QuizSignTests(unittest.TestCase):
                             query.index("preAction:evaluate"))
             self.assertLess(query.index("preAction:evaluate"),
                             query.index("solve:solve"))
+            self.assertIn("token", query)
+            inject = core.build_inject_query(rule)
+            self.assertLess(inject.index("preAction:evaluate"),
+                            inject.index("waitForPreAction:waitForTimeout"))
+            self.assertLess(inject.index("waitForPreAction:waitForTimeout"),
+                            inject.index("submit:evaluate"))
+            self.assertIn("onTurnstileSuccess",
+                          core._turnstile_inject_script(rule, "turnstile-token"))
+
+    def test_52pt_link_change_and_success_page(self):
+        unsigned = (
+            '<html><body><a id="game" href="bakatestfinal.php">'
+            '<b>做种会员签到处</b></a></body></html>'
+        )
+        signed = (
+            '<html><body><span id="gamelist"><a href="nebuirobot.php">'
+            '<b><b>做种会员签到处</b></b></a></span></body></html>'
+        )
+        success = '<html><body>连续签到 5 天，获得 19 魔力值</body></html>'
+        for core in self.each_core():
+            rule = core.resolve_rule({"url": "https://52pt.site/", "cookie": "c=1"}, {})
+            self.assertEqual(core.classify(unsigned, rule).status, "failed")
+            self.assertEqual(core.classify(signed, rule).status, "already")
+            self.assertEqual(core.classify(success, rule).status, "success")
 
 
 class SiteSelectionTests(unittest.TestCase):

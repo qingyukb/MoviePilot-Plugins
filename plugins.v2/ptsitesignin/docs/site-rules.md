@@ -30,6 +30,7 @@
 | `json` | JSON 请求体 |
 | `success` | 判断签到成功的正则 |
 | `already` | 判断今日已签到的正则 |
+| `already_html` | 按原始 HTML 判断今日已签到（用于链接地址变化等页面文字看不出的状态） |
 | `absent_keywords` | 页面中消失时代表成功的文字 |
 | `success_on_click` | 点击后直接判定成功 |
 | `bonus` | 从页面提取奖励文案的正则 |
@@ -99,6 +100,7 @@
 - `hdsky.py`：OCR 验证码
 - `tjupt.py`：豆瓣海报比对
 - `htpt.py`：海棠PT 表单签到
+- `hdchina.py`：瓷器 CSRF 签到（保留站点刷新后的 Cookie）
 - `u2.py`：U2 showup 四选一签到（提交后回读确认）
 - `farm.py`：自由农场滑块处理
 

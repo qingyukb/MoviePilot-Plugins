@@ -587,6 +587,32 @@ class LoginCoreTests(unittest.TestCase):
                 self.assertEqual(merged["activity_path"], "/a")
                 self.assertEqual(core.merge_accounts(None, {}), {})
 
+    def test_read_activity_uses_rule_activity_path(self):
+        # 52PT 的最近动向在 userdetails.php；规则里的 activity_path 必须参与候选页。
+        detail = (
+            '<html><body><table>'
+            '<tr><td>加入日期</td><td>2025-05-13 17:46:54 (1年6月前)</td></tr>'
+            '<tr><td>最近动向</td><td>2026-11-07 02:09:10 '
+            '(<span title="2026-11-07 02:09:10">&lt; 1分前</span>)</td></tr>'
+            '</table></body></html>'
+        )
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                session = FakeSession({
+                    "index.php": lambda s, u: FakeResponse(u, INDEX_HTML),
+                    "userdetails.php": lambda s, u: FakeResponse(u, detail),
+                })
+                with mock.patch.dict(sys.modules, {"requests": fake_requests(session)}):
+                    result = core.read_activity(
+                        {"url": "https://52pt.site/"},
+                        "c_secure_uid=MjY3MTg%3D; c_secure_pass=x",
+                        timeout=5,
+                        rule={"activity_path": "/userdetails.php"},
+                    )
+                self.assertEqual(result.status, "success")
+                self.assertEqual(result.last_seen, "2026-11-07 02:09:10 ( < 1分前 )")
+                self.assertTrue(session.calls[1][1].endswith("/userdetails.php"))
+
     def test_read_activity_uses_extra_paths(self):
         for core in CORES:
             with self.subTest(core=core.__name__):

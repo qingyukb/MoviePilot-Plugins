@@ -250,38 +250,46 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "method": "GET",
         "path": "/index.php",
         "already": "<a[^>]*class=\"label label-default\"[^>]*>已签到</a>",
+        "already_html": (
+            r'<a\b(?=[^>]*\bclass=["\'][^"\']*\blabel\b[^"\']*\blabel-default[^"\']*["\'])'
+            r'[^>]*>\s*(?:已签到|已簽到)\s*</a>'
+        ),
         "signin_path": "/plugin_sign-in.php?cmd=signin",
         "signin_method": "POST",
         "signin_token_patterns": {"csrf": "<meta name=\"x-csrf\" content=\"([^\"]+)\""},
         "success_keywords": ["\"state\":\"success\"", "\"state\": \"success\""],
     },
     # ---- 52PT（52pt.site）：首页点击「做种会员签到处」，完成 Turnstile 后提交 ----
-    # 视频实测入口已从独立答题页变为首页签到处弹窗：先点入口，再等待 Turnstile，
-    # 验证成功后页面出现「验证已通过，点击提交」按钮，最后回首页确认签到状态。
+    # 2026-11-07 实测：未签到首页链接为 /bakatestfinal.php；签到页按钮文案是
+    # 「验证已通过，点此提交」；提交成功后仍停留在该页并显示「连续签到 N 天，获得 X 魔力值」。
+    # 签到后首页链接改为 /nebuirobot.php（该地址 404），因此用这个链接差异判断今日已签到，
+    # 不能再次点击已签到入口，也不能直接打开 /bakatestfinal.php（站点会判定为绕过入口）。
     "52pt.site": {
         "engine": "browserless",
         "mode": "cloudflare",
         "path": "/index.php",
         "preflight_path": "/index.php",
-        "preflight_wait": 3000,
-        "pre_click_selector": "#gamelist a[href*='nebuirobot']",
-        "pre_click_text": "做种会员签到处",
-        "pre_click_wait": 800,
-        "submit_method": "dom_click",
-        "submit_selector": "button, [role='button'], input[type='submit']",
-        "submit_text": "验证已通过，点击提交",
-        # 按钮必须按文字匹配；页面没有该按钮时绝不回退点第一个提交控件
-        "require_submit_text": True,
-        "cloudflare_wait": 12,
-        "solve_timeout": 40000,
-        "wait": 5000,
+        "preflight_wait": 4000,
+        "activity_path": "/userdetails.php",
+        "pre_click_selector": "a#game[href*='bakatestfinal']",
+        "pre_click_wait": 4000,
+        # solve 只生成 token，不会触发站点回调；auto 会在第二段重新点入口、回填 token，
+        # 调用 onTurnstileSuccess，并按表单实际 action 提交。
+        "submit_method": "auto",
+        "auto_wait": 30000,
+        "cloudflare_wait": 15,
+        "solve_timeout": 45000,
+        "wait": 8000,
         "pending_keywords": ["请先完成人机验证", "等待上方验证通过"],
         "already_keywords": ["今天已经签过到了", "今日已签到", "今天已经签到", "今天已签到"],
-        "success_keywords": ["签到成功", "簽到成功", "签到完成", "领取成功"],
-        # 首页正文里可能夹杂英文 announcement 的 already；只认本规则明确的状态文案
+        "already_html": (
+            r'<a\b(?=[^>]*\bhref=["\'](?:https?://52pt\.site)?/?nebuirobot\.php)'
+            r'[^>]*>.*?做种会员签到处.*?</a>'
+        ),
+        "success": r"连续签到\s*\d+\s*天，获得\s*[\d,]+\s*魔力值",
+        "success_keywords": ["已自动加入本期"],
+        # 首页正文里可能夹杂英文 announcement 的 already；只认本规则明确的状态文案。
         "strict_status_keywords": True,
-        "verify_success_path": "/index.php",
-        "verify_wait": 5000,
     },
     # ---- 彩虹岛（CHDBits）：bakatest 选择题签到 ----
     # 未配置答案时沿用官方 autosignin 的随机策略；固定题可用 quiz_answer 指定

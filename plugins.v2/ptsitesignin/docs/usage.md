@@ -47,6 +47,7 @@ https://github.com/qingyukb/MoviePilot-Plugins
 - 观众：Turnstile
 - 52PT：首页「做种会员签到处」Turnstile 签到（需站点入口可用）
 - U2：showup 四选一签到（提交后回读确认）
+- 瓷器：首页获取 CSRF，调用 `plugin_sign-in.php` 并刷新 Cookie
 - 彩虹岛：答题签到
 - AGSVPT：表单签到
 - 学校：首页签到入口

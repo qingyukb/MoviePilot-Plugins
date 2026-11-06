@@ -2474,6 +2474,9 @@ def judge_http(content: str, rule: Mapping[str, Any]) -> SignResult:
     if any(str(word).lower() in lower_visible for word in (rule.get("already_keywords") or [])):
         bonus = extract_bonus(text, rule)
         return SignResult("already", f"今日已签到（{bonus}）" if bonus else "今日已签到")
+    already_html = str(rule.get("already_html") or "")
+    if already_html and re.search(already_html, text, re.IGNORECASE | re.DOTALL):
+        return SignResult("already", "今日已签到")
     # 页面内嵌 Cloudflare Turnstile 人机验证（观众 Audiences 这类 Vue 签到页）：签到的判定
     # 文案由 JS 在验证回调里生成，HTTP 直连拿不到，只能交给浏览器引擎。放在成功 / 已签到
     # 之后判断，避免「已签到」页仍带 Turnstile 组件时被判成还需要验证。
@@ -3080,6 +3083,9 @@ def read_activity(site: Mapping[str, Any], cookie: str, timeout: int = 30,
     candidates: List[str] = []
     if path:
         candidates.append(str(path))
+    rule_activity_path = str(api_rule.get("activity_path") or "").strip()
+    if rule_activity_path:
+        candidates.append(rule_activity_path)
     for extra in paths or ():
         value = str(extra or "").strip()
         if value:
@@ -3767,16 +3773,24 @@ def build_inject_query(rule: Mapping[str, Any], user_agent: Optional[str] = None
     """
     set_user_agent = "userAgent(userAgent:$userAgent){time}" if user_agent else ""
     user_agent_variable = " $userAgent:String!" if user_agent else ""
+    pre_action = pre_click_script(str(rule.get("pre_click_selector") or ""),
+                                  str(rule.get("pre_click_text") or ""),
+                                  int(rule.get("pre_click_wait") or 800))
     # 只声明真正用到的变量：BQL 是 GraphQL，多声明一个就会整段查询报错
     variables = ("$cookies:[CookieInput!]! $url:String! $beforeWait:Float! $wait:Float!"
                  " $autoSubmit:String! $autoTimeout:Float!")
+    if pre_action:
+        variables += " $preAction:String! $preActionWait:Float!"
     steps: List[str] = [
         "cookies(cookies:$cookies){cookies{name}}",
         "goto(url:$url,waitUntil:domContentLoaded){status}",
         "waitBefore:waitForTimeout(time:$beforeWait){time}",
         "before:html{html}",
-        "submit:evaluate(content:$autoSubmit,timeout:$autoTimeout){value}",
     ]
+    if pre_action:
+        steps.append("preAction:evaluate(content:$preAction){value}")
+        steps.append("waitForPreAction:waitForTimeout(time:$preActionWait){time}")
+    steps.append("submit:evaluate(content:$autoSubmit,timeout:$autoTimeout){value}")
     steps.append("waitAfter:waitForTimeout(time:$wait){time}")
     steps.append("autoDiag:evaluate(content:\"JSON.stringify(window.__ptsignin_auto "
                  "|| (function(){try{return JSON.parse(sessionStorage.getItem('__ptsignin_auto')"
@@ -3998,6 +4012,11 @@ def bql_wait_budget_ms(rule: Mapping[str, Any]) -> int:
         total += 3500
     if str(rule.get("submit_method") or "").lower() in AUTO_SUBMIT_METHODS:
         # 第二段：导航等待 + 注入脚本预算（含 evaluate 余量）+ 提交后的等待
+        if rule.get("pre_click_selector") or rule.get("pre_click_text"):
+            try:
+                total += max(0, min(int(rule.get("pre_click_wait") or 800), 15000))
+            except (TypeError, ValueError):
+                total += 800
         total += navigation_wait_ms(rule)
         total += submit_timeout_ms(rule)
         try:
@@ -4221,9 +4240,15 @@ def classify(html: str, rule: Mapping[str, Any]) -> SignResult:
                           "或换一份完整的 Cookie（含 cf_clearance / 会话）再试")
     if any(word.lower() in lower for word in LOGIN_WORDS) and "logout" not in lower:
         return SignResult("failed", "Cookie 无效或已过期")
+    success_pattern = str(rule.get("success") or "")
+    if success_pattern and re.search(success_pattern, full_text, re.IGNORECASE):
+        return SignResult("success", _bonus_message("签到成功", full_text, rule))
     if any(word.lower() in lower for word in rule.get("success_keywords", [])):
         return SignResult("success", _bonus_message("签到成功", full_text, rule))
     if any(word.lower() in lower for word in rule.get("already_keywords", [])):
+        return SignResult("already", _bonus_message("今日已经签到", full_text, rule))
+    already_html = str(rule.get("already_html") or "")
+    if already_html and re.search(already_html, html, re.IGNORECASE | re.DOTALL):
         return SignResult("already", _bonus_message("今日已经签到", full_text, rule))
     # 静默成功的站点（学校这种）：入口消失即视为完成，浏览器引擎也要认
     absent = [str(item).strip() for item in (rule.get("absent_keywords") or [])
@@ -4457,6 +4482,13 @@ class BrowserlessSigner:
             "autoSubmit": _turnstile_inject_script(rule, token),
             "autoTimeout": submit_timeout_ms(rule),
         }
+        pre_action = pre_click_script(str(rule.get("pre_click_selector") or ""),
+                                      str(rule.get("pre_click_text") or ""),
+                                      int(rule.get("pre_click_wait") or 800))
+        if pre_action:
+            variables["preAction"] = pre_action
+            variables["preActionWait"] = max(
+                0, min(int(rule.get("pre_click_wait") or 800), 15000))
         if rule.get("verify_success_path"):
             variables["verifyUrl"] = target_url(base_url, str(rule["verify_success_path"]))
             if rule.get("verify_wait") is not None:
