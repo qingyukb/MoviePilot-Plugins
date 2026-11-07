@@ -1334,21 +1334,23 @@ class BrowserlessRequestTests(unittest.TestCase):
         self.signer = self.core.BrowserlessSigner("https://example.test/bql", "token", 100)
 
     @staticmethod
-    def _response(payload):
+    def _response(payload, status_code=200):
         class _FakeResponse:
-            def __init__(self, body):
-                self._body = body
+            def __init__(self, body, status):
+                self.text = json.dumps(body)
+                self.status_code = status
+                self.cookies = {}
 
-            def read(self):
-                return json.dumps(self._body).encode("utf-8")
+        return _FakeResponse(payload, status_code)
 
-            def __enter__(self):
-                return self
+    @staticmethod
+    def _session(response):
+        from unittest import mock
 
-            def __exit__(self, *args):
-                return False
-
-        return _FakeResponse(payload)
+        session = mock.Mock()
+        session.headers = {}
+        session.post.return_value = response
+        return session
 
     def test_step_errors_do_not_discard_data(self):
         from unittest import mock
@@ -1357,45 +1359,39 @@ class BrowserlessRequestTests(unittest.TestCase):
                             "after": {"html": AUDIENCES_SIGNED_HTML}},
                    "errors": [{"message": "Captcha solving timed out after 40000 ms",
                                "path": ["solve"]}]}
-        with mock.patch.object(self.core.urllib.request, "urlopen",
-                               return_value=self._response(payload)):
+        session = self._session(self._response(payload))
+        with mock.patch.object(self.core, "new_http_session", return_value=session):
             data = self.signer._request({}, "CheckIn", "query")
         self.assertIsInstance(data, dict)
         self.assertEqual(data["_errors"],
                          [{"path": "solve",
                            "message": "Captcha solving timed out after 40000 ms"}])
         self.assertIn("html", data["after"])
+        self.assertTrue(session.post.call_args.kwargs["raise_exception"] is False)
 
     def test_request_honours_session_endpoint(self):
         # 会话复用：第二段请求必须真的打到 reconnect 返回的 browserQLEndpoint。
         # 桩 signer 用 **kwargs 吞参数，抓不到这个漏改，所以这里直接打真实的 _request。
         from unittest import mock
 
-        seen = {}
-
-        def fake_urlopen(request, timeout=None):
-            seen["url"] = request.full_url
-            return self._response({"data": {"after": {"html": AUDIENCES_SIGNED_HTML}}})
-
-        with mock.patch.object(self.core.urllib.request, "urlopen", side_effect=fake_urlopen):
+        session = self._session(self._response(
+            {"data": {"after": {"html": AUDIENCES_SIGNED_HTML}}}))
+        with mock.patch.object(self.core, "new_http_session", return_value=session):
             data = self.signer._request(
                 {}, "CheckInSubmit", "query",
                 endpoint="https://session.example/e/1/chromium/bql/2?token=t")
-        self.assertEqual(seen["url"], "https://session.example/e/1/chromium/bql/2?token=t")
+        self.assertEqual(session.post.call_args.args[0],
+                         "https://session.example/e/1/chromium/bql/2?token=t")
         self.assertIsInstance(data, dict)
 
     def test_request_defaults_to_configured_endpoint(self):
         from unittest import mock
 
-        seen = {}
-
-        def fake_urlopen(request, timeout=None):
-            seen["url"] = request.full_url
-            return self._response({"data": {"before": {"html": AUDIENCES_PENDING_HTML}}})
-
-        with mock.patch.object(self.core.urllib.request, "urlopen", side_effect=fake_urlopen):
+        session = self._session(self._response(
+            {"data": {"before": {"html": AUDIENCES_PENDING_HTML}}}))
+        with mock.patch.object(self.core, "new_http_session", return_value=session):
             self.signer._request({}, "CheckIn", "query")
-        self.assertEqual(seen["url"], self.signer.endpoint)
+        self.assertEqual(session.post.call_args.args[0], self.signer.endpoint)
 
     def test_errors_without_any_data_still_fail(self):
         from unittest import mock
@@ -1403,8 +1399,8 @@ class BrowserlessRequestTests(unittest.TestCase):
         payload = {"data": None,
                    "errors": [{"message": "Field 'solve' is not defined",
                                "path": ["solve"]}]}
-        with mock.patch.object(self.core.urllib.request, "urlopen",
-                               return_value=self._response(payload)):
+        session = self._session(self._response(payload))
+        with mock.patch.object(self.core, "new_http_session", return_value=session):
             result = self.signer._request({}, "CheckIn", "query")
         self.assertIsInstance(result, self.core.SignResult)
         self.assertEqual(result.status, "failed")

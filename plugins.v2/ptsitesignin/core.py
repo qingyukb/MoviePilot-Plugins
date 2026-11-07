@@ -14,9 +14,7 @@ import random
 import re
 from pathlib import Path
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 from dataclasses import dataclass
 from html import unescape as _html_unescape
 from threading import BoundedSemaphore, Lock
@@ -4405,7 +4403,8 @@ class BrowserlessPool:
 def _browserless_error_message(operation: str, exc: BaseException, elapsed: float,
                                timeout: int) -> str:
     """把 Browserless 的网络层异常翻译成可执行的排查建议。"""
-    step = "签到主流程" if operation == "CheckIn" else "签到页预检"
+    step = {"CheckIn": "签到主流程", "CheckInSubmit": "token 注入提交"}.get(
+        operation, "签到页预检")
     if isinstance(exc, TimeoutError) or "timed out" in str(exc).lower():
         return (f"Browserless 请求超时（{step} {timeout} 秒内未收到响应，已等待 {elapsed:.0f} 秒）："
                 "常见原因是本机 / 服务器到 Browserless 的链路不稳定，或该节点执行时间过长；"
@@ -5006,24 +5005,31 @@ class BrowserlessSigner:
         attempts = 2 if retry_transient else 1
         value: Any = None
         for attempt in range(1, attempts + 1):
-            request = urllib.request.Request(url, data=payload,
-                                             headers={"Content-Type": "application/json"},
-                                             method="POST")
             started = time.monotonic()
+            session: Any = None
             try:
-                with urllib.request.urlopen(request, timeout=read_timeout) as response:
-                    value = json.loads(response.read().decode("utf-8"))
-                break
-            except urllib.error.HTTPError as exc:
-                if exc.code in {401, 403}:
-                    return SignResult("failed", f"Browserless 鉴权失败（HTTP {exc.code}），请检查 Token")
-                if exc.code == 429:
+                # V2 / V3 都走宿主提供的 HTTP 层，复用其代理、证书和 TLS 兼容处理。
+                # 直接 urllib 会绕过 MoviePilot 的请求实现，V2 上容易出现 SSL EOF。
+                session = new_http_session()
+                session.headers.update({"Content-Type": "application/json",
+                                        "Accept": "application/json"})
+                response = session.post(url, data=payload, timeout=read_timeout,
+                                        allow_redirects=True, raise_exception=False)
+                if response is None:
+                    raise ConnectionError("Browserless 请求未返回响应")
+                status = int(getattr(response, "status_code", 0) or 0)
+                if status in {401, 403}:
+                    return SignResult("failed", f"Browserless 鉴权失败（HTTP {status}），请检查 Token")
+                if status == 429:
                     return SignResult("failed", "Browserless 额度不足或请求过于频繁（HTTP 429）")
-                if exc.code >= 500 and attempt < attempts:
+                if status >= 500 and attempt < attempts:
                     time.sleep(RETRY_DELAY_SECONDS)
                     continue
-                return SignResult("failed", f"Browserless HTTP {exc.code}（步骤 {operation}）")
-            except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+                if status >= 400:
+                    return SignResult("failed", f"Browserless HTTP {status}（步骤 {operation}）")
+                value = json.loads(str(getattr(response, "text", "") or ""))
+                break
+            except (TimeoutError, OSError, ValueError, RuntimeError) as exc:
                 elapsed = time.monotonic() - started
                 if attempt < attempts:
                     time.sleep(RETRY_DELAY_SECONDS)
@@ -5033,6 +5039,13 @@ class BrowserlessSigner:
                     _browserless_error_message(operation, exc, elapsed, read_timeout),
                     # JSON 解析失败不是网络问题，其余（超时 / 连接中断）结果未知
                     transient=not isinstance(exc, ValueError))
+            finally:
+                closer = getattr(session, "close", None)
+                if callable(closer):
+                    try:
+                        closer()
+                    except Exception:
+                        pass
         errors = value.get("errors") or []
         data = value.get("data")
         if not isinstance(data, Mapping):
