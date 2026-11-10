@@ -48,6 +48,7 @@ https://github.com/qingyukb/MoviePilot-Plugins
 - 52PT：首页「做种会员签到处」Turnstile 签到（需站点入口可用）
 - U2：showup 四选一签到（提交后回读确认）
 - 瓷器：首页获取 CSRF，调用 `plugin_sign-in.php` 并刷新 Cookie
+- 好学：读取 `/api/v1/home` 状态，使用 `flux_csrf` 调用签到 API
 - 彩虹岛：答题签到
 - AGSVPT：表单签到
 - 学校：首页签到入口

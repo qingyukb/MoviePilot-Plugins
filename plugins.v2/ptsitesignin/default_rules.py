@@ -259,6 +259,15 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "signin_token_patterns": {"csrf": "<meta name=\"x-csrf\" content=\"([^\"]+)\""},
         "success_keywords": ["\"state\":\"success\"", "\"state\": \"success\""],
     },
+    # ---- 好学（hxpt.org）：Next.js API 签到；具体 CSRF 流程见 sites/hxpt.py ----
+    "hxpt.org": {
+        "engine": "http",
+        "method": "GET",
+        "path": "/api/v1/home",
+        "already_keywords": ["\"checked_today\":true", "\"checked_today\": true",
+                             "今日已签到"],
+        "strict_status_keywords": True,
+    },
     # ---- 52PT（52pt.site）：首页点击「做种会员签到处」，完成 Turnstile 后提交 ----
     # 2026-11-07 实测：未签到首页链接为 /bakatestfinal.php；签到页按钮文案是
     # 「验证已通过，点此提交」；提交成功后仍停留在该页并显示「连续签到 N 天，获得 X 魔力值」。
