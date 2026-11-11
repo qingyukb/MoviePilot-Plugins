@@ -200,7 +200,7 @@ class PTSiteSignIn(_PluginBase):
     plugin_name = "PT站点签到"
     plugin_desc = ("PT 站点自动签到，支持 Cookie 登录并读取最近动向；验证码或 Cloudflare 可按规则改用浏览器。")
     plugin_icon = "signin.png"
-    plugin_version = "3.0.6"
+    plugin_version = "3.0.7"
     plugin_author = "qingyukb"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "ptsignin_"
@@ -487,9 +487,9 @@ class PTSiteSignIn(_PluginBase):
             ]}
 
         rules_hint = ('键为域名或站点 ID。HTTP：{"path":"/attendance.php","success":"正则","already":"正则"}；'
-                      'API Key：{"api_key_source":"auto","path":"/api/checkin",'
+                      'API Key：{"api_key_source":"auto","engine":"http|playwright","path":"/api/checkin",'
                       '"credential_check_path":"/api/profile"}（纯 Key 站点会自动识别，不再要求填写 auth；'
-                      '固定端点，不探测、不回退浏览器）；'
+                      '固定端点，不探测、不回退云端 Browserless）；'
                       'Browserless：{"engine":"browserless","mode":"cloudflare|image|trigger_image|altcha|open_page", ...}；'
                       '页面内嵌 Turnstile、验证通过后由站点自己提交（如观众）用 {"submit_method":"auto"}；'
                       '点签到后跳 WAF / Cloudflare 检测页时用 {"wait": 12000} 等它放行；'
@@ -923,8 +923,8 @@ class PTSiteSignIn(_PluginBase):
         """按最终生效的站点规则判断是否需要初始化 Browserless 引擎。
 
         彩虹岛等 quiz 规则只走一次 HTTP 提交与回读确认，失败后禁止改用
-        Browserless 或通用表单，避免重复答题。显式 API Key 规则只发固定 HTTP
-        请求，无论站点是否另有 Cookie 都不初始化浏览器。
+        Browserless 或通用表单，避免重复答题。显式 API Key 规则只访问固定
+        端点，不初始化云端 Browserless；Playwright 由 core 在本机执行。
         """
         for info in infos:
             if self._key_only_site(info):
@@ -948,7 +948,9 @@ class PTSiteSignIn(_PluginBase):
         """
         执行显式 API Key 签到。
 
-        仅访问规则声明的端点，不触发站点登录、站点模块或浏览器回退。
+        仅访问规则声明的端点，不触发站点登录、站点模块或云端 Browserless 回退。
+        API Key 规则可选 HTTP 或本机 Playwright；Playwright 会先在同一出口 IP
+        的浏览器里通过 Cloudflare，再调用固定 API 端点。
 
         :param info: MoviePilot 站点信息
         :param rule: 已解析的 API Key 规则
@@ -962,9 +964,21 @@ class PTSiteSignIn(_PluginBase):
             logger.debug(f"PT站点签到：{site_name} 跳过（{guard}）")
             return self._skip_result(info, guard)
         dual = bool(info.get("dual"))
+        engine = str(rule.get("engine") or "http").strip().lower()
         try:
-            outcome = http_sign_auto(info, rule, timeout=self._timeout,
-                                     proxies=self._proxies_for(info))
+            if engine == "playwright":
+                outcome = playwright_sign(info, rule, timeout=max(90, self._timeout * 2),
+                                          proxies=self._proxies_for(info))
+                if outcome is None:
+                    outcome = SignResult(
+                        "failed",
+                        "当前 MoviePilot 环境没有可用的本机 Playwright，"
+                        "无法先通过 Cloudflare 再调用 API Key 接口")
+            elif engine == "http":
+                outcome = http_sign_auto(info, rule, timeout=self._timeout,
+                                         proxies=self._proxies_for(info))
+            else:
+                outcome = SignResult("failed", "API Key 规则引擎只能是 http 或 playwright")
         except Exception:
             # 异常文本可能带站点回显，不把异常内容写进日志或结果。
             logger.error(f"PT站点签到：{site_name} API Key 签到异常")
@@ -975,7 +989,7 @@ class PTSiteSignIn(_PluginBase):
             self._read_site_activity(info, rule, run_id, allowed_site_ids)
             if (outcome.status in {"success", "already"} and self._read_activity) else ("", ""))
         return self._site_result(
-            info, engine="http", status=outcome.status, message=outcome.message,
+            info, engine=engine, status=outcome.status, message=outcome.message,
             login="API Key 已用于签到" if outcome.status in {"success", "already"}
             else "API Key 签到失败",
             activity=activity_text, activity_source=activity_source,

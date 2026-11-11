@@ -12,6 +12,7 @@ MoviePilot 的 PT 站点自动签到插件，支持 V2 / V3。
 - 当天已签到成功的站点自动跳过
 - 详情页分别展示签到状态和登录状态
 - 通知仅统计成功与失败，失败时附带简要原因
+- Piggo 使用 MoviePilot 本机 Playwright 打开 `/calendar`，点击签到并处理 Cloudflare 人机验证，不回退云端 Browserless
 - 支持自定义站点规则和站点专用模块
 
 ## 快速开始

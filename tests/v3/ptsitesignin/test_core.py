@@ -622,11 +622,19 @@ class CoreRegressionTests(unittest.TestCase):
             {"url": "https://signin.example.test/", "cookie": "c=1"},
             {"engine": "playwright", "path": "/index.php"}))
 
-    def test_piggo_preset_removed(self):
+    def test_piggo_calendar_playwright_preset(self):
         for core in CORES:
             with self.subTest(core=core.__name__):
-                self.assertNotIn("piggo.me", core.DEFAULT_RULES)
-                self.assertIsNone(core.preset_for_host("piggo.me"))
+                rule = core.resolve_rule(
+                    {"url": "https://piggo.me/", "cookie": "c=1"}, {})
+                self.assertNotEqual(rule.get("auth"), "api_key")
+                self.assertEqual(rule["engine"], "playwright")
+                self.assertEqual(rule["path"], "/calendar")
+                self.assertEqual(rule["submit_selector"], ".cal-att-pill.act")
+                self.assertEqual(rule["playwright_state_selector"], ".cal-att-pill")
+                self.assertEqual(rule["captcha_response_path"],
+                                 "/v1/web/calendar/attendance")
+                self.assertFalse(rule.get("browserless_fallback", False))
 
     def test_waf_page_is_treated_as_challenge(self):
         # 雷池（SafeLine）WAF 安全检测页：按挑战处理，交给浏览器重试

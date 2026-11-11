@@ -43,6 +43,23 @@
 | `wait` | 操作后等待时间，单位毫秒 |
 | `cloudflare_wait` | 等待人机验证放行的时间，单位秒 |
 
+## API Key 站点
+
+RousiPro（`rousi.pro`）已内置 API Key 规则，使用 `api-token` 请求头调用 `POST /api/points/attendance`，请求体固定为：
+
+```json
+{"mode": "fixed"}
+```
+
+Piggo（`piggo.me`）新版 SPA 已不再支持旧 API Key。其签到入口固定为 `/calendar`，点击签到后会进入 Cloudflare 人机验证，验证通过后由页面自行提交。插件使用 MoviePilot 本机 Playwright：
+
+- 在站点管理配置 Piggo Cookie，或在账号信息中配置用户名和当前密码；
+- 本机浏览器打开 `/calendar` 并等待日历加载；
+- 点击 `.cal-att-pill.act`；
+- 等待 Cloudflare / Turnstile 验证后读取签到结果；
+- 已显示“今日已签到”时直接判定为已签到；
+- 不使用云端 Browserless，避免机房 IP 触发异地登录。
+
 ## 第二段签到
 
 部分站点需要先读取首页令牌，再提交第二段签到请求：

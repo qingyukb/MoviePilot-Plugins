@@ -230,6 +230,198 @@ class ApiKeyCoreTests(unittest.TestCase):
                 self.assertIn("credential_check_path", checked.message)
                 self.assertEqual(check_session.calls, [])
 
+    def test_rousi_pro_default_rule_and_duplicate_response(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                site = {"id": 9, "name": "RousiPro", "url": "https://rousi.pro/",
+                        "apikey": SECRET, "cookie": "", "ua": ""}
+                rule = core.resolve_rule(site, {})
+                self.assertEqual(rule.get("auth"), "api_key")
+                self.assertEqual(rule["method"], "POST")
+                self.assertEqual(rule["path"], "/api/points/attendance")
+                self.assertEqual(rule["json"], {"mode": "fixed"})
+                self.assertEqual(rule["api_key_header"], "api-token")
+                self.assertEqual(rule["api_key_prefix"], "")
+                session = FakeSession(lambda method, url, kwargs: FakeResponse(
+                    '{"code":1,"message":"今天已经签到过了"}', status_code=400))
+                with mock.patch.dict(sys.modules, {"requests": fake_requests(session)}):
+                    result = core.http_sign(site, rule, timeout=5)
+                self.assertEqual(result.status, "already")
+                self.assertIn("已签到", result.message)
+                self.assertEqual(session.calls[0]["headers"]["api-token"], SECRET)
+                self.assertEqual(session.calls[0]["json"], {"mode": "fixed"})
+
+    def test_piggo_uses_calendar_playwright_preset(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                site = {"id": 10, "name": "Piggo", "url": "https://piggo.me/",
+                        "cookie": "c=1", "ua": ""}
+                rule = core.resolve_rule(site, {})
+                self.assertNotEqual(rule.get("auth"), "api_key")
+                self.assertEqual(rule["engine"], "playwright")
+                self.assertEqual(rule["path"], "/calendar")
+                self.assertEqual(rule["submit_selector"], ".cal-att-pill.act")
+                self.assertEqual(rule["playwright_state_selector"], ".cal-att-pill")
+                self.assertEqual(rule["captcha_response_path"],
+                                 "/v1/web/calendar/attendance")
+                self.assertEqual(rule["cloudflare_wait"], 60)
+                self.assertFalse(rule.get("browserless_fallback", False))
+
+    def test_playwright_api_key_fetches_api_in_same_browser(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                site = make_site()
+                rule = api_rule(
+                    core, site, engine="playwright", path="/api/points/attendance",
+                    method="POST", json={"mode": "fixed"}, api_key_header="api-token",
+                    api_key_prefix="")
+                evaluations = []
+                visited = []
+
+                class Page:
+                    def goto(self, url, **kwargs):
+                        visited.append(url)
+
+                    def wait_for_load_state(self, *args, **kwargs):
+                        return None
+
+                    def content(self):
+                        return "<html><body>API</body></html>"
+
+                    def evaluate(self, script, args=None):
+                        if script == core._PLAYWRIGHT_AUTH_STATE_JS:
+                            return {}
+                        evaluations.append((script, args))
+                        return {"status": 200, "url": args["url"],
+                                "text": '{"code":0,"message":"签到成功"}'}
+
+                class Helper:
+                    def action(self, **kwargs):
+                        return kwargs["callback"](Page())
+
+                with mock.patch.object(core, "_load_playwright_helper", return_value=Helper):
+                    result = core.playwright_sign(site, rule, timeout=1)
+
+                self.assertEqual(result.status, "success")
+                self.assertNotIn(SECRET, result.message)
+                self.assertEqual(visited, [BASE_URL + "/"])
+                payloads = [args for script, args in evaluations
+                            if script == core._PLAYWRIGHT_API_FETCH_JS]
+                self.assertEqual(len(payloads), 1)
+                payload = payloads[0]
+                self.assertEqual(payload["url"], BASE_URL + "/api/points/attendance")
+                self.assertEqual(payload["method"], "POST")
+                self.assertEqual(payload["headers"]["api-token"], SECRET)
+                self.assertNotIn("User-Agent", payload["headers"])
+                self.assertEqual(payload["body"], '{"mode":"fixed"}')
+
+    def test_playwright_api_key_reports_duplicate_and_cloudflare(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__, case="already"):
+                site = make_site()
+                rule = api_rule(
+                    core, site, engine="playwright", path="/api/points/attendance",
+                    method="POST", json={"mode": "fixed"}, api_key_header="api-token",
+                    api_key_prefix="")
+
+                class Page:
+                    def goto(self, url, **kwargs):
+                        return None
+
+                    def wait_for_load_state(self, *args, **kwargs):
+                        return None
+
+                    def content(self):
+                        return "<html><body>API</body></html>"
+
+                    def evaluate(self, script, args=None):
+                        if script == core._PLAYWRIGHT_AUTH_STATE_JS:
+                            return {}
+                        return {"status": 400,
+                                "text": '{"code":1,"message":"今天已经签到过了"}'}
+
+                class Helper:
+                    def action(self, **kwargs):
+                        return kwargs["callback"](Page())
+
+                with mock.patch.object(core, "_load_playwright_helper", return_value=Helper):
+                    result = core.playwright_sign(site, rule, timeout=1)
+                self.assertEqual(result.status, "already")
+
+            with self.subTest(core=core.__name__, case="cloudflare"):
+                site = make_site()
+                rule = api_rule(
+                    core, site, engine="playwright", path="/api/points/attendance",
+                    method="POST", json={"mode": "fixed"}, api_key_header="api-token",
+                    api_key_prefix="")
+                challenge = ("<html><title>Just a moment...</title>"
+                             "<script>window._cf_chl_opt={}</script></html>")
+
+                class Page:
+                    def goto(self, url, **kwargs):
+                        return None
+
+                    def wait_for_load_state(self, *args, **kwargs):
+                        return None
+
+                    def content(self):
+                        return challenge
+
+                class Helper:
+                    def action(self, **kwargs):
+                        return kwargs["callback"](Page())
+
+                with mock.patch.object(core, "_load_playwright_helper", return_value=Helper), \
+                        mock.patch.object(core, "_wait_challenge_clear", return_value=challenge):
+                    result = core.playwright_sign(site, rule, timeout=1)
+                self.assertEqual(result.status, "failed")
+                self.assertEqual(result.challenge, "cloudflare")
+
+    def test_api_key_rule_rejects_cloud_browserless_engine(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                site = make_site()
+                with self.assertRaises(ValueError):
+                    api_rule(core, site, engine="browserless", path="/api/checkin")
+
+    def test_api_cloudflare_is_not_reported_as_invalid_key(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                site = make_site()
+                rule = api_rule(core, site, path="/api/checkin")
+                session = FakeSession(lambda method, url, kwargs: FakeResponse(
+                    "<html><title>Just a moment...</title>"
+                    "<script>window._cf_chl_opt={}</script></html>", status_code=403))
+                with mock.patch.dict(sys.modules, {"requests": fake_requests(session)}):
+                    result = core.http_sign(site, rule, timeout=5)
+                self.assertEqual(result.status, "failed")
+                self.assertEqual(result.challenge, "cloudflare")
+                self.assertIn("Cloudflare", result.message)
+
+    def test_rousi_pro_success_and_invalid_key(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__, case="success"):
+                site = {"id": 9, "name": "RousiPro", "url": "https://rousi.pro/",
+                        "apikey": SECRET, "cookie": "", "ua": ""}
+                rule = core.resolve_rule(site, {})
+                session = FakeSession(lambda method, url, kwargs: FakeResponse(
+                    '{"code":0,"message":"签到成功"}'))
+                with mock.patch.dict(sys.modules, {"requests": fake_requests(session)}):
+                    result = core.http_sign(site, rule, timeout=5)
+                self.assertEqual(result.status, "success")
+
+            with self.subTest(core=core.__name__, case="invalid"):
+                site = {"id": 9, "name": "RousiPro", "url": "https://rousi.pro/",
+                        "apikey": SECRET, "cookie": "", "ua": ""}
+                rule = core.resolve_rule(site, {})
+                session = FakeSession(lambda method, url, kwargs: FakeResponse(
+                    '{"code":401,"message":"API Key 无效或已撤销"}', status_code=401))
+                with mock.patch.dict(sys.modules, {"requests": fake_requests(session)}):
+                    result = core.http_sign(site, rule, timeout=5)
+                self.assertEqual(result.status, "failed")
+                self.assertIn("API Key 无效", result.message)
+                self.assertNotIn(SECRET, result.message)
+
     def test_key_is_redacted_from_response_and_exception(self):
         for core in CORES:
             with self.subTest(core=core.__name__, case="response"):
@@ -378,6 +570,26 @@ class ApiKeyPluginTests(unittest.TestCase):
             with self.subTest(plugin=module.__name__):
                 plugin = self._plugin(module)
                 self.assertFalse(plugin._should_init_signer([info], rules))
+
+    def test_api_key_playwright_rule_uses_local_browser(self):
+        info = make_site(apikey=SECRET, cookie="")
+        rule = {"auth": "api_key", "engine": "playwright", "auto_fallback": False,
+                "path": "/api/points/attendance", "method": "POST",
+                "json": {"mode": "fixed"}, "api_key_header": "api-token",
+                "api_key_prefix": ""}
+        for module in self.page.PLUGINS:
+            with self.subTest(plugin=module.__name__):
+                plugin = self._plugin(module)
+                with mock.patch.object(module, "playwright_sign",
+                                       return_value=module.SignResult("success", "签到成功")) as local, \
+                        mock.patch.object(module, "http_sign_auto",
+                                          side_effect=AssertionError("不应走 HTTP")) as http:
+                    row = plugin._sign_api_key_one(info, rule, run_id=1,
+                                                   allowed_site_ids={1})
+                self.assertEqual(row["status"], "success")
+                self.assertEqual(row["engine"], "playwright")
+                local.assert_called_once()
+                http.assert_not_called()
 
     def test_unselected_site_makes_no_request(self):
         info = make_site(apikey=SECRET, cookie="")

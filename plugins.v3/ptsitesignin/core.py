@@ -440,8 +440,13 @@ def resolve_rule(site: Mapping[str, Any], custom_rules: Mapping[str, Mapping[str
         raise ValueError("签到引擎只能是 http、browserless 或 playwright")
     rule["auto_fallback"] = not user_engine
     if is_api_key_rule(rule):
-        # API Key 模式只能访问显式配置的固定端点，绝不探测路径或回退浏览器。
-        rule["engine"] = "http"
+        # API Key 模式只访问显式配置的固定端点。Cloudflare 面前可以指定本机
+        # Playwright，在同一出口 IP 的浏览器上下文内调用接口；禁止回退到云端
+        # Browserless，避免站点把机房 IP 判成异地登录。
+        api_engine = str(rule.get("engine") or "http").strip().lower()
+        if api_engine not in {"http", "playwright"}:
+            raise ValueError("API Key 规则引擎只能是 http 或 playwright")
+        rule["engine"] = api_engine
         rule["auto_fallback"] = False
         rule.setdefault("success", DEFAULT_SUCCESS_PATTERN)
         rule.setdefault("already", DEFAULT_ALREADY_PATTERN)
@@ -504,8 +509,10 @@ def validate_rule(rule: Mapping[str, Any]) -> Dict[str, Any]:
 
 
 def _validate_api_key_rule(result: Dict[str, Any]) -> None:
-    if str(result.get("engine") or "").strip().lower() != "http":
-        raise ValueError("API Key 规则只能使用 http 引擎")
+    engine = str(result.get("engine") or "http").strip().lower()
+    if engine not in {"http", "playwright"}:
+        raise ValueError("API Key 规则只能使用 http 或 playwright 引擎")
+    result["engine"] = engine
     # 签到与登录可以分开配置：只登录的站点可以仅提供 credential_check_path，
     # 只签到的站点可以仅提供 path。缺少对应端点时由执行函数在联网前明确失败。
     path = str(result.get("path") or "").strip()
@@ -748,6 +755,23 @@ def judge_api_response(content: str, rule: Mapping[str, Any],
                       _redact_api_secret(f"未匹配到 API 签到成功标志；{page_hint(text)}", secret))
 
 
+def judge_api_http_response(content: str, status_code: int, rule: Mapping[str, Any],
+                            secret: str = "") -> SignResult:
+    """统一判定 API 响应，供 HTTP 与 Playwright 两条请求路径共用。"""
+    if cloudflare_pending(content):
+        return SignResult("failed", "站点返回 Cloudflare 验证页", challenge="cloudflare")
+    judged = judge_api_response(content, rule, secret)
+    if status_code < 400:
+        return judged
+    # RousiPro 等 PeerGo 站点用 HTTP 400 + code=1 表示今日已签到。
+    if status_code in {400, 409} and judged.status == "already":
+        return judged
+    if status_code in {401, 403}:
+        return SignResult("failed", f"API Key 无效或权限不足（HTTP {status_code}）")
+    return SignResult("failed", f"请求失败（HTTP {status_code}）",
+                      missing_path=status_code in {404, 405})
+
+
 def http_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: int = 30,
               proxies: Optional[Dict[str, str]] = None) -> SignResult:
     """直接 HTTP 请求签到接口；API Key 规则只访问显式固定端点。"""
@@ -835,11 +859,12 @@ def http_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: int = 3
         else:
             return SignResult("failed", _redact_api_secret(f"请求异常：{error}", secret))
     content = str(getattr(response, "text", "") or "")
-    if int(getattr(response, "status_code", 0) or 0) >= 400:
-        return SignResult("failed", f"请求失败（HTTP {response.status_code}）",
-                          missing_path=response.status_code in {404, 405})
+    status_code = int(getattr(response, "status_code", 0) or 0)
     if api_mode:
-        return judge_api_response(content, rule, secret)
+        return judge_api_http_response(content, status_code, rule, secret)
+    if status_code >= 400:
+        return SignResult("failed", f"请求失败（HTTP {status_code}）",
+                          missing_path=status_code in {404, 405})
     if str(rule.get("form_mode") or "").lower() == "quiz":
         return http_quiz_sign(session, url, content, base_url, rule, timeout, proxies)
     return judge_http(content, rule)
@@ -1615,6 +1640,148 @@ def _wait_playwright_auth_state(page: Any, predicate: Any, timeout_ms: int) -> D
     return state
 
 
+_PLAYWRIGHT_API_FETCH_JS = r"""
+async ({url, method, headers, body}) => {
+  try {
+    const options = {
+      method,
+      headers,
+      credentials: "include",
+      cache: "no-store",
+      redirect: "error",
+    };
+    if (body !== null && body !== undefined) options.body = body;
+    const response = await fetch(url, options);
+    return {
+      status: response.status,
+      url: response.url || url,
+      text: await response.text(),
+    };
+  } catch (error) {
+    return {error: String((error && error.message) || error || "fetch failed")};
+  }
+}
+"""
+
+
+def playwright_api_fetch(site: Mapping[str, Any], rule: Mapping[str, Any],
+                         path: str, method: str = "GET", timeout: int = 90,
+                         proxies: Optional[Dict[str, str]] = None,
+                         include_rule_body: bool = True) -> Optional[Dict[str, Any]]:
+    """在 MoviePilot 本机浏览器里调用同源 API。
+
+    先打开站点并等待 Cloudflare/WAF 放行，再在同一个浏览器上下文内用 fetch
+    请求固定端点。这样 API Key 只在浏览器会话里发送，出口 IP 与 MoviePilot
+    一致，也不会经过云端 Browserless 的机房 IP。
+    """
+    PlaywrightHelper = _load_playwright_helper()
+    if PlaywrightHelper is None or not hasattr(PlaywrightHelper, "action"):
+        return None
+
+    secret = ""
+    try:
+        base_url = str(site.get("url") or "").rstrip("/")
+        if not base_url:
+            return {"error": "站点地址为空"}
+        method = str(method or "GET").upper()
+        if method not in {"GET", "POST"}:
+            return {"error": "API Key 浏览器请求 method 只能是 GET 或 POST"}
+        path = _validate_site_path(path, "API 签到 path")
+        secret = _api_key_value(site, rule)
+        headers = {
+            name: value for name, value in _api_headers(site, rule).items()
+            if name.lower() not in {"user-agent", "cookie", "host", "content-length"}
+        }
+        data = (rule.get("data") if include_rule_body
+                and isinstance(rule.get("data"), Mapping) else None)
+        json_body = (rule.get("json") if include_rule_body
+                     and isinstance(rule.get("json"), Mapping) else None)
+        if data is not None and json_body is not None:
+            return {"error": "API Key 规则的 data 与 json 不能同时配置"}
+        body = None
+        if json_body is not None:
+            body = json.dumps(json_body, ensure_ascii=False, separators=(",", ":"))
+            headers["Content-Type"] = "application/json"
+        elif data is not None:
+            encoded = urllib.parse.urlencode(data, doseq=True)
+            if method == "GET":
+                path += ("&" if "?" in path else "?") + encoded
+            else:
+                body = encoded
+                headers["Content-Type"] = "application/x-www-form-urlencoded"
+        url = target_url(base_url, path)
+    except (TypeError, ValueError) as error:
+        return {"error": _redact_api_secret(error, secret)}
+
+    cookie = str(site.get("cookie") or "").strip()
+    try:
+        challenge_budget = int(float(rule.get("cloudflare_wait") or 20)) * 1000
+    except (TypeError, ValueError):
+        challenge_budget = 20000
+    result: Dict[str, Any] = {}
+
+    def callback(page: Any) -> Dict[str, Any]:
+        nonlocal result
+        if cookie:
+            try:
+                items = cookie_list_for_context(cookie, base_url)
+                if items:
+                    page.context.add_cookies(items)
+            except Exception:
+                pass
+        try:
+            page.goto(base_url + "/", wait_until="domcontentloaded",
+                      timeout=max(15000, int(timeout * 1000)))
+        except Exception:
+            pass
+        try:
+            page.wait_for_load_state("domcontentloaded")
+        except Exception:
+            pass
+        html = _wait_challenge_clear(page, challenge_budget)
+        if _page_has_challenge(html):
+            result = {"status": 403, "text": html, "challenge_page": True}
+            return result
+        auth_state = _playwright_auth_state(page)
+        if auth_state.get("stepUp") or auth_state.get("locked"):
+            try:
+                html = page.content() or html
+            except Exception:
+                pass
+            result = {"status": 403, "text": html, "second_factor": True}
+            return result
+        try:
+            value = page.evaluate(_PLAYWRIGHT_API_FETCH_JS, {
+                "url": url,
+                "method": method,
+                "headers": headers,
+                "body": body,
+            })
+        except Exception as error:
+            result = {"error": _redact_api_secret(error, secret)}
+            return result
+        result = dict(value) if isinstance(value, Mapping) else {
+            "error": "本地浏览器没有返回 API 响应"}
+        return result
+
+    try:
+        outcome = PlaywrightHelper().action(url="about:blank", callback=callback,
+                                            cookies=None,
+                                            ua=str(site.get("ua") or "").strip() or None,
+                                            proxies=dict(proxies) if proxies else None,
+                                            headless=True,
+                                            timeout=max(60, int(timeout)))
+    except Exception as error:
+        return {"error": _redact_api_secret(f"本地浏览器 API 请求异常：{error}", secret)}
+    if not result and isinstance(outcome, Mapping):
+        result = dict(outcome)
+    if not result:
+        return {"error": "本地浏览器没有返回 API 响应"}
+    if result.get("error"):
+        result["error"] = _redact_api_secret(result["error"], secret)
+    return result
+
+
 def _playwright_page_ready_state(page: Any, rule: Mapping[str, Any]) -> Dict[str, Any]:
     """读取单页应用是否已渲染出日历、登录页或空闲锁定页。"""
     try:
@@ -1776,9 +1943,11 @@ def playwright_paths(rule: Mapping[str, Any]) -> List[str]:
 
 def playwright_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: int = 90,
                     proxies: Optional[Dict[str, str]] = None) -> Optional[SignResult]:
-    """用本机浏览器签到：打开页面 → 预检已签到 → 按文字点按钮 → 读结果判定。
+    """用本机浏览器完成签到。
 
-    返回 None 表示这台机器没有 PlaywrightHelper（交回上层用其它引擎）。
+    普通规则走页面按钮流程；API Key 规则先在浏览器里通过 Cloudflare/WAF，
+    再在同一个页面上下文内调用固定 API 端点。返回 None 表示这台机器没有
+    PlaywrightHelper（交回上层处理）。
     """
     PlaywrightHelper = _load_playwright_helper()
     if PlaywrightHelper is None:
@@ -1792,6 +1961,36 @@ def playwright_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: i
     cookie = str(site.get("cookie") or "").strip()
     if not base_url:
         return None
+    if is_api_key_rule(rule):
+        path = str(rule.get("path") or "").strip()
+        if not path:
+            return SignResult("failed", "API Key 规则未配置 path，无法签到")
+        method = str(rule.get("method") or "GET").upper()
+        secret = ""
+        try:
+            secret = _api_key_value(site, rule)
+            response = playwright_api_fetch(
+                site, rule, path, method=method, timeout=timeout, proxies=proxies)
+        except (TypeError, ValueError) as error:
+            return SignResult("failed", _redact_api_secret(error, secret))
+        if response is None:
+            return None
+        if response.get("second_factor"):
+            return SignResult(
+                "failed",
+                "本地浏览器仍要求异地登录 / 二级验证；请先在 MoviePilot 所在网络完成一次验证",
+                challenge="captcha")
+        if response.get("challenge_page"):
+            return SignResult("failed", "本地浏览器仍卡在 Cloudflare / WAF 验证页",
+                              challenge="cloudflare")
+        if response.get("error"):
+            return SignResult("failed", _redact_api_secret(response["error"], secret))
+        content = str(response.get("text") or "")
+        try:
+            status_code = int(response.get("status") or 0)
+        except (TypeError, ValueError):
+            status_code = 0
+        return judge_api_http_response(content, status_code, rule, secret)
     paths = playwright_paths(rule)
     selector = str(rule.get("submit_selector") or "")
     submit_text = str(rule.get("submit_text") or "")
@@ -2621,28 +2820,47 @@ def http_check_api_key(site: Mapping[str, Any], rule: Mapping[str, Any],
     if not base_url:
         return LoginResult("failed", "站点地址为空")
     secret = ""
+    content = ""
+    status_code = 0
     try:
         secret = _api_key_value(site, rule)
         path = _validate_site_path(path, "credential_check_path ")
-        url = target_url(base_url, path)
-        headers = _api_headers(site, rule)
         method = str(rule.get("credential_check_method") or "GET").upper()
         if method not in {"GET", "POST"}:
             return LoginResult("failed", "API Key 验证 method 只能是 GET 或 POST")
-        session = new_http_session()
-        session.headers.update(headers)
-        response = _api_request(session, method, url, headers, timeout, proxies)
+        if str(rule.get("engine") or "http").strip().lower() == "playwright":
+            response = playwright_api_fetch(
+                site, rule, path, method=method, timeout=timeout, proxies=proxies,
+                include_rule_body=False)
+            if response is None:
+                return LoginResult("failed", "当前 MoviePilot 环境没有可用的本机 Playwright")
+            if response.get("second_factor"):
+                return LoginResult("failed", "本地浏览器仍要求异地登录 / 二级验证")
+            if response.get("challenge_page"):
+                return LoginResult("failed", "本地浏览器仍卡在 Cloudflare / WAF 验证页")
+            if response.get("error"):
+                return LoginResult("failed", _redact_api_secret(response["error"], secret))
+            status_code = int(response.get("status") or 0)
+            content = str(response.get("text") or "")
+        else:
+            url = target_url(base_url, path)
+            headers = _api_headers(site, rule)
+            session = new_http_session()
+            session.headers.update(headers)
+            response = _api_request(session, method, url, headers, timeout, proxies)
+            status_code = int(getattr(response, "status_code", 0) or 0)
+            content = str(getattr(response, "text", "") or "")
     except (ApiRequestError, ValueError) as error:
         return LoginResult("failed", _redact_api_secret(error, secret))
     except Exception as error:
         return LoginResult("failed", _redact_api_secret(f"API Key 验证请求异常：{error}", secret))
-    status_code = int(getattr(response, "status_code", 0) or 0)
+    if cloudflare_pending(content):
+        return LoginResult("failed", "站点返回 Cloudflare 验证页，API Key 请求未到达应用层")
     if status_code in {401, 403}:
         return LoginResult("failed", "API Key 无效或没有权限")
     if status_code >= 400:
         return LoginResult("failed", f"API Key 验证失败（HTTP {status_code}）")
     expected = str(rule.get("credential_check_success") or "").strip()
-    content = str(getattr(response, "text", "") or "")
     if expected:
         try:
             matched = bool(re.search(expected, content, re.IGNORECASE))

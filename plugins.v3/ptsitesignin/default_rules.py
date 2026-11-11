@@ -439,6 +439,61 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "signin_absent_status": "success",
         "success_keywords": ["签到成功", "领取成功"],
     },
+    # ---- RousiPro（rousi.pro）：PeerGo 个人 API Key 签到 ----
+    # 站点使用 api-token 请求头；POST JSON {"mode":"fixed"}。已签到时返回 HTTP 400
+    # + code=1，message 含「已签到」，由 http_sign 单独识别为 already。
+    "rousi.pro": {
+        "auth": "api_key",
+        "engine": "http",
+        "method": "POST",
+        "path": "/api/points/attendance",
+        "json": {"mode": "fixed"},
+        "api_key_source": "apikey",
+        "api_key_header": "api-token",
+        "api_key_prefix": "",
+        "success": r'"code"\s*:\s*0\b',
+        "already": r"(已经签到|已签到|重复签到|今日已经|今天已经)",
+        "credential_check_path": "/api/v1/profile",
+        "credential_check_method": "GET",
+        "credential_check_success": r'"code"\s*:\s*0\b',
+    },
+    # ---- Piggo（piggo.me）：SPA 日历页本机 Playwright 签到 ----
+    # 签到入口固定为 /calendar。点击签到按钮后会进入 Cloudflare 人机验证，
+    # 验证通过后页面自行提交。使用 MoviePilot 所在网络的本机浏览器，避免
+    # 云端 Browserless 的机房 IP 触发异地登录验证；失败时不回退 Browserless。
+    "piggo.me": {
+        "engine": "playwright",
+        "cookie_mode": "browser",
+        "path": "/calendar",
+        "submit_method": "dom_click",
+        "submit_selector": ".cal-att-pill.act",
+        "submit_text": "签到",
+        "playwright_state_selector": ".cal-att-pill",
+        "playwright_already_texts": ["已签到", "今日已签到", "今天已签到", "已簽到"],
+        "playwright_skip_texts": ["补签", "補簽"],
+        "captcha_response_path": "/v1/web/calendar/attendance",
+        "playwright_captcha_token_selector": "input[name='cf-turnstile-response']",
+        "playwright_captcha_wait": 30000,
+        "playwright_wait_for_ready": True,
+        "playwright_ready_wait": 20000,
+        "playwright_calendar_selector": ".cal-wrap",
+        "playwright_calendar_loading_selector": ".cal-wrap[aria-busy='true']",
+        "playwright_page_ready_selector": (
+            ".cal-att-pill, .cal-wrap:not([aria-busy='true']), "
+            "input[name='username'], form.step-up input[name='password'], "
+            ".denied-page, #idle-lock-title"
+        ),
+        "browser_auth_mode": "login_and_unlock",
+        "browser_login_url": "/login?redirect=/calendar",
+        "browser_login_username_selector": "input[name='username']",
+        "browser_login_password_selector": "input[name='password']",
+        "browser_login_submit_selector": "button.btn",
+        "browser_unlock_password_selector": "form.step-up input[name='password']",
+        "browser_unlock_submit_selector": "form.step-up button[type='submit']",
+        "cloudflare_wait": 60,
+        "wait": 8000,
+        "auto_wait": 30000,
+    },
     # ---- 观众（Audiences）：签到页内嵌 Turnstile，验证通过后由站点自行提交 ----
     # 该站 Turnstile 渲染在 closed shadow DOM 里（本地 Edge 复现），页面 JS 读不到
     # cf-turnstile-response，DOM 上也没有可调的 data-callback；而 Browserless 的 solve 只

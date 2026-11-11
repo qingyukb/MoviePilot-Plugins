@@ -49,6 +49,8 @@ https://github.com/qingyukb/MoviePilot-Plugins
 - U2：showup 四选一签到（提交后回读确认）
 - 瓷器：首页获取 CSRF，调用 `plugin_sign-in.php` 并刷新 Cookie
 - 好学：读取 `/api/v1/home` 状态，使用 `flux_csrf` 调用签到 API
+- RousiPro：在站点管理填写个人 API Key，调用 `/api/points/attendance`
+- Piggo：在站点管理配置 Cookie 或账号密码；本机 Playwright 打开 `/calendar` 点击签到并处理 Cloudflare 人机验证（不回退云端 Browserless）
 - 彩虹岛：答题签到
 - AGSVPT：表单签到
 - 学校：首页签到入口
