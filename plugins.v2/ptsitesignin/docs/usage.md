@@ -50,7 +50,7 @@ https://github.com/qingyukb/MoviePilot-Plugins
 - 瓷器：首页获取 CSRF，调用 `plugin_sign-in.php` 并刷新 Cookie
 - 好学：读取 `/api/v1/home` 状态，使用 `flux_csrf` 调用签到 API
 - RousiPro：在站点管理填写个人 API Key，调用 `/api/points/attendance`
-- Piggo：勾选猪猪后，在插件设置填写「猪猪账号 / 猪猪密码」；本机 Playwright 自动登录并打开 `/calendar` 签到。云端 Browserless 会被提示异地登录，建议自建 Browserless
+- Piggo：勾选猪猪后，在插件设置填写「猪猪账号 / 猪猪密码」；本机 Playwright 自动登录并打开 `/calendar` 签到。最近动向由本机 Playwright 打开 `/userdetails` 读取；云端 Browserless 会被提示异地登录，建议自建 Browserless
 - 彩虹岛：答题签到
 - AGSVPT：表单签到
 - 学校：首页签到入口

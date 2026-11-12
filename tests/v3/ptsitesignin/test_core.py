@@ -634,6 +634,8 @@ class CoreRegressionTests(unittest.TestCase):
                 self.assertEqual(rule["playwright_state_selector"], ".cal-att-pill")
                 self.assertEqual(rule["captcha_response_path"],
                                  "/v1/web/calendar/attendance")
+                self.assertEqual(rule["activity_engine"], "playwright")
+                self.assertEqual(rule["activity_path"], "/userdetails")
                 self.assertFalse(rule.get("browserless_fallback", False))
 
     def test_waf_page_is_treated_as_challenge(self):
@@ -2549,6 +2551,75 @@ class CaptchaFallbackRuleTests(unittest.TestCase):
                 rule = core.fallback_rule({"engine": "http", "path": "/attendance.php"},
                                           "captcha")
                 self.assertEqual(rule["mode"], "open_page")
+
+
+class PlaywrightActivityTests(unittest.TestCase):
+    """Piggo 的个人页需要浏览器登录态，不能直接 HTTP 读取。"""
+
+    def test_browser_activity_uses_userdetails_and_extracts_time(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                from unittest import mock
+
+                class Page:
+                    def __init__(self):
+                        self.url = "https://piggo.me/userdetails"
+                        self.html = (
+                            "<html><body><div>用户资料</div>"
+                            "<div>最近动向</div>"
+                            "<div>2026-11-12 19:14:46 (< 1分钟前)</div>"
+                            "</body></html>"
+                        )
+
+                    def goto(self, url, **kwargs):
+                        self.url = url
+
+                    def wait_for_load_state(self, *args, **kwargs):
+                        return None
+
+                    def content(self):
+                        return self.html
+
+                    def wait_for_timeout(self, timeout):
+                        return None
+
+                    def evaluate(self, script, args=None):
+                        return {}
+
+                page = Page()
+
+                class Helper:
+                    def action(self, **kwargs):
+                        return kwargs["callback"](page)
+
+                site = {"url": "https://piggo.me/", "username": "u", "password": "p"}
+                rule = {
+                    "activity_path": "/userdetails",
+                    "activity_engine": "playwright",
+                    "activity_wait": 1000,
+                    "cloudflare_wait": 3,
+                    "browser_auth_mode": "login_and_unlock",
+                    "browser_login_username_selector": "input[name='username']",
+                    "browser_login_password_selector": "input[name='password']",
+                    "browser_login_submit_selector": "button.btn",
+                    "browser_unlock_password_selector": "form.step-up input[name='password']",
+                    "browser_unlock_submit_selector": "form.step-up button[type='submit']",
+                }
+                with mock.patch.object(core, "_load_playwright_helper", return_value=Helper):
+                    result = core.playwright_read_activity(site, rule, timeout=1)
+                self.assertIsNotNone(result)
+                self.assertEqual(result.status, "success")
+                self.assertTrue(result.last_seen.startswith("2026-11-12 19:14:46"))
+                self.assertIn("/userdetails", page.url)
+
+    def test_browser_activity_without_helper_returns_none(self):
+        from unittest import mock
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                with mock.patch.object(core, "_load_playwright_helper", return_value=None):
+                    result = core.playwright_read_activity(
+                        {"url": "https://piggo.me/"}, {"activity_path": "/userdetails"})
+                self.assertIsNone(result)
 
 
 if __name__ == "__main__":

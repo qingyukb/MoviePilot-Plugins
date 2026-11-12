@@ -614,6 +614,35 @@ class PagePluginTests(unittest.TestCase):
         self.assertEqual(captured.get("password"), "pig-pass")
         self.assertNotIn("pig-pass", str(row))
 
+    def test_piggo_activity_uses_playwright_even_without_cookie(self):
+        plugin = self._make({})
+        plugin._timeout = 30
+        plugin._proxies_for = lambda info: None
+        captured = {}
+
+        class Outcome:
+            status = "success"
+            last_seen = "2026-11-12 19:14:46"
+            snippet = ""
+            source = "https://piggo.me/userdetails/25674"
+            message = ""
+
+        def fake_activity(info, rule, **kwargs):
+            captured.update(info)
+            captured["rule"] = rule
+            return Outcome()
+
+        info = {"id": 99, "name": "猪猪", "url": "https://piggo.me/",
+                "username": "pig-user", "password": "pig-pass"}
+        rule = {"activity_engine": "playwright", "activity_path": "/userdetails"}
+        with mock.patch.object(self.plugin_module, "playwright_read_activity",
+                               side_effect=fake_activity):
+            activity, source = plugin._read_site_activity(info, rule)
+        self.assertEqual(activity, "2026-11-12 19:14:46")
+        self.assertIn("/userdetails/25674", source)
+        self.assertEqual(captured.get("username"), "pig-user")
+        self.assertEqual(captured.get("password"), "pig-pass")
+
     def test_piggo_credentials_fields_are_conditional(self):
         piggo = _Site(99, "猪猪")
         piggo.url = "https://piggo.me/"

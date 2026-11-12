@@ -493,6 +493,12 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "cloudflare_wait": 60,
         "wait": 8000,
         "auto_wait": 30000,
+        # Piggo 的个人页由 SPA 提供，直接 HTTP 访问会被 Cloudflare/风控拦成 403。
+        # 用户资料页的 /userdetails 会自动跳转到 /userdetails/<自己的 uid>，
+        # 因此这里只需要给出稳定入口，再由本机 Playwright 登录后读取「最近动向」。
+        "activity_path": "/userdetails",
+        "activity_engine": "playwright",
+        "activity_wait": 8000,
     },
     # ---- 观众（Audiences）：签到页内嵌 Turnstile，验证通过后由站点自行提交 ----
     # 该站 Turnstile 渲染在 closed shadow DOM 里（本地 Edge 复现），页面 JS 读不到

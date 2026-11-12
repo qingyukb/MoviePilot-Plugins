@@ -59,6 +59,7 @@ Piggo（`piggo.me`）新版 SPA 已不再支持旧 API Key。其签到入口固�
 - 本机浏览器打开 `/calendar` 并等待日历加载；
 - 点击 `.cal-att-pill.act`；
 - 等待 Cloudflare / Turnstile 验证后读取签到结果；
+- 最近动向通过本机 Playwright 打开 `/userdetails` 读取，直接 HTTP 请求会返回 403；
 - 已显示“今日已签到”时直接判定为已签到；
 - 云端 Browserless 会被提示异地登录；如需 Browserless，建议自建并配置稳定的出口 IP。
 

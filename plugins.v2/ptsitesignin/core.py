@@ -3355,6 +3355,142 @@ def read_activity(site: Mapping[str, Any], cookie: str, timeout: int = 30,
                           f"未在站点页面找到「最近动向」，{origin}（" + "；".join(notes) + "）")
 
 
+def playwright_read_activity(site: Mapping[str, Any], rule: Mapping[str, Any],
+                             timeout: int = 90,
+                             proxies: Optional[Dict[str, str]] = None) -> Optional[ActivityResult]:
+    """在本机浏览器里读取站点「最近动向」。
+
+    部分 SPA（例如猪猪）的用户资料页必须经过站点自身的前端登录态和
+    Cloudflare / WAF 校验，直接 HTTP 请求只会得到 403。这里复用签到引擎的
+    浏览器登录流程，打开 activity_path 后从页面正文提取最近动向。
+    返回 None 表示当前 MoviePilot 没有可用的 PlaywrightHelper。
+    """
+    PlaywrightHelper = _load_playwright_helper()
+    if PlaywrightHelper is None or not hasattr(PlaywrightHelper, "action"):
+        return None
+
+    base_url = str(site.get("url") or "").rstrip("/")
+    if not base_url:
+        return ActivityResult("failed", "站点地址为空")
+    path = str(rule.get("activity_path") or "/userdetails").strip()
+    if not path.startswith("/") or path.startswith("//") or "\\" in path or "#" in path:
+        return ActivityResult("failed", "最近动向路径必须是以 / 开头的站内路径")
+
+    cookie = str(site.get("cookie") or "").strip()
+    cookie_mode = str(rule.get("cookie_mode") or "header").lower()
+    browser_auth_mode = str(rule.get("browser_auth_mode") or "").strip().lower()
+    try:
+        challenge_budget = int(float(rule.get("cloudflare_wait") or 20)) * 1000
+    except (TypeError, ValueError):
+        challenge_budget = 20000
+    try:
+        activity_wait = int(rule.get("activity_wait") or 8000)
+    except (TypeError, ValueError):
+        activity_wait = 8000
+    activity_wait = max(1000, min(activity_wait, 30000))
+
+    target = target_url(base_url, path)
+
+    def callback(page: Any) -> Dict[str, Any]:
+        if cookie_mode == "browser" and cookie:
+            try:
+                items = cookie_list_for_context(cookie, base_url)
+                if items:
+                    page.context.add_cookies(items)
+            except Exception:
+                pass
+
+        try:
+            page.goto(target, wait_until="domcontentloaded",
+                      timeout=max(15000, int(timeout * 1000)))
+        except Exception:
+            pass
+        try:
+            page.wait_for_load_state("domcontentloaded")
+        except Exception:
+            pass
+        html = _wait_challenge_clear(page, challenge_budget)
+        if _page_has_challenge(html):
+            return {"status": "failed",
+                    "message": "本机浏览器仍卡在 Cloudflare / WAF 验证页，无法读取最近动向"}
+
+        if browser_auth_mode:
+            auth_result, auth_changed = _prepare_browser_auth(
+                page, site, rule, timeout=timeout)
+            if auth_result.status != "success":
+                return {"status": "failed", "message": auth_result.message}
+            if auth_changed:
+                try:
+                    page.goto(target, wait_until="domcontentloaded",
+                              timeout=max(15000, int(timeout * 1000)))
+                    page.wait_for_load_state("domcontentloaded")
+                except Exception:
+                    pass
+                html = _wait_challenge_clear(page, challenge_budget)
+                if _page_has_challenge(html):
+                    return {"status": "failed",
+                            "message": "完成登录后仍卡在 Cloudflare / WAF 验证页，无法读取最近动向"}
+
+        deadline = time.monotonic() + activity_wait / 1000
+        last_html = html
+        auth_retry = 0
+        while time.monotonic() < deadline:
+            try:
+                current = page.content() or last_html
+            except Exception:
+                current = last_html
+            if current:
+                last_html = current
+            found = extract_activity(current)
+            if found:
+                source = str(getattr(page, "url", "") or target)
+                return {"status": "success", "activity": found, "source": source}
+
+            # 页面可能在异步渲染后才跳到登录页；再给一次登录机会。
+            if browser_auth_mode and auth_retry < 2 and login_page(current):
+                auth_result, auth_changed = _prepare_browser_auth(
+                    page, site, rule, timeout=timeout)
+                if auth_result.status != "success":
+                    return {"status": "failed", "message": auth_result.message}
+                if auth_changed:
+                    auth_retry += 1
+                    try:
+                        page.goto(target, wait_until="domcontentloaded",
+                                  timeout=max(15000, int(timeout * 1000)))
+                        page.wait_for_load_state("domcontentloaded")
+                    except Exception:
+                        pass
+                    _wait_challenge_clear(page, challenge_budget)
+                    continue
+            try:
+                page.wait_for_timeout(500)
+            except Exception:
+                time.sleep(0.5)
+        return {"status": "failed",
+                "message": f"已打开 {path}，但没有找到最近动向"}
+
+    try:
+        outcome = PlaywrightHelper().action(
+            url="about:blank", callback=callback,
+            cookies=None if cookie_mode == "browser" else cookie,
+            ua=str(site.get("ua") or "").strip() or None,
+            proxies=dict(proxies) if proxies else None,
+            headless=True, timeout=max(60, int(timeout)))
+    except Exception:
+        return ActivityResult("failed", "本机浏览器读取最近动向出现异常")
+
+    if not isinstance(outcome, Mapping):
+        return ActivityResult("failed", "本机浏览器没有返回最近动向页面")
+    if outcome.get("status") == "success":
+        found = outcome.get("activity") if isinstance(outcome.get("activity"), Mapping) else {}
+        source = str(outcome.get("source") or path)
+        return ActivityResult("success", f"已读取最近动向（{source}）",
+                              last_seen=str(found.get("last_seen") or ""),
+                              snippet=str(found.get("snippet") or ""),
+                              source=source)
+    return ActivityResult("failed", str(outcome.get("message") or "本机浏览器未读取到最近动向"))
+
+
 # ---------------------------------------------------- 结果记录汇总（插件详情页用）
 # 一轮签到会留下两类记录：签到记录（success / already / failed）与登录记录（login /
 # login_failed）。同时勾了「签到站点」和「登录站点」的站点只跑一次（真实登录 + 签到 +

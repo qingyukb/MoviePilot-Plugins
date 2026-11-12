@@ -69,6 +69,7 @@ from .core import (
     http_sign_auto,
     is_api_key_rule,
     playwright_sign,
+    playwright_read_activity,
     run_site_module,
     is_login_record,
     is_signin_record,
@@ -200,7 +201,7 @@ class PTSiteSignIn(_PluginBase):
     plugin_name = "PT站点签到"
     plugin_desc = ("PT 站点自动签到，支持 Cookie 登录并读取最近动向；验证码或 Cloudflare 可按规则改用浏览器。")
     plugin_icon = "signin.png"
-    plugin_version = "3.0.8"
+    plugin_version = "3.0.9"
     plugin_author = "qingyukb"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "ptsignin_"
@@ -1311,10 +1312,24 @@ class PTSiteSignIn(_PluginBase):
                 rule = {}
         api_mode = is_api_key_rule(rule)
         cookie = str(info.get("cookie") or "").strip()
-        if not api_mode and not cookie:
-            return "", ""
+        activity_engine = str(rule.get("activity_engine") or "").strip().lower()
         account = account_from_site(info)
+        # 猪猪这类站点可以直接用插件里的账号密码启动本机浏览器，
+        # 不要求站点管理里另外保存一份可能已经失效的 Cookie。
+        if not api_mode and not cookie and not (
+                activity_engine == "playwright" and account_ready(account)):
+            return "", ""
         site_name = str(info.get("name") or info.get("url") or "未知站点")
+        if activity_engine == "playwright":
+            outcome = playwright_read_activity(
+                info, rule, timeout=max(90, self._timeout * 2),
+                proxies=self._proxies_for(info))
+            if outcome is not None:
+                if outcome.status == "success":
+                    return outcome.last_seen or outcome.snippet or "已读取", outcome.source
+                logger.debug(f"PT站点签到：{site_name} 本机浏览器读取最近动向失败"
+                             f"（{compact_text(outcome.message)}）")
+                return "", outcome.message
         # 站点常把「最近动向」放在签到页 / 校验页（例如观众 attendance.php），一并作为候选
         paths = [str(rule.get("path") or ""), str(rule.get("verify_success_path") or "")]
         try:
