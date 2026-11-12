@@ -200,7 +200,7 @@ class PTSiteSignIn(_PluginBase):
     plugin_name = "PT站点签到"
     plugin_desc = ("PT 站点自动签到，支持 Cookie 登录并读取最近动向；验证码或 Cloudflare 可按规则改用浏览器。")
     plugin_icon = "signin.png"
-    plugin_version = "2.0.13"
+    plugin_version = "2.0.14"
     plugin_author = "qingyukb"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "ptsignin_"
@@ -228,6 +228,8 @@ class PTSiteSignIn(_PluginBase):
     _site_rules = ""
     _read_activity = True
     _run_once = False
+    _piggo_username = ""
+    _piggo_password = ""
     _run_once_scheduler: Optional[BackgroundScheduler] = None
 
     # 进程级互斥：Cron 与「保存后立即执行一次」可能同时触发，避免同一轮重复签到 /
@@ -265,6 +267,8 @@ class PTSiteSignIn(_PluginBase):
         self._browserless_token4 = str(config.get("browserless_token4") or "").strip()
         self._browserless_timeout = max(15, min(int(config.get("browserless_timeout") or 100), 300))
         self._site_rules = str(config.get("site_rules") or "")
+        self._piggo_username = str(config.get("piggo_username") or "").strip()
+        self._piggo_password = str(config.get("piggo_password") or "")
         self._read_activity = bool(config.get("read_activity", True))
         run_once = bool(config.get("run_once", False))
         self._run_once = run_once
@@ -351,6 +355,8 @@ class PTSiteSignIn(_PluginBase):
             "browserless_token4": self._browserless_token4,
             "browserless_timeout": self._browserless_timeout,
             "site_rules": self._site_rules,
+            "piggo_username": self._piggo_username,
+            "piggo_password": self._piggo_password,
             "read_activity": self._read_activity,
             "run_once": self._run_once,
         }
@@ -455,6 +461,23 @@ class PTSiteSignIn(_PluginBase):
                     for site in sites
                     if has_auth(site)]
 
+        # 只有勾选猪猪（或全部站点）时才显示账号密码，避免污染其它站点配置。
+        piggo_ids = [str(site.id) for site in sites
+                     if "piggo.me" in f"{getattr(site, 'url', '') or ''} "
+                                      f"{getattr(site, 'domain', '') or ''}".lower()]
+
+        def piggo_selected_expression(model_name: str) -> str:
+            if not piggo_ids:
+                return "false"
+            ids = json.dumps(piggo_ids, ensure_ascii=False)
+            return (f"Array.isArray({model_name}) && ("
+                    f"{model_name}.map(String).indexOf('all') >= 0 || "
+                    f"{ids}.some(function(value) {{ return "
+                    f"{model_name}.map(String).indexOf(value) >= 0; }}))")
+
+        piggo_show = ("(" + piggo_selected_expression("site_ids") + " || "
+                      + piggo_selected_expression("login_site_ids") + ")")
+
         def field(kind: str, model: str, label: str, md: int = 6,
                   **props: Any) -> Dict[str, Any]:
             """一列表单控件。"""
@@ -524,6 +547,15 @@ class PTSiteSignIn(_PluginBase):
                       hint="选择全部后自动包含后续新增站点；与签到站点同时选中时一轮做完"
                            "（真实登录 + 签到 + 读最近动向，不会重复登录）",
                       **{"persistent-hint": True})),
+            {"component": "VRow", "props": {"show": "{{ " + piggo_show + " }}"},
+             "content": [
+                 hint_field("VTextField", "piggo_username", "猪猪账号",
+                            "仅勾选猪猪或全部站点时显示；用于本机 Playwright 自动登录", 6,
+                            autocomplete="username"),
+                 hint_field("VTextField", "piggo_password", "猪猪密码",
+                            "仅用于自动登录，不写入日志", 6, type="password",
+                            autocomplete="current-password"),
+             ]},
             row(field("VTextField", "browserless_url", "Browserless 地址", 4,
                       placeholder=DEFAULT_BROWSERLESS_URL, hint="根地址或完整 /stealth/bql 地址",
                       **{"persistent-hint": True}),
@@ -792,6 +824,20 @@ class PTSiteSignIn(_PluginBase):
                             "apikey", "token", "note", "timeout",
                             "username", "user", "account", "password", "passwd", "pwd")}
 
+    def _with_plugin_account(self, info: Dict[str, Any]) -> Dict[str, Any]:
+        """把插件设置里的猪猪账号密码合并到站点信息，不覆盖其他站点。"""
+        result = dict(info)
+        target = f"{result.get('url') or ''} {result.get('domain') or ''}".lower()
+        if "piggo.me" not in target:
+            return result
+        username = str(getattr(self, "_piggo_username", "") or "").strip()
+        password = str(getattr(self, "_piggo_password", "") or "")
+        if username:
+            result["username"] = username
+        if password:
+            result["password"] = password
+        return result
+
     @staticmethod
     def _site_id(info: Dict[str, Any]) -> Optional[int]:
         """返回正整数站点 ID；字段异常时按未选择处理。"""
@@ -1010,6 +1056,7 @@ class PTSiteSignIn(_PluginBase):
         :param allowed_site_ids: 本轮允许访问的站点 ID
         :return: 统一签到结果
         """
+        info = self._with_plugin_account(info)
         site_name = str(info.get("name") or info.get("url") or "未知站点")
         guard = self._site_guard(info, run_id, allowed_site_ids, "签到")
         if guard:
@@ -1154,6 +1201,7 @@ class PTSiteSignIn(_PluginBase):
         :param allowed_site_ids: 本轮允许访问的站点 ID
         :return: 统一登录结果
         """
+        info = self._with_plugin_account(info)
         site_name = str(info.get("name") or info.get("url") or "未知站点")
         guard = self._site_guard(info, run_id, allowed_site_ids, "仅登录")
         if guard:

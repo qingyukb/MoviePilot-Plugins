@@ -53,12 +53,14 @@ RousiPro（`rousi.pro`）已内置 API Key 规则，使用 `api-token` 请求头
 
 Piggo（`piggo.me`）新版 SPA 已不再支持旧 API Key。其签到入口固定为 `/calendar`，点击签到后会进入 Cloudflare 人机验证，验证通过后由页面自行提交。插件使用 MoviePilot 本机 Playwright：
 
-- 在站点管理配置 Piggo Cookie，或在账号信息中配置用户名和当前密码；
+- 在插件设置里勾选猪猪（或“全部站点”）后，会显示「猪猪账号」和「猪猪密码」；
+- 填写当前账号与密码后，本机 Playwright 会自动登录，不依赖站点管理的附加信息；
+- 如果站点管理仍有可用 Cookie，也可以直接复用 Cookie；
 - 本机浏览器打开 `/calendar` 并等待日历加载；
 - 点击 `.cal-att-pill.act`；
 - 等待 Cloudflare / Turnstile 验证后读取签到结果；
 - 已显示“今日已签到”时直接判定为已签到；
-- 不使用云端 Browserless，避免机房 IP 触发异地登录。
+- 云端 Browserless 会被提示异地登录；如需 Browserless，建议自建并配置稳定的出口 IP。
 
 ## 第二段签到
 

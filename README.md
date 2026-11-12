@@ -4,14 +4,14 @@ MoviePilot 第三方插件仓库。
 
 ## PT站点签到
 
-PT 站点自动签到，支持 V2 / V3。签到默认走 HTTP 直连，支持 Cookie 凭证；验证码或 Cloudflare 可按规则改用本机 Playwright 或 Browserless。Piggo 使用本机 Playwright 打开 `/calendar`，点击签到并处理 Cloudflare 人机验证，且不回退云端 Browserless；签完读取站点「最近动向」。
+PT 站点自动签到，支持 V2 / V3。签到默认走 HTTP 直连，支持 Cookie 凭证；验证码或 Cloudflare 可按规则改用本机 Playwright 或 Browserless。Piggo 使用账号密码通过本机 Playwright 打开 `/calendar` 签到；云端 Browserless 会被提示异地登录，建议自建 Browserless；签完读取站点「最近动向」。
 
 主要功能：
 
 - HTTP 直连签到（NexusPHP），默认路径 404 时自动查找签到入口
 - 内置站点预设（观众、52PT、U2、瓷器、好学、RousiPro、Piggo、学校、憨憨、SUNNYPT、TTG、HDKylin、AGSVPT、LuckPT 等），未覆盖的站点可写自定义规则
 - 站点选择只显示站点名，不显示认证类型后缀
-- 普通 Cookie 站点遇验证码 / Cloudflare / Turnstile 时可按规则改用本机 Playwright 或 Browserless；Piggo 固定使用本机 Playwright 完成 `/calendar` 页面签到，避免额外引入云端 Browserless 的机房 IP
+- 普通 Cookie 站点遇验证码 / Cloudflare / Turnstile 时可按规则改用本机 Playwright 或 Browserless；Piggo 使用账号密码通过本机 Playwright 完成 `/calendar` 页面签到，云端 Browserless 会被提示异地登录，建议自建 Browserless
 - 详情页分「签到状态」「登录状态」，结果列显示奖励或失败原因
 - 当天已签到成功的站点跳过，通知只统计成功与失败数量
 

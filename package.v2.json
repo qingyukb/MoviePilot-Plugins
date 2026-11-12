@@ -3,7 +3,7 @@
     "name": "PT站点签到",
     "description": "PT 站点自动签到，支持 Cookie 登录并读取最近动向；验证码或 Cloudflare 可按规则改用浏览器。",
     "labels": "站点,签到",
-    "version": "2.0.13",
+    "version": "2.0.14",
     "icon": "https://raw.githubusercontent.com/qingyukb/MoviePilot-Plugins/main/icons/ptsignin.png",
     "author": "qingyukb",
     "level": 2,
@@ -12,6 +12,7 @@
     "v2": true,
     "system_version": ">=2.0.0,<3.0.0",
     "history": {
+      "v2.0.14": "猪猪使用账号密码登录；使用云端 Browserless 会被提示异地登录，建议自建 Browserless。",
       "v2.0.13": "新增 RousiPro（rousi.pro）API Key 签到，以及 Piggo（piggo.me）`/calendar` 本机 Playwright 日历签到；Piggo 点击签到后处理 Cloudflare 人机验证，不回退云端 Browserless，并兼容“今日已签到”状态。",
       "v2.0.12": "新增好学（hxpt.org）API 签到：读取 /api/v1/home 的签到状态，使用 flux_csrf 调用 /api/v1/attendance/checkin，并解析奖励与连续天数。",
       "v2.0.11": "统一网络请求层：V2 改走宿主 app.utils.http.RequestUtils；Browserless 请求改用同一 HTTP 层，复用代理、证书与 TLS 兼容处理，修复部分 V2 环境中的 SSL EOF / Connection reset。",

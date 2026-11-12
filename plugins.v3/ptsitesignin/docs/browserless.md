@@ -48,6 +48,7 @@ http://192.168.1.10:3000/chromium/bql
 
 - Browserless 回退会把站点 Cookie 发送到配置的 Browserless 服务，请确认服务地址可信。
 - 能否通过 Cloudflare / Turnstile 仍取决于站点风控和 Browserless 节点。
+- Piggo 等对出口 IP 敏感的站点，云端 Browserless 会被提示异地登录，建议自建 Browserless 或使用本机 Playwright。
 - 普通站点优先使用本机 Playwright 或 HTTP，不会主动消耗远程额度。
 
 ---
