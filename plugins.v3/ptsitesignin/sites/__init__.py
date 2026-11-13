@@ -56,6 +56,32 @@ class SignContext:
                                 "Accept": "text/html,application/json,*/*;q=0.8"})
         return session
 
+
+    # ---------------- HTTP 响应工具 ----------------
+    @staticmethod
+    def response_json(response: Any, default: Any = None) -> Any:
+        """安全读取 JSON 响应；兼容 MoviePilot / requests 的响应对象。"""
+        if response is None:
+            return {} if default is None else default
+        try:
+            value = response.json()
+        except Exception:
+            try:
+                value = json.loads(str(getattr(response, "text", "") or ""))
+            except Exception:
+                value = None
+        return value if isinstance(value, dict) else ({} if default is None else default)
+
+    @staticmethod
+    def close_response(response: Any) -> None:
+        """静默关闭响应，兼容不同宿主 HTTP 响应对象。"""
+        closer = getattr(response, "close", None)
+        if callable(closer):
+            try:
+                closer()
+            except Exception:
+                pass
+
     def get(self, url: str, **kwargs):
         try:
             return self._session().get(url, timeout=self.timeout, allow_redirects=True,

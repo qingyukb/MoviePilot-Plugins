@@ -2430,7 +2430,8 @@ def load_site_modules(refresh: bool = False) -> List[Any]:
             except Exception:
                 continue
             for obj in vars(module).values():
-                if isinstance(obj, type) and hasattr(obj, "site_url") and hasattr(obj, "signin"):
+                if isinstance(obj, type) and hasattr(obj, "site_url") and (
+                        hasattr(obj, "signin") or hasattr(obj, "login")):
                     modules.append(obj)
                     break
     _SITE_MODULES = modules
@@ -2467,7 +2468,7 @@ def run_site_module(site: Mapping[str, Any], timeout: int = 30,
     if api is None:
         return None
     module = site_module_for(str(site.get("url") or ""))
-    if module is None:
+    if module is None or not hasattr(module, "signin"):
         return None
     if not str(site.get("cookie") or "").strip() and not str(site.get("token") or "").strip():
         return SignResult("failed", "站点没有 Cookie，无法签到")
@@ -2476,6 +2477,28 @@ def run_site_module(site: Mapping[str, Any], timeout: int = 30,
     if ok:
         return SignResult("already" if "已签到" in message else "success", message or "签到成功")
     return SignResult("failed", message or "签到失败")
+
+
+def run_site_module_login(site: Mapping[str, Any], timeout: int = 30,
+                          proxies: Optional[Dict[str, str]] = None,
+                          logger: Any = None,
+                          rule: Optional[Mapping[str, Any]] = None) -> Optional[LoginResult]:
+    """执行站点模块的 login；没有 login 接口时返回 None 交给通用登录。"""
+    if rule is not None and is_api_key_rule(rule):
+        return None
+    api = _sites_api()
+    if api is None:
+        return None
+    module = site_module_for(str(site.get("url") or ""))
+    if module is None or not hasattr(module, "login"):
+        return None
+    context = api.SignContext(site, timeout=timeout, proxies=proxies, logger=logger)
+    try:
+        ok, message = module().login(site, context)
+    except Exception:
+        return LoginResult("failed", "站点模块登录出现未预期错误")
+    return LoginResult("success" if ok else "failed",
+                       str(message or ("模拟登录成功" if ok else "模拟登录失败")))
 
 
 def http_sign_auto(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: int = 30,

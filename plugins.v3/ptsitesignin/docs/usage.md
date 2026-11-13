@@ -38,6 +38,7 @@ https://github.com/qingyukb/MoviePilot-Plugins
 - 当天已经签到成功的站点会跳过；失败站点仍会继续执行。
 - 失败且没有同时勾选登录的站点不会额外读取最近动向，减少无效请求。
 - 签到结果会保存到详情页和当天历史记录。
+- 失败通知按站点配置、Cookie/Token/登录状态、Cloudflare/WAF、验证码、网络、HTTP 和结果未确认等语义分类。
 - 失败重试在后台执行，不会阻塞配置保存。
 
 ## 内置站点
@@ -45,6 +46,11 @@ https://github.com/qingyukb/MoviePilot-Plugins
 当前包含以下类型的预设或专用处理：
 
 - 观众：Turnstile
+- 不可躺（tangpt.top）：NexusPHP 页内 Turnstile，Browserless 完成验证后提交
+- PlayLet（playlet.cc）：NexusPHP 图片验证码签到，Browserless 自动识别并提交
+- 高清视界（hdarea.club）：配置 API Key 时使用官方 `POST /api/v1/user/signin`；未配置 Key 时保留 `sign_in.php` Cookie 签到；API 失败不回退 Cookie。
+- YemaPT（yemapt.org）：API Key 仅用于 openApi 登录检测；签到仍需要 Cookie 完成 Altcha 验证。
+- ColaPT（colapt.com）：使用网页 Cookie 会话领取每日登录奖励，并执行每周一次的可乐签到；API Key 仅有上传/兼容 scope，不能代替用户签到。
 - 52PT：首页「做种会员签到处」Turnstile 签到（需站点入口可用）
 - U2：showup 四选一签到（提交后回读确认）
 - 瓷器：首页获取 CSRF，调用 `plugin_sign-in.php` 并刷新 Cookie

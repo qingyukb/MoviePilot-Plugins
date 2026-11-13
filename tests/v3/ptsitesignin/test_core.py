@@ -636,7 +636,29 @@ class CoreRegressionTests(unittest.TestCase):
                                  "/v1/web/calendar/attendance")
                 self.assertEqual(rule["activity_engine"], "playwright")
                 self.assertEqual(rule["activity_path"], "/userdetails")
+                self.assertEqual(rule["playwright_ready_wait"], 45000)
                 self.assertFalse(rule.get("browserless_fallback", False))
+
+    def test_tangpt_turnstile_and_playlet_image_rules(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                tangpt = core.resolve_rule(
+                    {"url": "https://www.tangpt.top/", "cookie": "c=1"}, {})
+                self.assertEqual(tangpt["engine"], "browserless")
+                self.assertEqual(tangpt["mode"], "cloudflare")
+                self.assertEqual(tangpt["path"], "/attendance.php")
+                self.assertEqual(tangpt["submit_method"], "auto")
+                self.assertIn("验证图片", tangpt["pending_keywords"])
+                self.assertEqual(tangpt["solve_count"], 1)
+
+                playlet = core.resolve_rule(
+                    {"url": "https://playlet.cc/", "cookie": "c=1"}, {})
+                self.assertEqual(playlet["engine"], "browserless")
+                self.assertEqual(playlet["mode"], "image")
+                self.assertEqual(playlet["path"], "/attendance.php")
+                self.assertIn("imagestring", playlet["captcha_input_selector"])
+                self.assertEqual(playlet["submit_method"], "click")
+                self.assertEqual(playlet["verify_success_path"], "/attendance.php")
 
     def test_waf_page_is_treated_as_challenge(self):
         # 雷池（SafeLine）WAF 安全检测页：按挑战处理，交给浏览器重试

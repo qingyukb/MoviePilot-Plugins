@@ -12,6 +12,8 @@ MoviePilot 的 PT 站点自动签到插件，支持 V2 / V3。
 - 当天已签到成功的站点自动跳过
 - 详情页分别展示签到状态和登录状态
 - 通知仅统计成功与失败，失败时附带简要原因
+- 失败通知按站点配置、Cookie/Token/登录状态、Cloudflare/WAF、验证码、网络、HTTP 和结果未确认等语义分类
+- 高清视界（hdarea.club）配置 API Key 时走官方 API 签到；未配置 Key 时保留 Cookie 签到，API 失败不回退 Cookie
 - Piggo 使用账号密码通过 MoviePilot 本机 Playwright 登录并打开 `/calendar` 签到；云端 Browserless 会被提示异地登录，建议自建 Browserless
 - 支持自定义站点规则和站点专用模块
 

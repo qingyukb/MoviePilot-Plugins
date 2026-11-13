@@ -11,6 +11,43 @@ from typing import Any, Dict
 
 DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
     # ---- 以下为需要浏览器交互的站点预设（来自 captchasignin 参考实现）----
+    # ---- 不可躺 / PlayLet：NexusPHP 签到页 ----
+    # 不可躺使用页内 Turnstile；PlayLet 使用图片验证码。
+    # 两者都通过 Browserless 在真实页面中完成验证后提交 attendance.php。
+    "tangpt.top": {
+        "engine": "browserless",
+        "mode": "cloudflare",
+        "path": "/attendance.php",
+        "preflight_path": "/attendance.php",
+        "submit_method": "auto",
+        "auto_wait": 30000,
+        "cloudflare_wait": 15,
+        "solve_count": 1,
+        "solve_timeout": 40000,
+        "wait": 15000,
+        "verify_success_path": "/attendance.php",
+        "verify_wait": 15000,
+        "success_keywords": ["签到成功", "簽到成功", "本次签到获得", "本次簽到獲得"],
+        "already_keywords": ["今天已经签到", "今日已签到", "已经签到", "今天已签到",
+                             "今日已簽到", "已經簽到"],
+        "pending_keywords": ["验证图片", "驗證圖片", "立即签到", "立即簽到"],
+    },
+    "playlet.cc": {
+        "engine": "browserless",
+        "mode": "image",
+        "path": "/attendance.php",
+        "preflight_path": "/attendance.php",
+        "captcha_selector": "form:has(input[name='imagestring']) img[alt='CAPTCHA']",
+        "captcha_input_selector": "form input[name='imagestring']",
+        "submit_selector": "form input[type='submit'][value='立即签到']",
+        "submit_method": "click",
+        "wait": 8000,
+        "verify_success_path": "/attendance.php",
+        "verify_wait": 8000,
+        "success_keywords": ["签到成功", "簽到成功", "本次签到获得", "本次簽到獲得"],
+        "already_keywords": ["今天已经签到", "今日已签到", "已经签到", "今天已签到",
+                             "今日已簽到", "已經簽到"],
+    },
     "open.cd": {
         # 皇后：plugin_sign-in.php 的图片验证码表单，交给 Browserless 图片模式解。
         # 签到成功后页面会出现「[查看簽到記錄]」，验证码表单消失，按这个判成功。
@@ -475,7 +512,7 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "playwright_captcha_token_selector": "input[name='cf-turnstile-response']",
         "playwright_captcha_wait": 30000,
         "playwright_wait_for_ready": True,
-        "playwright_ready_wait": 20000,
+        "playwright_ready_wait": 45000,
         "playwright_calendar_selector": ".cal-wrap",
         "playwright_calendar_loading_selector": ".cal-wrap[aria-busy='true']",
         "playwright_page_ready_selector": (

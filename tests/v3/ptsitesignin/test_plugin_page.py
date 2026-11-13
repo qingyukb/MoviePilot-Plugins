@@ -482,7 +482,7 @@ class PagePluginTests(unittest.TestCase):
         text = sent[0]["text"]
         self.assertTrue(text.startswith("签到成功 1 ｜ 登录成功 1 ｜ 失败 1"))
         self.assertIn("失败：", text)
-        self.assertIn("· 红豆饭：Cookie 无效或已过期", text)
+        self.assertIn("· Cookie / Token / 登录状态异常：红豆饭", text)
         self.assertNotIn("观众", text)                    # 成功站点不逐条罗列
         plugin._notify_enabled = False                    # 关掉开关 → 不发送
         plugin._notify(results)
@@ -490,6 +490,44 @@ class PagePluginTests(unittest.TestCase):
         plugin._notify_enabled = True                     # 全部成功 → 只有一行
         plugin._notify([{"site": "PT时间", "status": "already", "message": "今日已签到"}])
         self.assertTrue(sent[-1]["text"].startswith("签到成功 1 ｜ 登录成功 0 ｜ 失败 0"))
+
+    def test_notify_groups_failure_reasons_by_semantics(self):
+        plugin = self._make({}, _notify_enabled=True)
+        sent = []
+        plugin.post_message = lambda **kwargs: sent.append(kwargs)
+        plugin._notify([
+            {"site": "站点A", "status": "failed", "message": "Cookie 无效或已过期"},
+            {"site": "站点B", "status": "failed", "message": "Cloudflare 验证失败"},
+            {"site": "站点C", "status": "failed", "message": "验证码错误"},
+            {"site": "站点D", "status": "failed", "message": "请求超时"},
+            {"site": "站点E", "status": "failed", "message": "HTTP 503"},
+        ])
+        text = sent[-1]["text"]
+        self.assertIn("· Cookie / Token / 登录状态异常：站点A", text)
+        self.assertIn("· Cloudflare / WAF 防护验证失败：站点B", text)
+        self.assertIn("· 验证码获取或校验失败：站点C", text)
+        self.assertIn("· 网络请求超时：站点D", text)
+        self.assertIn("· 站点服务异常（HTTP 5xx）：站点E", text)
+
+    def test_notify_limits_sites_per_failure_category(self):
+        plugin = self._make({}, _notify_enabled=True)
+        sent = []
+        plugin.post_message = lambda **kwargs: sent.append(kwargs)
+        plugin._notify([
+            {"site": f"站点{i}", "status": "failed", "message": "Cookie 无效或已过期"}
+            for i in range(1, 9)
+        ])
+        text = sent[-1]["text"]
+        self.assertIn("站点1、站点2、站点3、站点4、站点5、站点6", text)
+        self.assertNotIn("站点7", text)
+        self.assertIn("等 8 个站点", text)
+
+    def test_csrf_failure_is_page_parse_not_login_credential(self):
+        plugin = self._make({})
+        self.assertEqual(
+            plugin._failure_category({"message": "Cola 会话没有 CSRF token"}),
+            "站点页面或接口解析异常",
+        )
 
     def test_notify_counts_login_only_sites(self):
         # 只勾在「登录站点」里的站点：签到成功记 0，登录成功记 1；双选站点两边各记一次
@@ -613,6 +651,29 @@ class PagePluginTests(unittest.TestCase):
         self.assertEqual(captured.get("username"), "pig-user")
         self.assertEqual(captured.get("password"), "pig-pass")
         self.assertNotIn("pig-pass", str(row))
+
+    def test_hdarea_key_only_site_uses_module_and_never_falls_back(self):
+        plugin = self._make({})
+        plugin._run_id = 1
+        plugin._timeout = 30
+        plugin._read_activity = False
+        plugin._proxies_for = lambda info: None
+        module = self.plugin_module
+        info = {"id": 88, "name": "高清视界", "url": "https://hdarea.club/",
+                "apikey": "key", "cookie": "old"}
+
+        with mock.patch.object(module, "run_site_module",
+                               return_value=module.SignResult("success", "签到成功")),                 mock.patch.object(plugin, "_sign_with_engine") as fallback:
+            row = plugin._sign_one(info, {}, None, run_id=1)
+        self.assertEqual(row["status"], "success", row.get("message"))
+        fallback.assert_not_called()
+
+        with mock.patch.object(module, "run_site_module",
+                               return_value=module.SignResult("failed", "API Key 已过期")),                 mock.patch.object(plugin, "_sign_with_engine") as fallback:
+            row = plugin._sign_one(info, {}, None, run_id=1)
+        self.assertEqual(row["status"], "failed", row.get("message"))
+        self.assertIn("API Key", row["message"])
+        fallback.assert_not_called()
 
     def test_piggo_activity_uses_playwright_even_without_cookie(self):
         plugin = self._make({})

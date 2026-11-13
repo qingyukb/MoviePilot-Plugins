@@ -71,6 +71,7 @@ from .core import (
     playwright_sign,
     playwright_read_activity,
     run_site_module,
+    run_site_module_login,
     is_login_record,
     is_signin_record,
     login as site_login,
@@ -81,6 +82,7 @@ from .core import (
     record_meta,
     resolve_rule,
     site_record_counts,
+    site_module_for,
     site_state_key,
     summarize_records,
     target_url,
@@ -116,7 +118,26 @@ ALL_SITES = "all"
 HISTORY_SHOW = 10
 # 通知里每个失败原因最多显示多少字，避免长诊断把通知撑成一堵墙。
 NOTIFY_REASON_LIMIT = 90      # 通知里每条失败原因最多这么长
-NOTIFY_LIMIT = 6              # 通知里最多列几条失败
+NOTIFY_LIMIT = 6              # 通知里最多列几个失败类别
+NOTIFY_SITE_LIMIT = 6         # 同一失败类别最多列几个站点
+
+# 通知失败原因语义分类。原始详情仍保存在插件记录里，这里只影响通知摘要和分组。
+_FAILURE_CATEGORY_RULES = (
+    ("站点配置缺失", r"(?:未配置|未填写|未设置|未提供|缺少)[^；;]*(?:站点(?:地址|信息)|cookie|token|api[-_]?key)|(?:站点(?:地址|信息)|cookie|token|api[-_]?key)(?:为空|未配置|缺失|未填写)"),
+    ("站点页面或接口解析异常", r"csrf"),
+    ("Cookie / Token / 登录状态异常", r"(?:cookie|(?<!csrf[-_])token|authorization|api[-_]?key).*(?:失效|过期|无效|不正确|不对|错误|权限不足)|(?:登录态|登录状态|登录凭据).*(?:失效|过期|无效)|未(?:登录|登陆)|请先登录|需要登录|unauthorized|authenticationrequired|状态码[:：]?(?:401)|http(?:status(?:code)?)?[:：]?401"),
+    ("Cloudflare / WAF 防护验证失败", r"cloudflare|waf|雷池|safeline|人机验证|turnstile"),
+    ("验证码获取或校验失败", r"验证码|captcha|invalid_imagehash"),
+    ("网络请求超时", r"超时|timeout|timedout|状态码[:：]?408|http(?:status(?:code)?)?[:：]?408"),
+    ("网络连接失败", r"无法(?:打开|访问)(?:网站|签到页)|站点连通性|请求无响应|连接失败|域名解析|dns|connection(?:error|refused|reset|aborted)|failedtoresolve"),
+    ("最近动向读取失败", r"最近动向|activity"),
+    ("站点访问被拒绝（HTTP 403）", r"状态码[:：]?403|http(?:status(?:code)?)?[:：]?403"),
+    ("站点访问频率受限（HTTP 429）", r"状态码[:：]?429|http(?:status(?:code)?)?[:：]?429"),
+    ("站点服务异常（HTTP 5xx）", r"状态码[:：]?5\d{2}|http(?:status(?:code)?)?[:：]?5\d{2}"),
+    ("HTTP 状态异常", r"状态码[:：]?[1-4]\d{2}|http(?:status(?:code)?)?[:：]?[1-4]\d{2}"),
+    ("站点页面或接口解析异常", r"空页面|空响应|接口.*(?:异常|无效)|响应结构|未获取到.*(?:签到|验证码|参数|图片)"),
+    ("签到结果未确认", r"未确认|未能确认|响应丢失|未显示签到成功|未返回明确的(?:签到|成功)|签到状态未知|重试后仍未确认"),
+)
 # 详情页样式（MoviePilot 插件页支持内联 style 组件）。
 PAGE_STYLE = (
     # 整页实底卡片：手机上的弹层是半透明的，不铺底会透出后面的市场列表
@@ -201,7 +222,7 @@ class PTSiteSignIn(_PluginBase):
     plugin_name = "PT站点签到"
     plugin_desc = ("PT 站点自动签到，支持 Cookie 登录并读取最近动向；验证码或 Cloudflare 可按规则改用浏览器。")
     plugin_icon = "signin.png"
-    plugin_version = "2.0.15"
+    plugin_version = "2.1.0"
     plugin_author = "qingyukb"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "ptsignin_"
@@ -1073,7 +1094,9 @@ class PTSiteSignIn(_PluginBase):
 
         if is_api_key_rule(rule):
             return self._sign_api_key_one(info, rule, run_id, allowed_site_ids)
-        if self._key_only_site(info):
+        module_for_site = site_module_for(str(info.get("url") or ""))
+        if self._key_only_site(info) and (
+                module_for_site is None or not hasattr(module_for_site, "signin")):
             reason = ("站点仅有 API Key / Token，但自定义规则未声明固定签到或验证端点，已跳过且未发起请求"
                       "；请在自定义站点规则中补全 path / credential_check_path 等字段")
             self._log_failure(site_name, reason)
@@ -1136,19 +1159,24 @@ class PTSiteSignIn(_PluginBase):
                 outcome = module_outcome
                 engine = "module"
             elif module_outcome is not None:
-                module_note = f"模块：{module_outcome.message}"
-                outcome = self._sign_with_engine(playwright_info, rule, engine, signer, site_name)
-                if outcome is None:
+                module_for_site = site_module_for(str(info.get("url") or ""))
+                if getattr(module_for_site, "authoritative", False)                         or str(info.get("apikey") or "").strip():
                     outcome = module_outcome
                     engine = "module"
-                elif outcome.status in {"success", "already"}:
-                    outcome = SignResult(outcome.status,
-                                         f"{outcome.message}（{module_note} 后由规则引擎完成）")
-                    engine = str(rule["engine"])
                 else:
-                    outcome = SignResult(outcome.status,
-                                         f"{module_note}；规则引擎：{outcome.message}")
-                    engine = str(rule["engine"])
+                    module_note = f"模块：{module_outcome.message}"
+                    outcome = self._sign_with_engine(playwright_info, rule, engine, signer, site_name)
+                    if outcome is None:
+                        outcome = module_outcome
+                        engine = "module"
+                    elif outcome.status in {"success", "already"}:
+                        outcome = SignResult(outcome.status,
+                                             f"{outcome.message}（{module_note} 后由规则引擎完成）")
+                        engine = str(rule["engine"])
+                    else:
+                        outcome = SignResult(outcome.status,
+                                             f"{module_note}；规则引擎：{outcome.message}")
+                        engine = str(rule["engine"])
             elif engine == "playwright":
                 outcome = self._sign_with_engine(playwright_info, rule, engine, signer, site_name)
                 engine = "playwright"
@@ -1216,6 +1244,27 @@ class PTSiteSignIn(_PluginBase):
                 return self._skip_result(
                     info, f"API Key 规则无效，未发起请求：{error}")
             login_rule = {}
+
+        module_login = run_site_module_login(
+            info, timeout=self._timeout, proxies=self._proxies_for(info),
+            logger=logger, rule=login_rule)
+        if module_login is not None:
+            login_ok = module_login.status == "success"
+            login_text = module_login.message if login_ok else "失败：" + module_login.message
+            if login_ok and module_login.cookie:
+                info = dict(info, cookie=module_login.cookie)
+            if not login_ok:
+                self._log_failure(site_name, login_text)
+            guard = self._site_guard(info, run_id, allowed_site_ids, "仅登录")
+            if guard:
+                return self._skip_result(info, guard)
+            activity_text, activity_source = (
+                self._read_site_activity(info, login_rule, run_id, allowed_site_ids)
+                if (login_ok and self._read_activity) else ("", ""))
+            return self._site_result(
+                info, engine="http", status="login" if login_ok else "login_failed",
+                message=login_text, activity=activity_text,
+                activity_source=activity_source)
 
         if is_api_key_rule(login_rule):
             try:
@@ -1784,7 +1833,7 @@ class PTSiteSignIn(_PluginBase):
     def _notify(self, results: List[Dict[str, str]]) -> None:
         """推送结果（由「发送通知」开关控制）。
 
-        版式固定三块：一行统计、一行执行时间、失败时再列站点与原因（最多 6 条，多出来的写条数），
+        版式固定三块：一行统计、一行执行时间、失败时按语义分类列站点与原因，
         避免失败多的时候刷出一大段。
         """
         if not self._notify_enabled or not results:
@@ -1801,9 +1850,16 @@ class PTSiteSignIn(_PluginBase):
         if failures:
             lines.append("")
             lines.append("失败：")
-            lines.extend("· " + self._failure_reason(item) for item in failures[:NOTIFY_LIMIT])
-            if len(failures) > NOTIFY_LIMIT:
-                lines.append(f"…另有 {len(failures) - NOTIFY_LIMIT} 个站点失败，详见插件日志")
+            grouped: Dict[str, List[str]] = {}
+            for item in failures:
+                category = self._failure_category(item)
+                grouped.setdefault(category, []).append(str(item.get("site") or "未知站点"))
+            for category, site_names in list(grouped.items())[:NOTIFY_LIMIT]:
+                shown = site_names[:NOTIFY_SITE_LIMIT]
+                suffix = f" 等 {len(site_names)} 个站点" if len(site_names) > NOTIFY_SITE_LIMIT else ""
+                lines.append(f"· {category}：{'、'.join(shown)}{suffix}")
+            if len(grouped) > NOTIFY_LIMIT:
+                lines.append(f"…另有 {len(grouped) - NOTIFY_LIMIT} 类失败，详见插件日志")
         self.post_message(mtype=NotificationType.SiteMessage,
                           title="PT站点签到",
                           text="\n".join(lines))
@@ -1814,19 +1870,21 @@ class PTSiteSignIn(_PluginBase):
         return str(item.get("status") or "") not in {"success", "already", "login"}
 
     @staticmethod
-    def _failure_reason(item: Dict[str, Any]) -> str:
-        """失败原因：站点名 + 结果文案，过长时截断，别让通知变成一堵墙。"""
-        site = str(item.get("site") or "未知站点")
+    def _failure_category(item: Dict[str, Any]) -> str:
+        """把原始失败原因归入稳定语义类别；未知业务错误保留原文。"""
         detail = str(item.get("message") or "").strip() or str(item.get("login") or "").strip()
-        # 失败原因只留一句，长了直接截断——通知里看到的够判断就行，细节看日志
-        limit = NOTIFY_REASON_LIMIT
+        detail = decode_entities(detail)
         for marker in ("；诊断：", "；标题", "；正文", "；片段"):
             if marker in detail:
                 detail = detail.split(marker, 1)[0]
                 break
-        if len(detail) > limit:
-            detail = detail[:limit].rstrip() + "…"
-        return decode_entities(f"{site}：{detail}") if detail else site
+        key = re.sub(r"\s+", "", detail).lower()
+        for label, pattern in _FAILURE_CATEGORY_RULES:
+            if re.search(pattern, key, re.IGNORECASE):
+                return label
+        if len(detail) > NOTIFY_REASON_LIMIT:
+            detail = detail[:NOTIFY_REASON_LIMIT].rstrip() + "…"
+        return detail or "未返回具体失败原因"
 
     def stop_service(self) -> None:
         """插件停用 / 重载时停止重试，并清理自有的「立即执行」调度器。"""

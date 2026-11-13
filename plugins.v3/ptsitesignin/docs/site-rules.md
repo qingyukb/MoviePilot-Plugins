@@ -121,6 +121,9 @@ Piggo（`piggo.me`）新版 SPA 已不再支持旧 API Key。其签到入口固�
 - `tjupt.py`：豆瓣海报比对
 - `htpt.py`：海棠PT 表单签到
 - `hdchina.py`：瓷器 CSRF 签到（保留站点刷新后的 Cookie）
+- `hdarea.py`：高清视界 API Key 优先，未配置 Key 时保留 Cookie 签到
+- `yema.py`：YemaPT API Key 登录检测；签到仍使用 Cookie + Altcha
+- `cola.py`：ColaPT 每日登录奖励与每周签到，使用 Cookie 会话和 CSRF
 - `hxpt.py`：好学 API 签到（home 状态 + flux_csrf + attendance/checkin）
 - `u2.py`：U2 showup 四选一签到（提交后回读确认）
 - `farm.py`：自由农场滑块处理
