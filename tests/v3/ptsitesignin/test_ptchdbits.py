@@ -266,21 +266,30 @@ class SiteSelectionTests(unittest.TestCase):
             self.assertIn("不在本次", activity[1])
             self.assertEqual(calls, [])
 
-    def test_key_only_site_does_not_issue_network_request(self):
+    def test_key_only_site_uses_generic_signin_but_not_login(self):
         for module in self.each_plugin():
             item = self.plugin(module)
             calls = []
             info = {"id": 12, "name": "Key站", "url": "https://key.example/",
                     "apikey": "api-key", "cookie": ""}
+
+            def fake_sign(site, rule, **kwargs):
+                calls.append(("sign", dict(rule)))
+                return module.SignResult("failed", "generic attempted")
+
             with mock.patch.object(module, "site_login", side_effect=lambda *a, **k: calls.append("login")), \
-                    mock.patch.object(module, "http_sign_auto", side_effect=lambda *a, **k: calls.append("sign")), \
+                    mock.patch.object(module, "http_sign_auto", side_effect=fake_sign), \
                     mock.patch.object(module, "read_activity", side_effect=lambda *a, **k: calls.append("activity")):
                 sign = item._sign_one(info, {}, None, run_id=7, allowed_site_ids={12})
                 login = item._login_one(info, run_id=7, allowed_site_ids={12})
             self.assertEqual(sign["status"], "failed")
+            self.assertIn("generic attempted", sign["message"])
             self.assertEqual(login["status"], "failed")
-            self.assertIn("API Key", sign["message"])
-            self.assertEqual(calls, [])
+            self.assertEqual([call[0] for call in calls], ["sign"])
+            generic_rule = calls[0][1]
+            self.assertEqual(generic_rule["auth"], "api_key")
+            self.assertEqual(generic_rule["api_key_header"], "Authorization")
+            self.assertEqual(generic_rule["api_key_prefix"], "Bearer ")
 
     def test_quiz_rule_skips_site_module_and_browser_fallback(self):
         for module in self.each_plugin():

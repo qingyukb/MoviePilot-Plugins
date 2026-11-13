@@ -2575,6 +2575,29 @@ class CaptchaFallbackRuleTests(unittest.TestCase):
                 self.assertEqual(rule["mode"], "open_page")
 
 
+class BrowserlessApiFallbackTests(unittest.TestCase):
+    def test_sign_api_fetches_with_key_in_browser_context(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                signer = core.BrowserlessSigner("https://example.test/bql", "token", timeout=30)
+                captured = {}
+
+                def fake_request(variables, operation, query, **kwargs):
+                    captured.update({"variables": dict(variables), "operation": operation})
+                    return {"response": {"value": json.dumps({
+                        "status": 200, "text": "{\"success\": true}", "url": "https://api.example.test/api/checkin"})}}
+
+                signer._request = fake_request
+                site = {"url": "https://api.example.test/", "apikey": "secret"}
+                rule = {"auth": "api_key", "engine": "http", "path": "/api/checkin",
+                        "method": "POST", "json": {}, "api_key_header": "Authorization",
+                        "api_key_prefix": "Bearer ", "success": r'"success"\s*:\s*true',
+                        "already": "already"}
+                result = signer.sign_api(site, rule, timeout=120)
+                self.assertEqual(result.status, "success", result.message)
+                self.assertEqual(captured["operation"], "BrowserlessApiFetch")
+                self.assertIn("Bearer secret", captured["variables"]["fetchScript"])
+
 class PlaywrightActivityTests(unittest.TestCase):
     """Piggo 的个人页需要浏览器登录态，不能直接 HTTP 读取。"""
 

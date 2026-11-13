@@ -593,6 +593,32 @@ def captcha_image_rule(html: str) -> Dict[str, Any]:
         rule["captcha_selector"] = "form img"
     return rule
 
+def generic_api_key_rule(site: Mapping[str, Any], base_rule: Mapping[str, Any]) -> Dict[str, Any]:
+    """为没有专用签到模块的纯 API Key 站点生成通用 HTTP 规则。
+
+    这是兼容路径：使用常见的 Authorization: Bearer 认证和签到入口，
+    只用于站点没有显式 API 规则、也没有 signin 模块的情况。
+    """
+    result = dict(base_rule)
+    path = str(result.get("path") or "").strip()
+    if not path or not any(word in path.lower() for word in
+                           ("attendance", "sign", "check", "login")):
+        path = DEFAULT_HTTP_PATH
+    result.update({
+        "auth": API_KEY_AUTH,
+        "engine": "http",
+        "method": str(result.get("method") or "GET").upper(),
+        "path": path,
+        "api_key_source": str(result.get("api_key_source") or "auto"),
+        "api_key_header": str(result.get("api_key_header") or "Authorization"),
+        "api_key_prefix": str(result.get("api_key_prefix") or "Bearer "),
+        "auto_fallback": False,
+        "success": result.get("success") or DEFAULT_SUCCESS_PATTERN,
+        "already": result.get("already") or DEFAULT_ALREADY_PATTERN,
+    })
+    return validate_rule(result)
+
+
 def fallback_rule(rule: Mapping[str, Any], challenge: str,
                   page_html: str = "") -> Dict[str, Any]:
     """由 HTTP 规则派生一份 Browserless 回退规则。
@@ -4748,6 +4774,7 @@ class BrowserlessPool:
         """所有 Token 合计可用的浏览器并发数。"""
         return len(self._request_slots) * self._token_concurrency
 
+
     def sign(self, site: Mapping[str, Any], rule: Mapping[str, Any]) -> SignResult:
         """按 Token 轮转并在各自并发槽内执行签到。"""
         if not self._signers:
@@ -4756,6 +4783,28 @@ class BrowserlessPool:
             start_index = self._next_index
             self._next_index = (self._next_index + 1) % len(self._signers)
         return self._sign_rotating(site, rule, start_index)
+
+    def sign_api(self, site: Mapping[str, Any], rule: Mapping[str, Any],
+                 timeout: int = 90) -> SignResult:
+        """按 Token 轮转执行 Browserless API Key 请求。"""
+        if not self._signers:
+            return SignResult("failed", "没有可用的 Browserless Token")
+        with self._index_lock:
+            start_index = self._next_index
+            self._next_index = (self._next_index + 1) % len(self._signers)
+        total = len(self._signers)
+        last: Optional[SignResult] = None
+        for offset in range(total):
+            index = (start_index + offset) % total
+            _, signer = self._signers[index]
+            with self._request_slots[index]:
+                result = signer.sign_api(site, rule, timeout=timeout)
+            if not _needs_token_switch(result):
+                with self._index_lock:
+                    self._index = index
+                return result
+            last = result
+        return last or SignResult("failed", "Browserless Token 全部不可用")
 
     def _sign_rotating(self, site: Mapping[str, Any], rule: Mapping[str, Any],
                        start_index: int) -> SignResult:
@@ -5140,6 +5189,101 @@ class BrowserlessSigner:
             (f"（{hint}）" if hint else ""),
             challenge="captcha",
         )
+
+    def sign_api(self, site: Mapping[str, Any], rule: Mapping[str, Any],
+                 timeout: int = 90) -> SignResult:
+        """在 Browserless 浏览器上下文里带 API Key 请求固定端点。
+
+        只在 HTTP / 本机 Playwright 检测到 Cloudflare / 验证码后由上层调用。
+        先在目标页面等待挑战并 solve，再从同一页面 fetch API，避免 cf_clearance
+        与 API Key 分散在不同会话里。
+        """
+        base_url = str(site.get("url") or "").rstrip("/")
+        if not base_url:
+            return SignResult("failed", "站点地址为空")
+        path = str(rule.get("path") or "").strip()
+        if not path:
+            return SignResult("failed", "API Key 规则未配置 path，无法执行 Browserless 回退")
+        try:
+            path = _validate_site_path(path, "API 签到 path")
+            secret = _api_key_value(site, rule)
+            target = target_url(base_url, path)
+            method = str(rule.get("method") or "GET").upper()
+            if method not in {"GET", "POST"}:
+                return SignResult("failed", "API Key 签到 method 只能是 GET 或 POST")
+            headers = _api_headers(site, rule)
+            form_data = rule.get("data") if isinstance(rule.get("data"), Mapping) else None
+            json_body = rule.get("json") if isinstance(rule.get("json"), Mapping) else None
+            if form_data is not None and json_body is not None:
+                return SignResult("failed", "API Key 规则的 data 与 json 不能同时配置")
+            body = None
+            if json_body is not None:
+                body = json.dumps(json_body, ensure_ascii=False, separators=(",", ":"))
+                headers["Content-Type"] = "application/json"
+            elif form_data is not None:
+                encoded = urllib.parse.urlencode(form_data, doseq=True)
+                if method == "GET":
+                    target += ("&" if "?" in target else "?") + encoded
+                else:
+                    body = encoded
+                    headers["Content-Type"] = "application/x-www-form-urlencoded"
+        except (TypeError, ValueError) as error:
+            return SignResult("failed", _redact_api_secret(error, ""))
+        fetch_script = """(async () => {
+          const url = %s;
+          const options = {
+            method: %s,
+            headers: %s,
+            credentials: "include",
+            cache: "no-store",
+            redirect: "follow"
+          };
+          const body = %s;
+          if (body !== null) options.body = body;
+          try {
+            const response = await fetch(url, options);
+            return JSON.stringify({status: response.status, text: await response.text(),
+                                   url: response.url});
+          } catch (error) {
+            return JSON.stringify({error: String(error)});
+          }
+        })()""" % (json.dumps(target), json.dumps(method),
+                  json.dumps(headers, ensure_ascii=False), json.dumps(body))
+        query = """mutation BrowserlessApiFetch($url:String! $beforeWait:Float! $solveTimeout:Float! $afterWait:Float! $fetchScript:String!) {
+          goto(url:$url,waitUntil:domContentLoaded){status}
+          waitBefore:waitForTimeout(time:$beforeWait){time}
+          solve:solve(timeout:$solveTimeout){found solved time}
+          waitAfter:waitForTimeout(time:$afterWait){time}
+          response:evaluate(content:$fetchScript){value}
+        }"""
+        variables = {
+            "url": target,
+            "beforeWait": cloudflare_wait_ms(rule),
+            "solveTimeout": solve_timeout_ms(rule),
+            "afterWait": 1500,
+            "fetchScript": fetch_script,
+        }
+        result = self._request(variables, "BrowserlessApiFetch", query,
+                               timeout=max(120, min(int(timeout), 300)))
+        if isinstance(result, SignResult):
+            return result
+        raw = str((result.get("response") or {}).get("value") or "")
+        if not raw:
+            return SignResult("failed", "Browserless API 请求未返回结果", challenge="cloudflare")
+        try:
+            payload = json.loads(raw)
+        except (TypeError, ValueError):
+            return SignResult("failed", "Browserless API 返回无法解析的响应", challenge="cloudflare")
+        if not isinstance(payload, Mapping):
+            return SignResult("failed", "Browserless API 返回结构无效", challenge="cloudflare")
+        if payload.get("error"):
+            return SignResult("failed", "Browserless API 请求失败", challenge="cloudflare")
+        try:
+            status_code = int(payload.get("status") or 0)
+        except (TypeError, ValueError):
+            status_code = 0
+        response_text = str(payload.get("text") or "")
+        return judge_api_http_response(response_text, status_code, rule, secret)
 
     def sign(self, site: Mapping[str, Any], rule: Mapping[str, Any]) -> SignResult:
         fallback_mode = str(rule.get("browserless_fallback_mode") or "").strip().lower()

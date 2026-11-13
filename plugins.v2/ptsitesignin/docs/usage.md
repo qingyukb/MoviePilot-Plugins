@@ -65,6 +65,8 @@ https://github.com/qingyukb/MoviePilot-Plugins
 - SUNNYPT、TTG、HDKylin、LuckPT 等站点
 
 未匹配到的站点会使用默认路径；如果默认路径不适用，请查看[自定义站点规则](site-rules.md)。
+纯 API Key 且没有专用签到模块的站点会使用通用 HTTP 签到（默认 `Authorization: Bearer <Key>`），不再提前跳过；特殊站点可用自定义规则覆盖 path、header 和前缀。
+API Key 通用签到遇到 Cloudflare / 验证码时，会使用 Browserless 在同一浏览器上下文内携带 API Key 重试。
 
 ## 图标说明
 

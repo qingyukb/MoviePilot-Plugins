@@ -168,6 +168,17 @@ class ApiKeyCoreTests(unittest.TestCase):
                 self.assertEqual(rule["engine"], "http")
                 self.assertFalse(rule["auto_fallback"])
 
+    def test_generic_api_key_rule_for_unconfigured_site(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                site = make_site(cookie="")
+                rule = core.generic_api_key_rule(site, {"path": "/", "success": "ok", "already": "done"})
+                self.assertEqual(rule["auth"], "api_key")
+                self.assertEqual(rule["engine"], "http")
+                self.assertEqual(rule["path"], "/attendance.php")
+                self.assertEqual(rule["api_key_header"], "Authorization")
+                self.assertEqual(rule["api_key_prefix"], "Bearer ")
+
     def test_cookie_site_keeps_cookie_mode_even_if_key_is_present(self):
         for core in CORES:
             with self.subTest(core=core.__name__):
@@ -547,29 +558,56 @@ class ApiKeyPluginTests(unittest.TestCase):
             setattr(plugin, key, value)
         return plugin
 
-    def test_only_key_site_without_rule_makes_no_request(self):
+    def test_only_key_site_without_rule_uses_generic_api(self):
         info = make_site(apikey=SECRET, cookie="")
         for module in self.page.PLUGINS:
             with self.subTest(plugin=module.__name__):
                 plugin = self._plugin(module)
-                with mock.patch.object(module, "http_sign_auto",
-                                       side_effect=AssertionError("不应联网")) as sign, \
+                with mock.patch.object(
+                        module, "http_sign_auto",
+                        return_value=module.SignResult("success", "签到成功")) as sign, \
                         mock.patch.object(module, "run_site_module",
                                           side_effect=AssertionError("不应加载模块")) as run:
                     row = plugin._sign_one(info, {}, None, run_id=1)
-                self.assertEqual(row["status"], "failed")
-                self.assertIn("未声明", row["message"])
-                sign.assert_not_called()
+                self.assertEqual(row["status"], "success")
+                self.assertTrue(sign.called)
+                generic_rule = sign.call_args.args[1]
+                self.assertEqual(generic_rule["auth"], "api_key")
+                self.assertEqual(generic_rule["api_key_header"], "Authorization")
+                self.assertEqual(generic_rule["api_key_prefix"], "Bearer ")
                 run.assert_not_called()
 
-    def test_api_key_rules_skip_browserless_initialization(self):
+    def test_api_key_rules_enable_browserless_fallback(self):
         info = make_site(cookie="c=1")
         rules = {"api.example.test": {
             "auth": "api_key", "path": "/api/checkin"}}
         for module in self.page.PLUGINS:
             with self.subTest(plugin=module.__name__):
                 plugin = self._plugin(module)
-                self.assertFalse(plugin._should_init_signer([info], rules))
+                self.assertTrue(plugin._should_init_signer([info], rules))
+
+    def test_api_key_challenge_uses_browserless_fallback(self):
+        info = make_site(apikey=SECRET, cookie="")
+        rule = {"auth": "api_key", "engine": "http", "path": "/api/checkin",
+                "success": "ok", "already": "already"}
+
+        class Signer:
+            def sign_api(self, site, rule, timeout=90):
+                return module.SignResult("success", "Browserless 签到成功")
+
+        for module in self.page.PLUGINS:
+            with self.subTest(plugin=module.__name__):
+                plugin = self._plugin(module)
+                with mock.patch.object(
+                        module, "http_sign_auto",
+                        return_value=module.SignResult("failed", "Cloudflare 验证",
+                                                       challenge="cloudflare")), \
+                        mock.patch.object(module, "playwright_sign", return_value=None):
+                    row = plugin._sign_api_key_one(
+                        info, rule, run_id=1, allowed_site_ids={1}, signer=Signer())
+                self.assertEqual(row["status"], "success", row.get("message"))
+                self.assertEqual(row["engine"], "browserless")
+                self.assertIn("Browserless", row["message"])
 
     def test_api_key_playwright_rule_uses_local_browser(self):
         info = make_site(apikey=SECRET, cookie="")

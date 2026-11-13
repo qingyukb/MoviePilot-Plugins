@@ -66,6 +66,7 @@ from .core import (
     discover_signin_target,
     fetch_page,
     http_check_api_key,
+    generic_api_key_rule,
     http_sign_auto,
     is_api_key_rule,
     playwright_sign,
@@ -222,7 +223,7 @@ class PTSiteSignIn(_PluginBase):
     plugin_name = "PT站点签到"
     plugin_desc = ("PT 站点自动签到，支持 Cookie 登录并读取最近动向；验证码或 Cloudflare 可按规则改用浏览器。")
     plugin_icon = "signin.png"
-    plugin_version = "3.1.0"
+    plugin_version = "3.1.1"
     plugin_author = "qingyukb"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "ptsignin_"
@@ -992,16 +993,21 @@ class PTSiteSignIn(_PluginBase):
 
         彩虹岛等 quiz 规则只走一次 HTTP 提交与回读确认，失败后禁止改用
         Browserless 或通用表单，避免重复答题。显式 API Key 规则只访问固定
-        端点，不初始化云端 Browserless；Playwright 由 core 在本机执行。
+        端点；遇到 Cloudflare / 验证码时可用 Browserless 在浏览器上下文内重试。
         """
         for info in infos:
-            if self._key_only_site(info):
-                continue
             try:
                 rule = resolve_rule(info, rules)
             except ValueError:
                 continue
             if is_api_key_rule(rule):
+                if rule.get("browserless_fallback", True):
+                    return True
+                continue
+            if self._key_only_site(info):
+                module = site_module_for(str(info.get("url") or ""))
+                if module is None or not hasattr(module, "signin"):
+                    return True
                 continue
             if str(rule.get("form_mode") or "").lower() == "quiz":
                 continue
@@ -1012,13 +1018,15 @@ class PTSiteSignIn(_PluginBase):
         return False
 
     def _sign_api_key_one(self, info: Dict[str, Any], rule: Dict[str, Any],
-                          run_id: Optional[int], allowed_site_ids: Optional[Set[int]]) -> Dict[str, Any]:
+                          run_id: Optional[int], allowed_site_ids: Optional[Set[int]],
+                          signer: Optional[Any] = None) -> Dict[str, Any]:
         """
         执行显式 API Key 签到。
 
-        仅访问规则声明的端点，不触发站点登录、站点模块或云端 Browserless 回退。
-        API Key 规则可选 HTTP 或本机 Playwright；Playwright 会先在同一出口 IP
-        的浏览器里通过 Cloudflare，再调用固定 API 端点。
+        仅访问规则声明的端点，不触发站点登录或站点模块。
+        API Key 规则可选 HTTP、本机 Playwright 或 Browserless 防护回退；
+        HTTP / 本机 Playwright 检测到 Cloudflare 或验证码时，可由 Browserless
+        在同一浏览器上下文内带上 API Key 重试。
 
         :param info: MoviePilot 站点信息
         :param rule: 已解析的 API Key 规则
@@ -1051,6 +1059,25 @@ class PTSiteSignIn(_PluginBase):
             # 异常文本可能带站点回显，不把异常内容写进日志或结果。
             logger.error(f"PT站点签到：{site_name} API Key 签到异常")
             outcome = SignResult("failed", "API Key 签到出现未预期错误")
+        if (outcome.status not in {"success", "already"} and outcome.challenge
+                and signer is not None and hasattr(signer, "sign_api")):
+            previous = outcome
+            fallback = signer.sign_api(
+                info, rule, timeout=max(120, self._timeout * 2))
+            if fallback.status in {"success", "already"}:
+                outcome = SignResult(
+                    fallback.status,
+                    f"{previous.message}；Browserless：{fallback.message}",
+                )
+                engine = "browserless"
+            else:
+                outcome = SignResult(
+                    fallback.status,
+                    f"{previous.message}；Browserless：{fallback.message}",
+                    challenge=fallback.challenge or previous.challenge,
+                    transient=fallback.transient,
+                )
+                engine = "browserless"
         if outcome.status not in {"success", "already"}:
             self._log_failure(site_name, outcome.message)
         activity_text, activity_source = (
@@ -1093,14 +1120,19 @@ class PTSiteSignIn(_PluginBase):
             return self._skip_result(info, reason)
 
         if is_api_key_rule(rule):
-            return self._sign_api_key_one(info, rule, run_id, allowed_site_ids)
+            return self._sign_api_key_one(info, rule, run_id, allowed_site_ids, signer=signer)
         module_for_site = site_module_for(str(info.get("url") or ""))
         if self._key_only_site(info) and (
                 module_for_site is None or not hasattr(module_for_site, "signin")):
-            reason = ("站点仅有 API Key / Token，但自定义规则未声明固定签到或验证端点，已跳过且未发起请求"
-                      "；请在自定义站点规则中补全 path / credential_check_path 等字段")
-            self._log_failure(site_name, reason)
-            return self._skip_result(info, reason)
+            # 没有专用签到模块的纯 Key 站点使用通用 HTTP 兼容逻辑；
+            # 有专用 signin 模块的站点仍优先走模块。
+            try:
+                generic_rule = generic_api_key_rule(info, rule)
+            except ValueError as error:
+                reason = f"通用 API Key 规则无效：{error}"
+                self._log_failure(site_name, reason)
+                return self._skip_result(info, reason)
+            return self._sign_api_key_one(info, generic_rule, run_id, allowed_site_ids, signer=signer)
 
         engine = "http"
         login_text = ""

@@ -3,7 +3,7 @@
     "name": "PT站点签到",
     "description": "PT 站点自动签到，支持 Cookie 登录并读取最近动向；验证码或 Cloudflare 可按规则改用浏览器。",
     "labels": "站点,签到",
-    "version": "2.1.0",
+    "version": "2.1.1",
     "icon": "https://raw.githubusercontent.com/qingyukb/MoviePilot-Plugins/main/icons/ptsignin.png",
     "author": "qingyukb",
     "level": 2,
@@ -12,6 +12,7 @@
     "v2": true,
     "system_version": ">=2.0.0,<3.0.0",
     "history": {
+      "v2.1.1": "纯 API Key 且没有专用签到模块的站点改用通用 HTTP 签到；遇到 Cloudflare 或验证码时自动使用 Browserless 重试。",
       "v2.1.0": "Piggo 签到页就绪等待延长至 45 秒；新增不可躺（Turnstile）、PlayLet（图片验证码）和高清视界 API Key/Cookie 签到规则；通知失败原因按语义分类；新增 YemaPT API Key 登录检测，以及 ColaPT 每日登录奖励 / 每周签到规则。",
       "v2.0.15": "Piggo 最近动向改用本机 Playwright 打开 /userdetails 读取，修复直接 HTTP 请求返回 403 的问题。",
       "v2.0.14": "猪猪使用账号密码登录；使用云端 Browserless 会被提示异地登录，建议自建 Browserless。",
