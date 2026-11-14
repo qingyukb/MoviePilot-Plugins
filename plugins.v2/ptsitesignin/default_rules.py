@@ -41,9 +41,12 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "captcha_input_selector": "form input[name='imagestring']",
         "submit_selector": "form input[type='submit'][value='立即签到']",
         "submit_method": "click",
-        "wait": 8000,
+        # 验证码识别或站点写库偶发延迟时，先等页面刷新并立即重试一轮；重试前会先检查
+        # 首轮是否已经实际签到，避免重复提交。
+        "wait": 12000,
         "verify_success_path": "/attendance.php",
-        "verify_wait": 8000,
+        "verify_wait": 15000,
+        "browserless_retry": 1,
         "success_keywords": ["签到成功", "簽到成功", "本次签到获得", "本次簽到獲得"],
         "already_keywords": ["今天已经签到", "今日已签到", "已经签到", "今天已签到",
                              "今日已簽到", "已經簽到"],
@@ -66,6 +69,9 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "success_json": {"field": "/state", "values": ["success"]},
         "success_keywords": ["查看簽到記錄", "簽到成功", "签到成功"],
         "already_keywords": ["查看簽到記錄", "已簽到", "已签到", "今日已签", "今日已簽"],
+        # AJAX 返回后首页状态可能稍晚刷新；先等待再核验，仍未确认则立即重试一轮。
+        "verify_wait": 10000,
+        "browserless_retry": 1,
         "strict_status_keywords": True,
     },
     "p.t-baozi.cc": {

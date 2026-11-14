@@ -5286,6 +5286,38 @@ class BrowserlessSigner:
         return judge_api_http_response(response_text, status_code, rule, secret)
 
     def sign(self, site: Mapping[str, Any], rule: Mapping[str, Any]) -> SignResult:
+        """执行签到；图片验证码结果未确认时按规则即时重试一次。
+
+        OCR 偶尔会识别错误，站点提交后也可能还没刷新出签到状态。此时直接报失败会
+        产生误报；再跑一轮时，预检若发现首轮其实已经签到会立即结束，不会重复提交。
+        """
+        try:
+            retry_limit = max(0, min(int(rule.get("browserless_retry") or 0), 2))
+        except (TypeError, ValueError):
+            retry_limit = 0
+        image_flow = str(rule.get("mode") or "") in {"image", "trigger_image"}
+        for attempt in range(retry_limit + 1):
+            result = self._sign_once(site, rule)
+            if result.status in {"success", "already"} or attempt >= retry_limit:
+                return result
+            message = str(result.message or "")
+            retryable = image_flow and (
+                result.challenge == "captcha"
+                or any(hint in message for hint in (
+                    "未显示签到成功状态",
+                    "未确认签到成功",
+                    "未识别到签到成功结果",
+                    "验证码未自动填入",
+                    "未能完成验证",
+                    "未找到图片验证码",
+                ))
+            )
+            if not retryable:
+                return result
+            time.sleep(RETRY_DELAY_SECONDS)
+        return result
+
+    def _sign_once(self, site: Mapping[str, Any], rule: Mapping[str, Any]) -> SignResult:
         fallback_mode = str(rule.get("browserless_fallback_mode") or "").strip().lower()
         if fallback_mode == "piggo":
             try:

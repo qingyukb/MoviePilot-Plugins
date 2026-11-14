@@ -659,6 +659,14 @@ class CoreRegressionTests(unittest.TestCase):
                 self.assertIn("imagestring", playlet["captcha_input_selector"])
                 self.assertEqual(playlet["submit_method"], "click")
                 self.assertEqual(playlet["verify_success_path"], "/attendance.php")
+                self.assertEqual(playlet["verify_wait"], 15000)
+                self.assertEqual(playlet["browserless_retry"], 1)
+
+                opencd = core.resolve_rule(
+                    {"url": "https://open.cd/", "cookie": "c=1"}, {})
+                self.assertEqual(opencd["verify_success_path"], "/")
+                self.assertEqual(opencd["verify_wait"], 10000)
+                self.assertEqual(opencd["browserless_retry"], 1)
 
     def test_waf_page_is_treated_as_challenge(self):
         # 雷池（SafeLine）WAF 安全检测页：按挑战处理，交给浏览器重试
@@ -1356,6 +1364,41 @@ class BrowserlessAudiencesTests(unittest.TestCase):
         self.assertIn("goto(url:$url", signer.queries[3])
         self.assertIn("beforeWait", signer.calls[3][1])
         self.assertIsNone(signer.endpoints[3])
+
+
+class BrowserlessImageRetryTests(unittest.TestCase):
+    """图片验证码结果未确认时，即时重试应先预检，避免重复提交。"""
+
+    def test_uncertain_verify_retries_with_preflight(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                site = {"url": "https://playlet.cc/", "cookie": "c=1", "ua": ""}
+                rule = dict(core.resolve_rule(site, {}))
+                pending = (
+                    "<html><head><title>PlayLet :: 签到 - Powered by NexusPHP</title></head>"
+                    "<body><form action='attendance.php' method='post'>"
+                    "<input name='imagestring'><input type='submit' value='立即签到'>"
+                    "</form></body></html>"
+                )
+                signed = (
+                    "<html><head><title>PlayLet :: 签到 - Powered by NexusPHP</title></head>"
+                    "<body><h2>签到成功</h2><p>本次签到获得 90 个魔力值</p></body></html>"
+                )
+                signer = make_stub_signer(core, [
+                    {"goto": {"status": 200}, "before": {"html": pending}},
+                    {"goto": {"status": 200},
+                     "solve": {"found": True, "solved": True},
+                     "submit": {"value": True}, "response": {},
+                     "before": {"html": pending}, "after": {"html": pending},
+                     "verify": {"status": 200}, "verifyPage": {"html": pending}},
+                    {"goto": {"status": 200}, "before": {"html": signed}},
+                ])
+                result = signer.sign(site, rule)
+                self.assertEqual(result.status, "success")
+                self.assertEqual([call[0] for call in signer.calls],
+                                 ["CheckInPreflight", "CheckIn", "CheckInPreflight"])
+                # 第二轮只读预检已经看到签到成功，不应再次提交。
+                self.assertEqual(sum(call[0] == "CheckIn" for call in signer.calls), 1)
 
 
 class BrowserlessRequestTests(unittest.TestCase):
