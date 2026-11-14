@@ -3,7 +3,7 @@
     "name": "PT站点签到",
     "description": "PT 站点自动签到，支持 Cookie 登录并读取最近动向；验证码或 Cloudflare 可按规则改用浏览器。",
     "labels": "站点,签到",
-    "version": "2.1.3",
+    "version": "2.1.4",
     "icon": "https://raw.githubusercontent.com/qingyukb/MoviePilot-Plugins/main/icons/ptsignin.png",
     "author": "qingyukb",
     "level": 2,
@@ -12,6 +12,7 @@
     "v2": true,
     "system_version": ">=2.0.0,<3.0.0",
     "history": {
+      "v2.1.4": "修复 Browserless 返回空响应或 goto=null 时触发 NoneType.get 异常的问题，改为返回明确的失败提示。",
       "v2.1.3": "新增可鲁可撸（our.kelu.one）NexusPHP 图片验证码签到规则；修复海胆之家 `value=已经打卡` 和好多油 HDU 数字返回未识别导致签到成功仍报失败的问题。",
       "v2.1.2": "修复皇后（OpenCD）和 PlayLet 图片验证码签到偶发误报：延长提交后状态刷新等待，结果未确认时先预检再即时重试一次。",
       "v2.1.1": "纯 API Key 且没有专用签到模块的站点改用通用 HTTP 签到；遇到 Cloudflare 或验证码时自动使用 Browserless 重试。",

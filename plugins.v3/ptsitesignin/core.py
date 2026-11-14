@@ -5361,8 +5361,18 @@ class BrowserlessSigner:
             # 挑战还没放行：不要把挑战页的 403 当成「打开失败」，交给下面等待更久的主流程
             pass
         else:
-            if not navigation_ok(mode, preflight.get("goto", {}).get("status"), preflight_html):
-                return SignResult("failed", "打开签到页失败")
+            preflight_goto = preflight.get("goto")
+            if isinstance(preflight_goto, Mapping):
+                if not navigation_ok(mode, preflight_goto.get("status"), preflight_html):
+                    return SignResult("failed", "打开签到页失败")
+            elif not preflight_html.strip():
+                # BrowserQL 步骤失败时可能返回 goto:null 且没有页面快照。这里必须显式
+                # 处理，不能依赖 dict.get 的默认值——显式的 null 不会被默认值替换。
+                return SignResult(
+                    "failed",
+                    "Browserless 签到页预检返回空导航状态，请重试或更换 Browserless 节点",
+                )
+            # goto 缺失但已经拿到非空 HTML 时继续按页面内容判定，避免误伤部分响应。
             if login_page(preflight_html):
                 # 预检就已经被踢到登录页：Cookie 失效时怎么验人机验证都没用，直接给结论
                 return SignResult("failed", login_required_message("签到页跳转到了登录页"))
@@ -5605,6 +5615,11 @@ class BrowserlessSigner:
                         closer()
                     except Exception:
                         pass
+        if not isinstance(value, Mapping):
+            return SignResult(
+                "failed",
+                f"Browserless {operation} 返回空响应或无有效数据，请重试或检查节点状态",
+            )
         errors = value.get("errors") or []
         data = value.get("data")
         if not isinstance(data, Mapping):

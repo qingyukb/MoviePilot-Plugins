@@ -1483,6 +1483,30 @@ class BrowserlessRequestTests(unittest.TestCase):
             self.signer._request({}, "CheckIn", "query")
         self.assertEqual(session.post.call_args.args[0], self.signer.endpoint)
 
+    def test_top_level_null_payload_returns_failure(self):
+        from unittest import mock
+
+        session = self._session(self._response(None))
+        with mock.patch.object(self.core, "new_http_session", return_value=session):
+            result = self.signer._request({}, "CheckInPreflight", "query")
+        self.assertIsInstance(result, self.core.SignResult)
+        self.assertEqual(result.status, "failed")
+        self.assertIn("空响应", result.message)
+        self.assertIn("CheckInPreflight", result.message)
+
+    def test_preflight_null_goto_returns_failure_without_exception(self):
+        core = self.core
+        signer = make_stub_signer(core, [
+            {"goto": None, "before": {"html": ""}},
+        ])
+        rule = {"engine": "browserless", "mode": "open_page",
+                "path": "/attendance.php"}
+        result = signer.sign(
+            {"url": "https://example.test/", "cookie": "a=1", "ua": ""}, rule)
+        self.assertEqual(result.status, "failed")
+        self.assertIn("空导航状态", result.message)
+        self.assertEqual([call[0] for call in signer.calls], ["CheckInPreflight"])
+
     def test_errors_without_any_data_still_fail(self):
         from unittest import mock
 
