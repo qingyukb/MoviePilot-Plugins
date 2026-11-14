@@ -1,0 +1,69 @@
+name: 未适配站点提交
+description: 提交 PT 站点签到适配请求，请提供域名、验证类型和签到页截图。
+title: "[站点适配] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢提交站点适配请求。请尽量填写完整信息，便于快速定位签到入口和验证类型。
+
+        **请勿提交 Cookie、账号密码、API Key、邀请码或个人资料截图。**
+
+  - type: input
+    id: site_domain
+    attributes:
+      label: 站点域名
+      description: 请填写完整站点地址或主域名。
+      placeholder: "https://example.com"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: verification_type
+    attributes:
+      label: 签到验证类型
+      description: 根据签到页面实际情况选择；不确定可选“无法判断”。
+      options:
+        - 图片验证码
+        - Cloudflare 人机验证
+        - Turnstile 人机验证
+        - 普通签到，无验证码
+        - 无法判断
+    validations:
+      required: true
+
+  - type: input
+    id: signin_page_url
+    attributes:
+      label: 签到页地址
+      description: 如果已知，请填写签到按钮或签到表单所在页面的完整地址。
+      placeholder: "https://example.com/attendance.php"
+    validations:
+      required: true
+
+  - type: textarea
+    id: signin_page_screenshot
+    attributes:
+      label: 签到页截图
+      description: 请把截图直接拖入此文本框。截图需包含签到按钮、验证码或 Cloudflare 人机验证区域。
+      placeholder: "将签到页截图拖拽到这里；截图前请遮住 Cookie、账号、邮箱等个人信息。"
+    validations:
+      required: true
+
+  - type: textarea
+    id: current_result
+    attributes:
+      label: 插件当前结果
+      description: 可选。请粘贴插件显示的失败提示或相关日志，不要包含敏感信息。
+      placeholder: "例如：未匹配到签到成功标志 / 未找到图片验证码"
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: privacy_confirmation
+    attributes:
+      label: 隐私确认
+      options:
+        - label: 我已确认没有提交 Cookie、密码、API Key、邀请码或其他敏感信息。
+          required: true
+
