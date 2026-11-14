@@ -9,6 +9,8 @@ body:
 
         **请勿提交 Cookie、账号密码、API Key、邀请码或个人资料截图。**
 
+        > 如果选择「Cloudflare 人机验证」，请加 QQ **961064865** 提供站点数据，方便快速适配。
+
   - type: input
     id: site_domain
     attributes:
@@ -25,8 +27,7 @@ body:
       description: 根据签到页面实际情况选择；不确定可选“无法判断”。
       options:
         - 图片验证码
-        - Cloudflare 人机验证
-        - Turnstile 人机验证
+        - Cloudflare 人机验证（含 Turnstile，需加 QQ 961064865）
         - 普通签到，无验证码
         - 无法判断
     validations:
@@ -66,4 +67,3 @@ body:
       options:
         - label: 我已确认没有提交 Cookie、密码、API Key、邀请码或其他敏感信息。
           required: true
-
