@@ -9,7 +9,7 @@ PT 站点自动签到，支持 V2 / V3。签到默认走 HTTP 直连，支持 Co
 主要功能：
 
 - HTTP 直连签到（NexusPHP），默认路径 404 时自动查找签到入口
-- 内置站点预设（观众、52PT、U2、瓷器、好学、RousiPro、Piggo、不可躺、PlayLet、高清视界、可乐PT、学校、憨憨、SUNNYPT、TTG、HDKylin、AGSVPT、LuckPT 等），未覆盖的站点可写自定义规则
+- 内置站点预设（观众、52PT、U2、瓷器、好学、RousiPro、Piggo、不可躺、PlayLet、可鲁可撸、海胆之家、好多油、高清视界、可乐PT、学校、憨憨、SUNNYPT、TTG、HDKylin、AGSVPT、LuckPT 等），未覆盖的站点可写自定义规则
 - 站点选择只显示站点名，不显示认证类型后缀
 - 普通 Cookie 站点遇验证码 / Cloudflare / Turnstile 时可按规则改用本机 Playwright 或 Browserless；Piggo 使用账号密码通过本机 Playwright 完成 `/calendar` 页面签到，云端 Browserless 会被提示异地登录，建议自建 Browserless
 - 详情页分「签到状态」「登录状态」，结果列显示奖励或失败原因

@@ -51,6 +51,25 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "already_keywords": ["今天已经签到", "今日已签到", "已经签到", "今天已签到",
                              "今日已簽到", "已經簽到"],
     },
+    "our.kelu.one": {
+        # Kelu（可鲁可撸）：NexusPHP 图片验证码签到。实测 Browserless 可自动识别并提交；
+        # 验证码偶尔识别错误，结果未确认时先预检再重试一次。
+        "engine": "browserless",
+        "mode": "image",
+        "path": "/attendance.php",
+        "preflight_path": "/attendance.php",
+        "captcha_selector": "form:has(input[name='imagestring']) img[alt='CAPTCHA']",
+        "captcha_input_selector": "form input[name='imagestring']",
+        "submit_selector": "form input[type='submit'][value='立即签到']",
+        "submit_method": "click",
+        "wait": 12000,
+        "verify_success_path": "/attendance.php",
+        "verify_wait": 15000,
+        "browserless_retry": 1,
+        "success_keywords": ["签到成功", "簽到成功", "本次签到获得", "本次簽到獲得"],
+        "already_keywords": ["签到已得", "簽到已得", "今天已经签到", "今日已签到",
+                             "已经签到", "今天已签到", "今日已簽到", "已經簽到"],
+    },
     "open.cd": {
         # 皇后：plugin_sign-in.php 的图片验证码表单，交给 Browserless 图片模式解。
         # 签到成功后页面会出现「[查看簽到記錄]」，验证码表单消失，按这个判成功。
@@ -243,10 +262,15 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
     "hdupt.com": {
         "engine": "http",
         "method": "GET",
-        "path": "/added.php?action=qiandao",
+        # 先读首页识别 yiqiandao；未签到时再由第二段请求签到接口。
+        "path": "/index.php",
+        "signin_path": "/added.php?action=qiandao",
+        "signin_method": "GET",
+        # 实测签到接口返回 ".23" 这类纯数字结果；旧文案“本次签到获得魅力”已不再出现。
+        "success": r"^\s*\.?\s*\d+(?:\.\d+)?\s*$",
         "success_keywords": ["本次签到获得魅力"],
-        # 已签到时首页会把这个 span 打出来
-        "already": "<span[^>]*id=\"yiqiandao\"",
+        # 已签到时首页会输出 <span id="yiqiandao">。
+        "already_html": r'<span\b(?=[^>]*\bid=["\']yiqiandao["\'])[^>]*>',
     },
     # ---- PTT（pttime.org）：attendance.php 直接签 ----
     "pttime.org": {
@@ -285,6 +309,9 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "signin_path": "/signin.php",
         "signin_method": "GET",
         "signin_headers": {"X-Requested-With": "XMLHttpRequest"},
+        # 签到成功后按钮会变成 disabled 的 <input value="已经打卡">；属性值不会出现在
+        # 可见正文里，显式按 HTML 再匹配一次。
+        "already_html": r'<input\b(?=[^>]*\bvalue=["\']已经打卡["\'])[^>]*>',
         "success_keywords": ["已经打卡", "已打卡", "打卡成功", "签到成功"],
     },
     # ---- HDChina（hdchina.org）：首页取 x-csrf，POST plugin_sign-in.php?cmd=signin ----

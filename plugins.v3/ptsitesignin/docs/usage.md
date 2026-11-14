@@ -48,6 +48,9 @@ https://github.com/qingyukb/MoviePilot-Plugins
 - 观众：Turnstile
 - 不可躺（tangpt.top）：NexusPHP 页内 Turnstile，Browserless 完成验证后提交
 - PlayLet（playlet.cc）：NexusPHP 图片验证码签到，Browserless 自动识别并提交
+- 可鲁可撸（our.kelu.one）：NexusPHP 图片验证码签到，Browserless 自动识别，未确认时先预检再重试一次
+- 海胆之家（haidan.video）：`signin.php` 签到，按首页 `value="已经打卡"` 确认结果
+- 好多油/HDU（pt.hdupt.com、pt.upxin.net）：`added.php?action=qiandao` 返回数字即签到成功，`yiqiandao` 标记表示今日已签
 - 高清视界（hdarea.club）：配置 API Key 时使用官方 `POST /api/v1/user/signin`；未配置 Key 时保留 `sign_in.php` Cookie 签到；API 失败不回退 Cookie。
 - YemaPT（yemapt.org）：API Key 仅用于 openApi 登录检测；签到仍需要 Cookie 完成 Altcha 验证。
 - ColaPT（colapt.com）：使用网页 Cookie 会话领取每日登录奖励，并执行每周一次的可乐签到；API Key 仅有上传/兼容 scope，不能代替用户签到。

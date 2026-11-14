@@ -308,6 +308,41 @@ class LoginCoreTests(unittest.TestCase):
                 self.assertEqual(result.status, "failed")
                 self.assertIn("最近动向", result.message)
 
+    def test_hdupt_numeric_two_step_signin(self):
+        # 好多油/HDU：首页未签到，第二段接口返回 ".23" 数字结果即签到成功
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                session = FakeSession({
+                    "index.php": lambda s, u: FakeResponse(
+                        u, '<html><body><a href="logout.php">退出</a>签到</body></html>'),
+                    "added.php?action=qiandao": lambda s, u: FakeResponse(u, ".23"),
+                })
+                rule = core.resolve_rule(
+                    {"url": "https://pt.hdupt.com/", "cookie": "c=1"}, {})
+                with mock.patch.dict(sys.modules, {"requests": fake_requests(session)}):
+                    result = core.http_sign_auto(
+                        {"url": "https://pt.hdupt.com/", "cookie": "c=1", "ua": ""}, rule)
+                self.assertEqual(result.status, "success", result.message)
+                self.assertTrue(any("added.php?action=qiandao" in call[1]
+                                    for call in session.calls), session.calls)
+
+    def test_hdupt_already_marker_short_circuits(self):
+        # 首页已出现 yiqiandao 时直接判今日已签到，不再请求签到接口
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                session = FakeSession({
+                    "index.php": lambda s, u: FakeResponse(
+                        u, '<html><body><span id="yiqiandao">今日已签到</span></body></html>'),
+                })
+                rule = core.resolve_rule(
+                    {"url": "https://pt.upxin.net/", "cookie": "c=1"}, {})
+                with mock.patch.dict(sys.modules, {"requests": fake_requests(session)}):
+                    result = core.http_sign_auto(
+                        {"url": "https://pt.upxin.net/", "cookie": "c=1", "ua": ""}, rule)
+                self.assertEqual(result.status, "already", result.message)
+                self.assertFalse(any("added.php?action=qiandao" in call[1]
+                                     for call in session.calls), session.calls)
+
     def test_http_sign_auto_posts_form_then_confirms(self):
         # 签到页只有表单按钮（GET 判定不出结果）→ 按表单 POST → 回读签到页看到已签到
         for core in CORES:

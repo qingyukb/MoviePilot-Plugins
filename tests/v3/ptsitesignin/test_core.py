@@ -668,6 +668,21 @@ class CoreRegressionTests(unittest.TestCase):
                 self.assertEqual(opencd["verify_wait"], 10000)
                 self.assertEqual(opencd["browserless_retry"], 1)
 
+                kelu = core.resolve_rule(
+                    {"url": "https://our.kelu.one/", "cookie": "c=1"}, {})
+                self.assertEqual(kelu["engine"], "browserless")
+                self.assertEqual(kelu["mode"], "image")
+                self.assertEqual(kelu["path"], "/attendance.php")
+                self.assertIn("imagestring", kelu["captcha_input_selector"])
+                self.assertEqual(kelu["verify_wait"], 15000)
+                self.assertEqual(kelu["browserless_retry"], 1)
+                signed = (
+                    "<html><head><title>Kelu :: 签到 - Powered by NexusPHP</title></head>"
+                    "<body>[签到已得145, 补签卡: 0]<h2>签到成功</h2>"
+                    "<p>本次签到获得 145 个魔力值</p></body></html>"
+                )
+                self.assertEqual(core.classify(signed, kelu).status, "success")
+
     def test_waf_page_is_treated_as_challenge(self):
         # 雷池（SafeLine）WAF 安全检测页：按挑战处理，交给浏览器重试
         waf = ("<html><head><title>安全检测</title></head><body>正在进行安全检测"
@@ -2162,6 +2177,45 @@ class PlaywrightPathsTests(unittest.TestCase):
                 self.assertEqual(core.playwright_paths({"retry_paths": ["/x"]}),
                                  [core.DEFAULT_HTTP_PATH, "/x"])
                 self.assertEqual(core.playwright_paths({}), [core.DEFAULT_HTTP_PATH])
+
+class HaidanHduptRecognitionTests(unittest.TestCase):
+    """海胆之家和好多油（HDU）签到成功后的真实标记。"""
+
+    def test_haidan_input_value_is_already_signed(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                rule = core.resolve_rule(
+                    {"url": "https://www.haidan.video/", "cookie": "c=1"}, {})
+                result = core.judge_http(
+                    '<html><body><input type="submit" disabled value="已经打卡" />'
+                    "</body></html>", rule)
+                self.assertIn(result.status, {"success", "already"})
+
+    def test_hdupt_numeric_success_and_html_already_marker(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                rule = core.resolve_rule(
+                    {"url": "https://pt.hdupt.com/", "cookie": "c=1"}, {})
+                self.assertEqual(rule["path"], "/index.php")
+                self.assertEqual(rule["signin_path"], "/added.php?action=qiandao")
+                self.assertEqual(rule["signin_method"], "GET")
+                success = core.judge_http(".23", rule)
+                self.assertEqual(success.status, "success")
+                already = core.judge_http(
+                    '<html><body><span id="yiqiandao">今日已签到</span></body></html>',
+                    rule)
+                self.assertEqual(already.status, "already")
+
+    def test_hdupt_upxin_alias(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                original = core.resolve_rule(
+                    {"url": "https://pt.hdupt.com/", "cookie": "c=1"}, {})
+                alias = core.resolve_rule(
+                    {"url": "https://pt.upxin.net/", "cookie": "c=1"}, {})
+                self.assertEqual(alias["path"], original["path"])
+                self.assertEqual(alias["success"], original["success"])
+
 
 class DomainAliasTests(unittest.TestCase):
     """站点换域名：通过别名映射沿用原规则（杜比 hddolby.com → uhddolby.com）。"""

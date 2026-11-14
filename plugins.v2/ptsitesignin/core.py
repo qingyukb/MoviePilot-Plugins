@@ -387,6 +387,7 @@ def parse_rules(raw: Any) -> Dict[str, Dict[str, Any]]:
 # 实测 2026-10：hddolby.com 已无法访问（URLError），新域名 www.uhddolby.com 正常。
 DOMAIN_ALIASES = {
     "uhddolby.com": "hddolby.com",      # 高清杜比换域名
+    "upxin.net": "hdupt.com",           # 好多油（HDU）备用域名
 }
 
 
@@ -2714,10 +2715,15 @@ def judge_http(content: str, rule: Mapping[str, Any]) -> SignResult:
         return SignResult("already", f"今日已签到（{bonus}）" if bonus else "今日已签到")
     # 规则里写了关键词时（浏览器引擎用的那套），HTTP 判定也认，免得同一个预设两种引擎结论不同
     lower_visible = visible.lower()
-    if any(str(word).lower() in lower_visible for word in (rule.get("success_keywords") or [])):
+    # 控件文字单独取 input.value / button 文案。海胆之家的「已经打卡」写在 disabled
+    # input 的 value 属性里，去标签后的可见正文看不到，必须同时检查控件文字。
+    lower_control = control_text(text).lower()
+    if any(str(word).lower() in lower_visible or str(word).lower() in lower_control
+           for word in (rule.get("success_keywords") or [])):
         bonus = extract_bonus(text, rule)
         return SignResult("success", f"签到成功（{bonus}）" if bonus else "签到成功")
-    if any(str(word).lower() in lower_visible for word in (rule.get("already_keywords") or [])):
+    if any(str(word).lower() in lower_visible or str(word).lower() in lower_control
+           for word in (rule.get("already_keywords") or [])):
         bonus = extract_bonus(text, rule)
         return SignResult("already", f"今日已签到（{bonus}）" if bonus else "今日已签到")
     already_html = str(rule.get("already_html") or "")
