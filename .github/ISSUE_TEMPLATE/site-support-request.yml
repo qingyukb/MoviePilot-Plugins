@@ -1,5 +1,5 @@
 name: 未适配站点提交
-description: 提交 PT 站点签到适配请求，请提供域名、验证类型和签到页截图。
+description: 提交 PT 站点签到适配请求，请提供域名、认证方式、验证类型和签到页截图。
 title: "[站点适配] "
 body:
   - type: markdown
@@ -9,7 +9,7 @@ body:
 
         **请勿提交 Cookie、账号密码、API Key、邀请码或个人资料截图。**
 
-        > 如果选择「Cloudflare 人机验证」，请加 QQ **961064865** 提供站点数据，方便快速适配。
+        > 如果选择「图片验证码」「Cloudflare 人机验证」或「无法判断」，请加 QQ 群 **1136349681** 反馈，方便快速适配。
 
   - type: input
     id: site_domain
@@ -21,13 +21,25 @@ body:
       required: true
 
   - type: dropdown
+    id: auth_type
+    attributes:
+      label: 站点认证方式
+      description: 请选择站点签到使用的是 API Key 还是 Cookie。
+      options:
+        - Cookie
+        - API Key
+        - 不确定
+    validations:
+      required: true
+
+  - type: dropdown
     id: verification_type
     attributes:
       label: 签到验证类型
       description: 根据签到页面实际情况选择；不确定可选“无法判断”。
       options:
         - 图片验证码
-        - Cloudflare 人机验证（含 Turnstile，需加 QQ 961064865）
+        - Cloudflare 人机验证（含 Turnstile）
         - 普通签到，无验证码
         - 无法判断
     validations:
