@@ -84,7 +84,9 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "captcha_selector": "#frmSignin img",
         "captcha_input_selector": "#imagestring",
         "submit_selector": "#ok",
-        "submit_method": "click",
+        # 顶层打开签到页时按钮会调用不存在的 parent.do_signin，原生点击不会提交；
+        # 直接按表单 action 发 AJAX，并从 {"state":"success"} 确认结果。
+        "submit_method": "ajax",
         "success_json": {"field": "/state", "values": ["success"]},
         "success_keywords": ["查看簽到記錄", "簽到成功", "签到成功"],
         "already_keywords": ["查看簽到記錄", "已簽到", "已签到", "今日已签", "今日已簽"],

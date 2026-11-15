@@ -1328,7 +1328,7 @@ def discover_signin_target(html: str, base_url: str) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------- 本地浏览器引擎
-# 用 MoviePilot 自带的 PlaywrightHelper 在**本机**开浏览器签到：
+# 用宿主管理的浏览器上下文在**本机**签到：
 # IP 就是运营商/家里的 IP，站点不会判「异地登录」，也不消耗 Browserless 额度。
 _PAGE_CLICK_JS = """
 (args) => {
@@ -1702,8 +1702,7 @@ def playwright_api_fetch(site: Mapping[str, Any], rule: Mapping[str, Any],
     请求固定端点。这样 API Key 只在浏览器会话里发送，出口 IP 与 MoviePilot
     一致，也不会经过云端 Browserless 的机房 IP。
     """
-    PlaywrightHelper = _load_playwright_helper()
-    if PlaywrightHelper is None or not hasattr(PlaywrightHelper, "action"):
+    if not playwright_available():
         return None
 
     secret = ""
@@ -1793,12 +1792,9 @@ def playwright_api_fetch(site: Mapping[str, Any], rule: Mapping[str, Any],
         return result
 
     try:
-        outcome = PlaywrightHelper().action(url="about:blank", callback=callback,
-                                            cookies=None,
-                                            ua=str(site.get("ua") or "").strip() or None,
-                                            proxies=dict(proxies) if proxies else None,
-                                            headless=True,
-                                            timeout=max(60, int(timeout)))
+        outcome = _run_browser_callback(
+            callback, cookies="", ua=str(site.get("ua") or "").strip(),
+            proxies=proxies, timeout=timeout)
     except Exception as error:
         return {"error": _redact_api_secret(f"本地浏览器 API 请求异常：{error}", secret)}
     if not result and isinstance(outcome, Mapping):
@@ -1909,23 +1905,72 @@ def _prepare_browser_auth(page: Any, site: Mapping[str, Any],
     return SignResult("success", ""), changed
 
 
-def _load_playwright_helper():
-    """取宿主浏览器助手：V3 优先稳定 SDK，V2 回退旧路径；都没有返回 None。"""
-    try:  # MoviePilot V3
-        from app.sdk.browser import PlaywrightHelper
-        return PlaywrightHelper
-    except ImportError:
-        pass
-    try:  # MoviePilot V2
-        from app.helper.browser import PlaywrightHelper
-        return PlaywrightHelper
-    except ImportError:
+def _load_browser_launcher():
+    """返回 V3 稳定浏览器上下文启动器；旧版宿主返回 None。"""
+    try:
+        from app.sdk.browser import launch_browser_context
+        return launch_browser_context
+    except (ImportError, AttributeError):
         return None
 
 
+def _load_playwright_helper():
+    """旧版 V2 宿主的浏览器助手兼容入口。"""
+    try:
+        from app.helper.browser import PlaywrightHelper
+        return PlaywrightHelper
+    except (ImportError, AttributeError):
+        return None
+
+
+def _run_browser_callback(callback, cookies: str = "", ua: str = "",
+                          proxies: Optional[Dict[str, str]] = None,
+                          timeout: int = 90):
+    """在宿主管理的浏览器上下文中执行页面回调。
+
+    V3 使用 ``app.sdk.browser.launch_browser_context``，由宿主负责浏览器进程和资源回收；
+    仅旧版 V2 宿主退回 PlaywrightHelper。callback 的返回值原样透传。
+    """
+    launcher = _load_browser_launcher()
+    if callable(launcher):
+        context = None
+        page = None
+        launch_kwargs: Dict[str, Any] = {"headless": True}
+        if ua:
+            launch_kwargs["user_agent"] = ua
+        if proxies:
+            launch_kwargs["proxy"] = dict(proxies)
+        try:
+            context = launcher(**launch_kwargs)
+            if cookies:
+                setter = getattr(context, "set_extra_http_headers", None)
+                if callable(setter):
+                    setter({"Cookie": cookies})
+            page = context.new_page()
+            return callback(page)
+        finally:
+            if page is not None:
+                try:
+                    page.close()
+                except Exception:
+                    pass
+            if context is not None:
+                try:
+                    context.close()
+                except Exception:
+                    pass
+    helper = _load_playwright_helper()
+    if helper is None or not hasattr(helper, "action"):
+        return None
+    return helper().action(
+        url="about:blank", callback=callback, cookies=cookies or None,
+        ua=ua or None, proxies=dict(proxies) if proxies else None,
+        headless=True, timeout=max(60, int(timeout)))
+
+
 def playwright_available() -> bool:
-    """MoviePilot 是否带 PlaywrightHelper（官方镜像默认带）。"""
-    return _load_playwright_helper() is not None
+    """宿主是否提供稳定浏览器上下文或旧版 PlaywrightHelper。"""
+    return callable(_load_browser_launcher()) or _load_playwright_helper() is not None
 
 
 def cookie_list_for_context(cookie: str, url: str) -> List[Dict[str, Any]]:
@@ -1975,14 +2020,9 @@ def playwright_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: i
 
     普通规则走页面按钮流程；API Key 规则先在浏览器里通过 Cloudflare/WAF，
     再在同一个页面上下文内调用固定 API 端点。返回 None 表示这台机器没有
-    PlaywrightHelper（交回上层处理）。
+    浏览器上下文（交回上层处理）。
     """
-    PlaywrightHelper = _load_playwright_helper()
-    if PlaywrightHelper is None:
-        return None
-    # 老版本 MoviePilot 的 PlaywrightHelper 只有 get_page_source，没有 action：
-    # 这种情况返回 None，让上层退回 Browserless，而不是硬报错
-    if not hasattr(PlaywrightHelper, "action"):
+    if not playwright_available():
         return None
 
     base_url = str(site.get("url") or "").rstrip("/")
@@ -2357,12 +2397,9 @@ def playwright_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: i
         return last
 
     try:
-        outcome = PlaywrightHelper().action(url="about:blank", callback=callback,
-                                            cookies=None if cookie_mode == "browser" else cookie,
-                                            ua=str(site.get("ua") or "").strip() or None,
-                                            proxies=dict(proxies) if proxies else None,
-                                            headless=True,
-                                            timeout=max(60, int(timeout)))
+        outcome = _run_browser_callback(
+            callback, cookies="" if cookie_mode == "browser" else cookie,
+            ua=str(site.get("ua") or "").strip(), proxies=proxies, timeout=timeout)
     except Exception as error:
         return SignResult("failed", f"本地浏览器签到异常：{error}")
     if not outcome:
@@ -3419,10 +3456,9 @@ def playwright_read_activity(site: Mapping[str, Any], rule: Mapping[str, Any],
     部分 SPA（例如猪猪）的用户资料页必须经过站点自身的前端登录态和
     Cloudflare / WAF 校验，直接 HTTP 请求只会得到 403。这里复用签到引擎的
     浏览器登录流程，打开 activity_path 后从页面正文提取最近动向。
-    返回 None 表示当前 MoviePilot 没有可用的 PlaywrightHelper。
+    返回 None 表示当前 MoviePilot 没有可用的浏览器上下文。
     """
-    PlaywrightHelper = _load_playwright_helper()
-    if PlaywrightHelper is None or not hasattr(PlaywrightHelper, "action"):
+    if not playwright_available():
         return None
 
     base_url = str(site.get("url") or "").rstrip("/")
@@ -3526,12 +3562,9 @@ def playwright_read_activity(site: Mapping[str, Any], rule: Mapping[str, Any],
                 "message": f"已打开 {path}，但没有找到最近动向"}
 
     try:
-        outcome = PlaywrightHelper().action(
-            url="about:blank", callback=callback,
-            cookies=None if cookie_mode == "browser" else cookie,
-            ua=str(site.get("ua") or "").strip() or None,
-            proxies=dict(proxies) if proxies else None,
-            headless=True, timeout=max(60, int(timeout)))
+        outcome = _run_browser_callback(
+            callback, cookies="" if cookie_mode == "browser" else cookie,
+            ua=str(site.get("ua") or "").strip(), proxies=proxies, timeout=timeout)
     except Exception:
         return ActivityResult("failed", "本机浏览器读取最近动向出现异常")
 

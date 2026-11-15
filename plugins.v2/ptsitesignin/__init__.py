@@ -25,10 +25,9 @@ import os
 import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
-from threading import Event, Lock, Thread, Timer
+from threading import Event, Lock, Timer
 from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
 
-from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 try:  # MoviePilot V3 稳定 SDK
     from app.sdk.plugin import _PluginBase  # type: ignore[no-redef]
@@ -182,7 +181,6 @@ PAGE_STYLE = (
     ".ptsignin-table td{vertical-align:middle;padding:10px 14px}"
     ".ptsignin-table td:nth-child(2){white-space:nowrap}"
     ".ptsignin-site{font-weight:600;line-height:1.25}"
-    ".ptsignin-caption{font-size:.72rem;color:rgba(var(--v-theme-on-surface),.55);margin-top:2px}"
     # 结果列：时间用等宽数字，超长诊断最多 3 行
     ".ptsignin-result{font-size:.84rem;line-height:1.45;word-break:break-word;"
     "font-variant-numeric:tabular-nums;display:-webkit-box;-webkit-line-clamp:3;"
@@ -213,8 +211,6 @@ PAGE_STYLE = (
     ".ptsignin-table-wrap{display:none;overflow-x:auto;-webkit-overflow-scrolling:touch}"
     ".ptsignin-list{display:block}"
     ".ptsignin-site{font-size:.92rem;line-height:1.3}"
-    ".ptsignin-caption{margin-top:1px;font-size:.68rem;white-space:nowrap;overflow:hidden;"
-    "text-overflow:ellipsis}"
     "}"
 )
 
@@ -223,7 +219,7 @@ class PTSiteSignIn(_PluginBase):
     plugin_name = "PT站点签到"
     plugin_desc = ("PT 站点自动签到，支持 Cookie 登录并读取最近动向；验证码或 Cloudflare 可按规则改用浏览器。")
     plugin_icon = "signin.png"
-    plugin_version = "2.1.6"
+    plugin_version = "2.1.7"
     plugin_author = "qingyukb"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "ptsignin_"
@@ -251,10 +247,10 @@ class PTSiteSignIn(_PluginBase):
     _site_rules = ""
     _read_activity = True
     _run_once = False
-    _run_once_scheduler: Optional[BackgroundScheduler] = None
+    _run_once_timer: Optional[Timer] = None
 
     # 进程级互斥：Cron 与「保存后立即执行一次」可能同时触发，避免同一轮重复签到 /
-    # 并发覆盖 latest、history 数据。失败重试由后台 Timer 延迟执行，不再阻塞执行线程。
+    # 并发覆盖 latest、history 数据。失败重试由宿主调度器或后台 Timer 延迟执行，不再阻塞执行线程。
     _run_lock: Lock = Lock()
     _history_days = 30
     _stop_event: Optional[Event] = None
@@ -265,6 +261,7 @@ class PTSiteSignIn(_PluginBase):
         self.stop_service()
         self._stop_event = Event()
         self._retry_timer = None
+        self._run_once_timer = None
         # 新生命周期会让上一轮尚未触发的重试全部失效。
         self._run_id = getattr(self, "_run_id", 0) + 1
         config = config or {}
@@ -288,7 +285,7 @@ class PTSiteSignIn(_PluginBase):
         self._browserless_token4 = str(config.get("browserless_token4") or "").strip()
         self._browserless_timeout = max(15, min(int(config.get("browserless_timeout") or 100), 300))
         self._site_rules = str(config.get("site_rules") or "")
-        self._read_activity = bool(config.get("read_activity", True))
+        self._read_activity = True
         run_once = bool(config.get("run_once", False))
         self._run_once = run_once
         if clear_today:
@@ -310,29 +307,24 @@ class PTSiteSignIn(_PluginBase):
         add_once = getattr(scheduler_sdk, "add_plugin_once_job", None) if scheduler_sdk else None
         if callable(add_once):
             try:
-                add_once(self.__class__.__name__, "signin_once", self._run_once_task,
-                         "PT站点签到 立即执行一次", delay_seconds=3)
-                logger.info("PT站点签到：保存后立即执行一次，将在 3 秒后于后台开始")
-                return
+                accepted = add_once(self.__class__.__name__, "signin_once", self._run_once_task,
+                                    "PT站点签到 立即执行一次", delay_seconds=3)
+                if accepted is not False:
+                    logger.info("PT站点签到：保存后立即执行一次，将在 3 秒后于后台开始")
+                    return
+                logger.warning("PT站点签到：宿主调度器未接受立即执行任务，改用本地 Timer")
             except Exception:
-                logger.exception("PT站点签到：登记一次性任务失败，改用本地调度器")
-        try:
-            scheduler = BackgroundScheduler()
-            scheduler.add_job(func=self._run_once_task, trigger="date",
-                              run_date=datetime.now() + timedelta(seconds=3),
-                              name="PT站点签到 立即执行一次")
-            scheduler.start()
-        except Exception:
-            logger.exception("PT站点签到：后台调度器启动失败，改用线程执行")
-            Thread(target=self._run_once_task, daemon=True).start()
-            return
-        self._run_once_scheduler = scheduler
+                logger.exception("PT站点签到：登记一次性任务失败，改用本地 Timer")
+        timer = Timer(3, self._run_once_task)
+        timer.daemon = True
+        self._run_once_timer = timer
+        timer.start()
         logger.info("PT站点签到：保存后立即执行一次，将在 3 秒后于后台开始")
 
     def _run_once_task(self) -> None:
-        """后台任务：只跑一遍签到（跳过失败重试），同样跳过今天已签到的站点。"""
+        """后台任务：跑一遍签到；失败站点按配置执行后台重试，并跳过今天已签到的站点。"""
         try:
-            self.run_sign_in(allow_retry=False)
+            self.run_sign_in()
         except Exception:
             logger.exception("PT站点签到：保存后立即执行失败")
 
@@ -374,7 +366,6 @@ class PTSiteSignIn(_PluginBase):
             "browserless_token4": self._browserless_token4,
             "browserless_timeout": self._browserless_timeout,
             "site_rules": self._site_rules,
-            "read_activity": self._read_activity,
             "run_once": self._run_once,
         }
 
@@ -459,7 +450,7 @@ class PTSiteSignIn(_PluginBase):
         except ValueError:
             logger.error(f"PT站点签到：Cron 表达式无效：{self._cron}")
             return []
-        return [{"id": "PTSiteSignIn.Run", "name": "PT站点签到", "trigger": trigger,
+        return [{"id": f"{self.__class__.__name__}.Run", "name": "PT站点签到", "trigger": trigger,
                  "func": self.run_sign_in, "kwargs": {}}]
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
@@ -485,88 +476,76 @@ class PTSiteSignIn(_PluginBase):
                     "content": [{"component": kind,
                                  "props": {"model": model, "label": label, **props}}]}
 
-        def hint_field(kind: str, model: str, label: str, hint: str, md: int = 6,
-                       **props: Any) -> Dict[str, Any]:
-            """带常驻提示的控件。"""
-            return field(kind, model, label, md, hint=hint, **{"persistent-hint": True, **props})
-
         def row(*cols: Dict[str, Any]) -> Dict[str, Any]:
             return {"component": "VRow", "content": list(cols)}
+
+        def section(title: str, icon: str) -> Dict[str, Any]:
+            """紧凑分区标题，避免整页表单挤成一片。"""
+            return {"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12},
+                    "content": [{"component": "VChip",
+                                 "props": {"size": "small", "variant": "tonal", "color": "primary",
+                                           "prepend-icon": icon}, "text": title}]}]}
 
         browserless_alert = {
             "component": "VAlert",
             "props": {"type": "info", "variant": "tonal", "density": "compact", "class": "mb-2"},
             "content": [
-                {"component": "span", "text": "需要图片验证码 / Cloudflare / Turnstile 的站点（内置预设已声明）"
-                                              "自动走 Browserless，其余站点走 HTTP 直连、不消耗额度。没有 Token 请先 "},
+                {"component": "span", "text": "验证码 / Cloudflare 站点自动使用 Browserless，其余站点直连。"},
                 {"component": "a", "props": {"href": "https://www.browserless.io/signup/email?plan=free",
                                              "target": "_blank", "rel": "noopener noreferrer"},
-                 "text": "注册 Browserless"},
-                {"component": "span", "text": "，再到 "},
+                 "text": "注册"},
+                {"component": "span", "text": " · "},
                 {"component": "a", "props": {"href": "https://browserless.io/account/",
                                              "target": "_blank", "rel": "noopener noreferrer"},
-                 "text": "账户控制台"},
-                {"component": "span", "text": " 复制 API Key。"},
+                 "text": "控制台"},
             ]}
 
-        rules_hint = ('键为域名或站点 ID。HTTP：{"path":"/attendance.php","success":"正则","already":"正则"}；'
-                      'API Key：{"api_key_source":"auto","engine":"http|playwright","path":"/api/checkin",'
-                      '"credential_check_path":"/api/profile"}（纯 Key 站点会自动识别，不再要求填写 auth；'
-                      '固定端点，不探测、不回退云端 Browserless）；'
-                      'Browserless：{"engine":"browserless","mode":"cloudflare|image|trigger_image|altcha|open_page", ...}；'
-                      '页面内嵌 Turnstile、验证通过后由站点自己提交（如观众）用 {"submit_method":"auto"}；'
-                      '点签到后跳 WAF / Cloudflare 检测页时用 {"wait": 12000} 等它放行；'
-                      '「最近动向」读不到时可加 {"activity_path":"/userdetails.php?id=1"}')
+        rules_hint = '键为域名或站点 ID；支持 HTTP、API Key、Browserless 规则，格式见 docs/site-rules.md。'
 
         return [{"component": "VForm", "content": [
-            row(field("VSwitch", "enabled", "启用插件", 4),
-                hint_field("VSwitch", "notify", "发送通知",
-                           "签到成功 / 登录成功 / 失败三项计数，有失败才附原因", 4),
-                hint_field("VSwitch", "run_once", "保存后立即执行一次",
-                           "保存后延后 3 秒在后台跑一轮，同样跳过今天已签到的站点", 4),
-                hint_field("VSwitch", "clear_today", "清理本日缓存",
-                           "打开并保存后清空今天的签到记录（一次性动作，会自动关闭），下一轮重新签", 4)),
-            row(field("VCronField", "cron", "执行周期",
+            row(field("VSwitch", "enabled", "启用插件", 3),
+                field("VSwitch", "notify", "发送通知", 3),
+                field("VSwitch", "run_once", "保存后立即执行一次", 3),
+                field("VSwitch", "clear_today", "清理本日缓存", 3)),
+            section("执行", "mdi-clock-outline"),
+            row(field("VCronField", "cron", "执行周期", 6,
                       placeholder="5 位 Cron；例如 25 8 * * *"),
-                hint_field("VTextField", "concurrency", "最大并发数",
-                           "普通站点建议 4–8；Browserless / Playwright 每个 Token 最多同时 2 个",
-                           type="number", min=1, max=12)),
-            row(hint_field("VTextField", "retry_count", "失败重试次数", "0 为关闭，默认 1 次",
-                           type="number", min=0, max=5),
-                hint_field("VTextField", "retry_delay_minutes", "失败后等待分钟数",
-                           "仅失败站点重试前等待，默认 10 分钟", type="number", min=1, max=1440)),
-            row(field("VTextField", "timeout", "HTTP 超时（秒）", type="number", min=5, max=120),
-                hint_field("VSwitch", "read_activity", "读取「最近动向」",
-                           "用站点 Cookie（配置了账号时会真实登录换回新 Cookie）打开用户页 / 签到页，"
-                           "把「最近动向」写进登录状态表")),
+                field("VTextField", "concurrency", "最大并发数", 3,
+                      type="number", min=1, max=12, placeholder="默认 6",
+                      hint="建议 4–8", **{"persistent-hint": True}),
+                field("VTextField", "timeout", "HTTP 超时（秒）", 3,
+                      type="number", min=5, max=120, placeholder="默认 30",
+                      hint="建议 30–60 秒", **{"persistent-hint": True})),
+            row(field("VTextField", "retry_count", "失败重试次数", 3,
+                      type="number", min=0, max=5, placeholder="默认 1"),
+                field("VTextField", "retry_delay_minutes", "失败重试间隔（分钟）", 3,
+                      type="number", min=1, max=1440, placeholder="默认 10")),
+            section("站点", "mdi-account-multiple-outline"),
             row(field("VSelect", "site_ids", "签到站点", 12, items=options, multiple=True,
-                      chips=True, clearable=True, hint="选择全部后自动包含后续新增站点",
+                      chips=True, clearable=True, hint="「全部站点」包含后续新增站点",
                       **{"persistent-hint": True})),
             row(field("VSelect", "login_site_ids", "登录站点", 12, items=options, multiple=True,
                       chips=True, clearable=True,
-                      hint="选择全部后自动包含后续新增站点；与签到站点同时选中时一轮做完"
-                           "（真实登录 + 签到 + 读最近动向，不会重复登录）",
+                      hint="同时选中时执行登录、签到和动向读取",
                       **{"persistent-hint": True})),
-            row(field("VTextField", "browserless_url", "Browserless 地址", 4,
-                      placeholder=DEFAULT_BROWSERLESS_URL, hint="根地址或完整 /stealth/bql 地址",
-                      **{"persistent-hint": True}),
-                field("VTextField", "browserless_token", "Browserless Token 1", 6,
-                      type="password",
-                      hint="仅 Browserless 引擎需要，不会写入日志", **{"persistent-hint": True}),
-                field("VTextField", "browserless_token2", "Token 2（可选）", 6,
-                      type="password", hint="额度用完自动换下一个", **{"persistent-hint": True}),
-                field("VTextField", "browserless_token3", "Token 3（可选）", 6,
-                      type="password", hint="额度用完自动换下一个", **{"persistent-hint": True}),
-                field("VTextField", "browserless_token4", "Token 4（可选）", 6,
-                      type="password", hint="额度用完自动换下一个", **{"persistent-hint": True}),
-                field("VTextField", "browserless_timeout", "Browserless 超时（秒）", 4,
-                      type="number", min=15, max=300,
-                      hint="自动不低于页面内等待预算，建议 120–180", **{"persistent-hint": True})),
+            section("浏览器验证", "mdi-shield-check-outline"),
             row({"component": "VCol", "props": {"cols": 12}, "content": [browserless_alert]}),
+            row(field("VTextField", "browserless_url", "Browserless 地址", 4,
+                      placeholder=DEFAULT_BROWSERLESS_URL, hint="根地址或完整 BQL 地址",
+                      **{"persistent-hint": True}),
+                field("VTextField", "browserless_token", "Token 1", 4, type="password",
+                      hint="不写入日志", **{"persistent-hint": True}),
+                field("VTextField", "browserless_token2", "Token 2（可选）", 4, type="password"),
+                field("VTextField", "browserless_token3", "Token 3（可选）", 4, type="password"),
+                field("VTextField", "browserless_token4", "Token 4（可选）", 4, type="password"),
+                field("VTextField", "browserless_timeout", "Browserless 超时（秒）", 4,
+                      type="number", min=15, max=300, placeholder="默认 100",
+                      hint="建议 120–180 秒", **{"persistent-hint": True})),
+            section("高级", "mdi-code-json"),
             row({"component": "VCol", "props": {"cols": 12}, "content": [
                 {"component": "VTextarea",
-                 "props": {"model": "site_rules", "label": "自定义站点规则 JSON（可留空）",
-                           "rows": 6, "hint": rules_hint, "persistent-hint": True}}]}),
+                 "props": {"model": "site_rules", "label": "自定义站点规则 JSON",
+                           "rows": 5, "hint": rules_hint, "persistent-hint": True}}]}),
         ]}], self._config()
 
     def get_page(self) -> List[dict]:
@@ -575,7 +554,7 @@ class PTSiteSignIn(_PluginBase):
         history = self._history_records()
         if not latest and not history:
             return [{"component": "VAlert", "props": {"type": "info", "variant": "tonal",
-                     "text": "暂无签到记录；保存配置后点「保存后立即执行一次」，或等 Cron 触发。"}}]
+                     "text": "暂无签到记录。"}}]
         selected_names = self._selected_site_names()
         selected = set(selected_names)
         # latest 会跨配置保留旧站点记录；详情页只能展示当前勾选的站点。
@@ -603,21 +582,13 @@ class PTSiteSignIn(_PluginBase):
                          "text": f"上次执行 {last_run}"})
         body += self._status_table("签到状态", "mdi-calendar-check",
                                    self._section_site_names(False, visible_latest),
-                                   history, today, login_view=False)
+                                   today, login_view=False)
         body += self._status_table("登录状态", "mdi-login-variant",
                                    self._section_site_names(True, visible_latest),
-                                   history, today, login_view=True)
+                                   today, login_view=True)
         page: List[dict] = [{"component": "style", "text": PAGE_STYLE},
                             {"component": "div", "props": {"class": "ptsignin-page"},
                              "content": body}]
-        recorded = {str(row.get("site") or "") for row in visible_latest}
-        missing = [name for name in selected_names if name not in recorded]
-        if missing:
-            page.append({"component": "VAlert",
-                         "props": {"type": "warning", "variant": "tonal", "density": "compact",
-                                   "class": "mt-3"},
-                         "text": "本轮没有记录的站点：" + "、".join(missing)
-                                 + "（站点管理里没保存 Cookie、或本轮没执行到）"})
         return page
 
     @staticmethod
@@ -632,16 +603,10 @@ class PTSiteSignIn(_PluginBase):
         ]}
 
     def _status_table(self, title: str, icon: str, names: List[str],
-                      history: List[Dict[str, Any]], today: List[Dict[str, Any]],
-                      login_view: bool) -> List[dict]:
-        """一张方框表格：站点（含记录条数）｜今日｜结果。"""
+                      today: List[Dict[str, Any]], login_view: bool) -> List[dict]:
+        """一张方框表格：站点｜今日｜结果。"""
         belongs = ((lambda row: is_login_record(row, strict=True)) if login_view
                    else is_signin_record)
-        counts: Dict[str, int] = {}
-        for row in history:
-            if belongs(row):
-                name = str(row.get("site") or "未知站点")
-                counts[name] = counts.get(name, 0) + 1
         current: Dict[str, Dict[str, Any]] = {}
         for row in today:
             if belongs(row):
@@ -653,9 +618,7 @@ class PTSiteSignIn(_PluginBase):
              "text": f"{title}（{len(names)}）"},
         ]}
         if not names:
-            return [header, {"component": "VAlert",
-                             "props": {"type": "info", "variant": "tonal", "density": "compact"},
-                             "text": "还没有站点；在设置里勾选「签到站点 / 登录站点」后重跑一次。"}]
+            return [header]
         body = []
         rows: List[Dict[str, Any]] = []
         for name in names:
@@ -663,18 +626,13 @@ class PTSiteSignIn(_PluginBase):
             if row is None:
                 chip = {"label": "未记录", "color": "grey", "icon": "mdi-minus-circle-outline"}
                 result = "—"
-                caption = f"共 {counts.get(name, 0)} 条记录"
             else:
                 meta = record_meta(self._login_view(row) if login_view else row)
                 chip = {"label": meta["label"], "color": meta["color"], "icon": meta["icon"]}
                 result = self._result_text(row, login_view)
-                moment = str(row.get("ran_at") or "")[11:16]
-                caption = f"今日 {moment} · 共 {counts.get(name, 0)} 条记录" if moment else \
-                    f"共 {counts.get(name, 0)} 条记录"
             body.append({"component": "tr", "content": [
                 {"component": "td", "content": [
-                    {"component": "div", "props": {"class": "ptsignin-site"}, "text": name},
-                    {"component": "div", "props": {"class": "ptsignin-caption"}, "text": caption}]},
+                    {"component": "div", "props": {"class": "ptsignin-site"}, "text": name}]},
                 {"component": "td", "content": [
                     {"component": "VChip", "props": {"size": "small", "variant": "tonal",
                                                      "color": chip["color"],
@@ -682,7 +640,7 @@ class PTSiteSignIn(_PluginBase):
                      "text": chip["label"]}]},
                 {"component": "td", "props": {"class": "ptsignin-result"}, "text": result},
             ]})
-            rows.append({"site": name, "caption": caption, "chip": chip, "result": result})
+            rows.append({"site": name, "chip": chip, "result": result})
         table = {"component": "div", "props": {"class": "ptsignin-table-wrap"},
                  "content": [{"component": "VTable",
                               "props": {"density": "comfortable", "hover": True,
@@ -706,8 +664,6 @@ class PTSiteSignIn(_PluginBase):
                                         "color": item.get("chip", {}).get("color", "grey"),
                                         "prepend-icon": item.get("chip", {}).get("icon", "")},
                               "text": item.get("chip", {}).get("label", "")}]}]},
-                     {"component": "div", "props": {"class": "ptsignin-caption"},
-                      "text": str(item.get("caption") or "")},
                      {"component": "div", "props": {"class": "ptsignin-row-result"},
                       "text": str(item.get("result") or "—")},
                  ]} for item in rows]}
@@ -770,7 +726,7 @@ class PTSiteSignIn(_PluginBase):
         return [row for row in data if isinstance(row, dict)] if isinstance(data, list) else []
 
     def _history_records(self) -> List[Dict[str, Any]]:
-        """按天读回历史记录（新的在前），用于统计每站「共 N 条记录」。"""
+        """按天读回历史记录（新的在前）。"""
         index = self.get_data("history_index") or []
         keys = [str(key) for key in index if isinstance(key, str)] if isinstance(index, list) else []
         return [row for key in sorted(keys, reverse=True) for row in self._records_of(key)]
@@ -793,7 +749,7 @@ class PTSiteSignIn(_PluginBase):
         detail = str(reason or "").strip()
         if detail:
             return f"未读取到：{detail}"
-        return "未读取到（可确认「读取最近动向」开关，或用站点规则 activity_path 指定页面）"
+        return "未读取到（可用站点规则 activity_path 指定页面）"
 
     @staticmethod
     def _status_meta(status: str) -> Dict[str, str]:
@@ -1565,8 +1521,8 @@ class PTSiteSignIn(_PluginBase):
         """执行一轮签到。
 
         Cron 与「保存后立即执行一次」可能同时触发，用进程级互斥锁保证同一时间
-        只有一轮在跑；失败重试交给后台 Timer，等待期间不再占用执行线程。
-        allow_retry=False 时跳过失败重试（保存后立即执行用）。两种入口用同一套规则：
+        只有一轮在跑；失败重试交给宿主调度器或后台 Timer，等待期间不占用执行线程。
+        allow_retry=False 仅用于内部明确要求单轮的调试场景。两种入口用同一套规则：
         今天已签到成功的站点一律跳过，要重跑先打开一次「清理本日缓存」。
         """
         if not PTSiteSignIn._run_lock.acquire(blocking=False):
@@ -1677,7 +1633,7 @@ class PTSiteSignIn(_PluginBase):
                         rules: Dict[str, Dict[str, Any]], signer: Optional[BrowserlessSigner],
                         signin_ids: Set[int],
                         result_by_key: Dict[str, Dict[str, str]]) -> None:
-        """用后台 Timer 延迟执行下一轮失败重试，避免 sleep 占用执行线程。"""
+        """用宿主调度器或后台 Timer 延迟执行下一轮失败重试，避免阻塞执行线程。"""
         if not self._is_run_current(run_id):
             logger.info("PT站点签到：任务已停止或被新配置取代，不再安排重试")
             return
@@ -1695,14 +1651,17 @@ class PTSiteSignIn(_PluginBase):
         add_once = getattr(scheduler_sdk, "add_plugin_once_job", None) if scheduler_sdk else None
         if callable(add_once):
             try:
-                add_once(self.__class__.__name__, f"retry_{attempt}", self._retry_task,
-                         f"PT站点签到 失败重试（第 {attempt} 轮）", delay_seconds=int(delay),
-                         kwargs={"attempt": attempt, "run_id": run_id, "infos": infos,
+                accepted = add_once(
+                    self.__class__.__name__, f"retry_{attempt}", self._retry_task,
+                    f"PT站点签到 失败重试（第 {attempt} 轮）", delay_seconds=int(delay),
+                    func_kwargs={"attempt": attempt, "run_id": run_id, "infos": infos,
                                  "rules": rules, "signer": signer, "signin_ids": signin_ids,
                                  "result_by_key": result_by_key})
-                return
+                if accepted is not False:
+                    return
+                logger.warning("PT站点签到：宿主调度器未接受失败重试任务，改用本地 Timer")
             except TypeError:
-                # 老版本接口不接受 kwargs：退回本进程 Timer
+                # 老版本接口不接受 func_kwargs：退回本进程 Timer
                 pass
             except Exception:
                 logger.exception("PT站点签到：登记重试任务失败，改用本地 Timer")
@@ -1871,23 +1830,24 @@ class PTSiteSignIn(_PluginBase):
         return detail or "未返回具体失败原因"
 
     def stop_service(self) -> None:
-        """插件停用 / 重载时停止重试，并清理自有的「立即执行」调度器。"""
+        """插件停用 / 重载时取消本实例任务并释放资源。"""
+        self._enabled = False
         event = getattr(self, "_stop_event", None)
         if event is not None:
             event.set()
-        timer = getattr(self, "_retry_timer", None)
-        if timer is not None:
-            try:
-                timer.cancel()
-            except Exception:
-                logger.warning("PT站点签到：取消失败重试定时器时出错")
-            self._retry_timer = None
-        scheduler, self._run_once_scheduler = getattr(self, "_run_once_scheduler", None), None
-        if scheduler is not None:
-            try:
-                scheduler.remove_all_jobs()
-                if scheduler.running:
-                    scheduler.shutdown(wait=False)
-            except Exception:
-                logger.warning("PT站点签到：清理立即执行调度器时出错")
-        return None
+        for attr, label in (("_retry_timer", "失败重试"), ("_run_once_timer", "立即执行")):
+            timer = getattr(self, attr, None)
+            if timer is not None:
+                try:
+                    timer.cancel()
+                except Exception:
+                    logger.warning(f"PT站点签到：取消{label}定时器时出错")
+                setattr(self, attr, None)
+        remove_once = getattr(scheduler_sdk, "remove_plugin_once_job", None) if scheduler_sdk else None
+        if callable(remove_once):
+            plugin_id = self.__class__.__name__
+            for job_id in ("signin_once", "retry_1", "retry_2", "retry_3", "retry_4", "retry_5"):
+                try:
+                    remove_once(plugin_id, job_id)
+                except Exception:
+                    logger.debug(f"PT站点签到：取消宿主任务 {job_id} 时未找到或已执行")

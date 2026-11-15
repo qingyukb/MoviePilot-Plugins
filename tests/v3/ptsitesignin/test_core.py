@@ -8,6 +8,7 @@ import json
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = next((parent for parent in Path(__file__).resolve().parents
               if (parent / "package.json").is_file() and (parent / "plugins.v2").is_dir()),
@@ -648,7 +649,7 @@ class CoreRegressionTests(unittest.TestCase):
                 opencd = core.resolve_rule(
                     {"url": "https://open.cd/", "cookie": "c=1"}, {})
                 self.assertEqual(opencd["verify_success_path"], "/")
-                self.assertEqual(opencd["submit_method"], "click")
+                self.assertEqual(opencd["submit_method"], "ajax")
                 self.assertEqual(opencd["verify_wait"], 15000)
                 self.assertEqual(opencd["browserless_retry"], 2)
 
@@ -1574,9 +1575,9 @@ class ZeroTimeActivityTests(unittest.TestCase):
 
 
 class CaptchaSubmissionModeTests(unittest.TestCase):
-    def test_all_captcha_presets_use_native_click(self):
+    def test_captcha_presets_explicitly_submit(self):
         hosts = (
-            "playlet.cc", "our.kelu.one", "open.cd", "p.t-baozi.cc",
+            "playlet.cc", "our.kelu.one", "p.t-baozi.cc",
             "oshen.win", "ptsbao.club", "hdsky.me",
         )
         for core in CORES:
@@ -1586,6 +1587,9 @@ class CaptchaSubmissionModeTests(unittest.TestCase):
                         {"url": f"https://{host}/", "cookie": "c=1"}, {})
                     self.assertIn(rule.get("submit_method", "click"),
                                   {"click", "dom_click"}, host)
+                opencd = core.resolve_rule(
+                    {"url": "https://open.cd/", "cookie": "c=1"}, {})
+                self.assertEqual(opencd["submit_method"], "ajax")
 
 
 class PtsBaoTests(unittest.TestCase):
@@ -2335,6 +2339,58 @@ class BrowserCookieModeTests(unittest.TestCase):
             with self.subTest(core=core.__name__):
                 self.assertEqual(core.cookie_list_for_context(self.COOKIE, ""), [])
 
+
+class BrowserSdkLauncherTests(unittest.TestCase):
+    """V3 本机浏览器应优先走官方稳定 SDK，并确保上下文关闭。"""
+
+    def test_sdk_context_is_preferred_and_closed(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                class Page:
+                    def __init__(self):
+                        self.closed = False
+
+                    def close(self):
+                        self.closed = True
+
+                class Context:
+                    def __init__(self):
+                        self.headers = None
+                        self.closed = False
+                        self.page = Page()
+
+                    def set_extra_http_headers(self, headers):
+                        self.headers = dict(headers)
+
+                    def new_page(self):
+                        return self.page
+
+                    def close(self):
+                        self.closed = True
+
+                context = Context()
+                launch_kwargs = {}
+
+                def launcher(**kwargs):
+                    launch_kwargs.update(kwargs)
+                    return context
+
+                with mock.patch.object(core, "_load_browser_launcher", return_value=launcher), \
+                        mock.patch.object(core, "_load_playwright_helper",
+                                          side_effect=AssertionError("不应走旧助手")):
+                    outcome = core._run_browser_callback(
+                        lambda page: {"ok": page is context.page},
+                        cookies="a=1; b=2", ua="Test UA",
+                        proxies={"https": "http://proxy.example:8080"}, timeout=90)
+
+                self.assertEqual(outcome, {"ok": True})
+                self.assertEqual(launch_kwargs["headless"], True)
+                self.assertEqual(launch_kwargs["user_agent"], "Test UA")
+                self.assertEqual(launch_kwargs["proxy"],
+                                 {"https": "http://proxy.example:8080"})
+                self.assertEqual(context.headers, {"Cookie": "a=1; b=2"})
+                self.assertTrue(context.page.closed)
+                self.assertTrue(context.closed)
 
 class PlaywrightCaptchaTests(unittest.TestCase):
     """签到接口要求 Turnstile 时，必须诚实失败且最多提交两次。"""

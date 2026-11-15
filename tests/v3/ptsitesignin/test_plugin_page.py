@@ -88,6 +88,13 @@ def _install_stubs() -> None:
     db_oper_site.SiteOper = _SiteOper
     db_site_oper = types.ModuleType("app.db.site_oper")
     db_site_oper.SiteOper = _SiteOper
+    sdk = types.ModuleType("app.sdk")
+    sdk_plugin = types.ModuleType("app.sdk.plugin")
+    sdk_plugin._PluginBase = _PluginBase
+    sdk_logging = types.ModuleType("app.sdk.logging")
+    sdk_logging.logger = _Logger()
+    sdk_scheduler = types.ModuleType("app.sdk.scheduler")
+    sdk.scheduler = sdk_scheduler
     sched = types.ModuleType("apscheduler")
     sched_bg = types.ModuleType("apscheduler.schedulers")
     sched_bg_bg = types.ModuleType("apscheduler.schedulers.background")
@@ -99,6 +106,8 @@ def _install_stubs() -> None:
         "app": app, "app.plugins": plugins, "app.log": log, "app.schemas": schemas,
         "app.db": db, "app.db.oper": db_oper, "app.db.oper.site": db_oper_site,
         "app.db.site_oper": db_site_oper,
+        "app.sdk": sdk, "app.sdk.plugin": sdk_plugin, "app.sdk.logging": sdk_logging,
+        "app.sdk.scheduler": sdk_scheduler,
         "apscheduler": sched, "apscheduler.schedulers": sched_bg,
         "apscheduler.schedulers.background": sched_bg_bg,
         "apscheduler.triggers": sched_trig, "apscheduler.triggers.cron": sched_trig_cron,
@@ -165,6 +174,132 @@ def row_pairs(page):
 def chip_labels(page):
     return [node.get("text") for node in nodes(page, "VChip")]
 
+
+class RetrySchedulingTests(unittest.TestCase):
+    """「保存后立即执行」和失败重试都必须真正落入调度器。"""
+
+    @staticmethod
+    def _make(module):
+        plugin = module.PTSiteSignIn.__new__(module.PTSiteSignIn)
+        plugin._run_id = 7
+        plugin._retry_count = 1
+        plugin._retry_delay_minutes = 1
+        return plugin
+
+    def test_immediate_run_keeps_configured_retry(self):
+        for module in PLUGINS:
+            with self.subTest(plugin=module.__name__):
+                plugin = self._make(module)
+                with mock.patch.object(plugin, "run_sign_in") as run:
+                    plugin._run_once_task()
+                run.assert_called_once_with()
+
+    def test_immediate_scheduler_rejection_uses_local_timer(self):
+        class FakeTimer:
+            instances = []
+
+            def __init__(self, delay, func):
+                self.delay = delay
+                self.func = func
+                self.daemon = False
+                self.started = False
+                self.__class__.instances.append(self)
+
+            def start(self):
+                self.started = True
+
+        for module in PLUGINS:
+            with self.subTest(plugin=module.__name__):
+                plugin = self._make(module)
+                host = types.SimpleNamespace(add_plugin_once_job=lambda *args, **kwargs: False)
+                with mock.patch.object(module, "scheduler_sdk", host), \
+                        mock.patch.object(module, "Timer", FakeTimer):
+                    plugin._start_run_once()
+                timer = FakeTimer.instances[-1]
+                self.assertEqual(timer.delay, 3)
+                self.assertTrue(timer.started)
+                self.assertIs(plugin._run_once_timer, timer)
+
+    def test_service_id_follows_instance_class(self):
+        for module in PLUGINS:
+            with self.subTest(plugin=module.__name__):
+                plugin = self._make(module)
+                plugin._enabled = True
+                plugin._cron = "25 8 * * *"
+                service = plugin.get_service()[0]
+                self.assertEqual(service["id"], f"{module.PTSiteSignIn.__name__}.Run")
+
+    def test_stop_service_cancels_local_and_host_jobs(self):
+        class FakeTimer:
+            def __init__(self):
+                self.cancelled = False
+
+            def cancel(self):
+                self.cancelled = True
+
+        class FakeEvent:
+            def __init__(self):
+                self.set_called = False
+
+            def set(self):
+                self.set_called = True
+
+        for module in PLUGINS:
+            with self.subTest(plugin=module.__name__):
+                plugin = self._make(module)
+                plugin._enabled = True
+                plugin._stop_event = FakeEvent()
+                plugin._retry_timer = FakeTimer()
+                plugin._run_once_timer = FakeTimer()
+                removed = []
+                host = types.SimpleNamespace(
+                    remove_plugin_once_job=lambda plugin_id, job_id:
+                    removed.append((plugin_id, job_id)))
+                with mock.patch.object(module, "scheduler_sdk", host):
+                    plugin.stop_service()
+                self.assertFalse(plugin._enabled)
+                self.assertTrue(plugin._stop_event.set_called)
+                self.assertTrue(plugin._retry_timer is None)
+                self.assertTrue(plugin._run_once_timer is None)
+                self.assertEqual(
+                    [job for _plugin_id, job in removed],
+                    ["signin_once", "retry_1", "retry_2", "retry_3", "retry_4", "retry_5"])
+    def test_retry_uses_host_kwargs_and_timer_when_rejected(self):
+        class FakeTimer:
+            instances = []
+
+            def __init__(self, delay, func, args=()):
+                self.delay = delay
+                self.func = func
+                self.args = args
+                self.daemon = False
+                self.started = False
+                self.__class__.instances.append(self)
+
+            def start(self):
+                self.started = True
+
+        for module in PLUGINS:
+            with self.subTest(plugin=module.__name__):
+                plugin = self._make(module)
+                calls = []
+
+                def add_once(*args, **kwargs):
+                    calls.append((args, kwargs))
+                    return False
+
+                host = types.SimpleNamespace(add_plugin_once_job=add_once)
+                with mock.patch.object(module, "scheduler_sdk", host), \
+                        mock.patch.object(module, "Timer", FakeTimer):
+                    plugin._schedule_retry(1, 7, [], {}, None, set(), {})
+                self.assertEqual(len(calls), 1)
+                args, kwargs = calls[0]
+                self.assertEqual(args[0], module.PTSiteSignIn.__name__)
+                self.assertIn("func_kwargs", kwargs)
+                self.assertNotIn("kwargs", kwargs)
+                timer = FakeTimer.instances[-1]
+                self.assertEqual(timer.delay, 60)
+                self.assertTrue(timer.started)
 
 class PagePluginTests(unittest.TestCase):
     """详情页渲染逻辑。"""
@@ -363,7 +498,7 @@ class PagePluginTests(unittest.TestCase):
         self.assertIn(("观众", "登录失败", "失败：账号或密码错误"), pairs)
         self.assertIn(("观众", "签到成功", "获得 6"), pairs)
 
-    def test_summary_counts_and_missing_alert(self):
+    def test_summary_counts_without_bottom_alert(self):
         latest = [{"site": "观众", "status": "success", "message": "签到成功"},
                   {"site": "学校", "status": "failed",
                    "message": "签到后二次核验未显示签到成功状态"}]
@@ -377,20 +512,21 @@ class PagePluginTests(unittest.TestCase):
         self.assertEqual(labels, ["站点", "成功", "失败", "未确认", "未记录"])
         alerts = [node.get("text") for node in nodes(page, "VAlert")
                   if "本轮没有记录的站点" in str(node.get("text"))]
-        self.assertTrue(alerts)
-        self.assertIn("红豆饭", alerts[0])
+        self.assertEqual(alerts, [])
 
     def test_empty_state(self):
         page, _ = self._page([])
         self.assertEqual(len(page), 1)
         self.assertEqual(page[0]["component"], "VAlert")
 
-    def test_history_counts_accumulate(self):
+    def test_site_rows_do_not_repeat_record_counts(self):
         history = [{"site": "观众", "status": "success", "ran_at": f"2026-10-{day:02d} 08:00:00"}
                    for day in range(1, 13)]
         page, _ = self._page([history[-1]], history=history)
-        captions = [site for site, _status, _result in table_rows(page)]
-        self.assertTrue(any("共 12 条记录" in caption for caption in captions))
+        captions = [node for node in nodes(page, "div")
+                    if "ptsignin-caption" in str(node.get("props", {}).get("class"))]
+        self.assertEqual(captions, [])
+        self.assertNotIn("共 12 条记录", texts(page))
 
     def test_unselected_sites_from_history_are_not_rendered(self):
         history = [
@@ -670,17 +806,29 @@ class PagePluginTests(unittest.TestCase):
         self.assertEqual(captured.get("username"), "demo-user")
         self.assertEqual(captured.get("password"), "demo-pass")
 
+    def test_read_activity_is_always_enabled(self):
+        for module in PLUGINS:
+            with self.subTest(plugin=module.__name__):
+                plugin = module.PTSiteSignIn.__new__(module.PTSiteSignIn)
+                plugin.stop_service = lambda: None
+                plugin.init_plugin({"enabled": False, "read_activity": False})
+                self.assertTrue(plugin._read_activity)
+                self.assertNotIn("read_activity", plugin._config())
+
     def test_get_form_layout_and_all_option(self):
         plugin = self._make({})
         form, config = plugin.get_form()
-        # 顶部是开关行，然后是两列字段，没有分区大标题（参考 MP 官方插件的扁平布局）
+        # 表单按基础、执行、站点、浏览器验证和高级规则分区
         switches = [node.get("props") or {} for node in nodes(form, "VSwitch")]
         models = {props.get("model") for props in switches}
-        for expected in ("enabled", "notify", "run_once", "clear_today", "read_activity"):
+        for expected in ("enabled", "notify", "run_once", "clear_today"):
             self.assertIn(expected, models)
+        self.assertNotIn("read_activity", models)          # 最近动向默认读取，不再给开关
         self.assertNotIn("skip_signed_today", models)      # 跳过今天已签到是默认行为，不给开关
         self.assertNotIn("fallback_browserless", models)   # 自动回退恒为开启，不再给开关
         self.assertNotIn("proxy", models)      # 代理改成跟随站点管理里的「使用代理访问」
+        section_titles = [node.get("text") for node in nodes(form, "VChip")]
+        self.assertEqual(section_titles, ["执行", "站点", "浏览器验证", "高级"])
         select_models = {node.get("props", {}).get("model") for node in nodes(form, "VSelect")}
         self.assertNotIn("notify_mode", select_models)     # 通知模式下拉已由「发送通知」开关取代
         selects = [node.get("props") or {} for node in nodes(form, "VSelect")]
@@ -691,10 +839,15 @@ class PagePluginTests(unittest.TestCase):
             if props.get("model") in {"site_ids", "login_site_ids"}:
                 self.assertEqual(props["items"][0]["value"], "all")
                 self.assertIn("全部站点", props["items"][0]["title"])
-                self.assertIn("选择全部后自动包含后续新增站点", props["hint"])
+                if props.get("model") == "site_ids":
+                    self.assertIn("「全部站点」包含后续新增站点", props["hint"])
         hints = " ".join(str((node.get("props") or {}).get("hint") or "") for node in walk(form))
-        self.assertIn("同时选中", hints)             # 双选说明放在登录站点的提示里
+        self.assertIn("同时选中", hints)
+        self.assertIn("格式见 docs/site-rules.md", hints)
+        self.assertNotIn("api_key_source", hints)
         self.assertNotIn("ptsignin-form-title", str(form))
+        self.assertTrue(plugin._read_activity)               # 旧配置关闭过也强制默认读取
+        self.assertNotIn("read_activity", config)
         self.assertIsInstance(config, dict)
 
 

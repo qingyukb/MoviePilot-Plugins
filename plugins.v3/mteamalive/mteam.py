@@ -167,27 +167,44 @@ def activity_minutes_ago(profile: Mapping[str, Any]) -> Optional[float]:
 def fetch_profile(api_key: str, api_base: str = DEFAULT_API_BASE,
                   timeout: int = 20) -> Tuple[Optional[Dict[str, Any]], str]:
     """用 API Key 读账号详情，返回 (profile, 错误说明)。"""
-    try:
-        import requests
-    except ImportError:
-        # 极少见的精简环境没有 requests：保活照常，只是读不到统计
-        return None, "当前环境缺少 requests 库，读不到账号统计"
-
     key = str(api_key or "").strip()
     if not key:
         return None, "未配置 API Key"
     url = str(api_base or DEFAULT_API_BASE).rstrip("/") + "/api/member/profile"
+    headers = {"x-api-key": key, "Content-Type": "application/json",
+               "Accept": "application/json"}
     try:
-        response = requests.post(url, headers={"x-api-key": key,
-                                               "Content-Type": "application/json",
-                                               "Accept": "application/json"},
-                                 json={}, timeout=timeout)
+        from app.sdk.network import RequestUtils
+    except ImportError:
+        try:
+            from app.utils.http import RequestUtils  # V2 兼容路径
+        except ImportError:
+            RequestUtils = None
+    response = None
+    client = None
+    try:
+        if RequestUtils is not None:
+            client = RequestUtils(headers=headers, timeout=timeout)
+            response = client.post_res(url=url, json={})
+        else:
+            import requests
+            response = requests.post(url, headers=headers, json={}, timeout=timeout)
     except Exception as error:
         return None, f"请求异常：{error}"
-    if response.status_code in {401, 403}:
-        return None, f"API Key 无效（HTTP {response.status_code}）"
-    if response.status_code >= 400:
-        return None, f"接口返回 HTTP {response.status_code}"
+    finally:
+        closer = getattr(client, "close", None)
+        if callable(closer):
+            try:
+                closer()
+            except Exception:
+                pass
+    if response is None:
+        return None, "接口没有返回响应"
+    status_code = int(getattr(response, "status_code", 0) or 0)
+    if status_code in {401, 403}:
+        return None, f"API Key 无效（HTTP {status_code}）"
+    if status_code >= 400:
+        return None, f"接口返回 HTTP {status_code}"
     try:
         payload = response.json()
     except ValueError:
@@ -332,6 +349,52 @@ LOGGED_IN_JS = """
 """
 
 
+def _load_browser_launcher():
+    """返回 V3 稳定浏览器上下文启动器；旧版宿主返回 None。"""
+    try:
+        from app.sdk.browser import launch_browser_context
+        return launch_browser_context
+    except (ImportError, AttributeError):
+        return None
+
+
+def _load_playwright_helper():
+    """旧版 V2 宿主的浏览器助手兼容入口。"""
+    try:
+        from app.helper.browser import PlaywrightHelper
+        return PlaywrightHelper
+    except (ImportError, AttributeError):
+        return None
+
+
+def _run_browser_callback(callback, timeout: int = 90):
+    """在宿主管理的浏览器上下文中执行登录回调。"""
+    launcher = _load_browser_launcher()
+    if callable(launcher):
+        context = None
+        page = None
+        try:
+            context = launcher(headless=True)
+            page = context.new_page()
+            return callback(page)
+        finally:
+            if page is not None:
+                try:
+                    page.close()
+                except Exception:
+                    pass
+            if context is not None:
+                try:
+                    context.close()
+                except Exception:
+                    pass
+    helper = _load_playwright_helper()
+    if helper is None or not hasattr(helper, "action"):
+        return None
+    return helper().action(url="about:blank", callback=callback,
+                           headless=True, timeout=max(60, int(timeout)))
+
+
 def keepalive_login(username: str, password: str, totp_secret: str,
                     site_url: str = DEFAULT_SITE, timeout: int = 90,
                     logger: Any = None) -> Tuple[bool, str]:
@@ -340,12 +403,10 @@ def keepalive_login(username: str, password: str, totp_secret: str,
     不做登录态复用：实测复用 localStorage 站点不认（最近动向不刷新），
     40 天保活只认真实登录，所以每次都走账号密码 + TOTP。
     """
-    try:
-        from app.helper.browser import PlaywrightHelper
-    except Exception:
-        return False, "本机没有 Playwright（MoviePilot 浏览器依赖缺失），无法保活"
-    if not hasattr(PlaywrightHelper, "action"):
-        return False, "当前 MoviePilot 版本的 PlaywrightHelper 不支持 action()，无法保活"
+    launcher = _load_browser_launcher()
+    helper = _load_playwright_helper()
+    if not callable(launcher) and (helper is None or not hasattr(helper, "action")):
+        return False, "本机没有可用的浏览器上下文，无法保活"
 
     base = str(site_url or DEFAULT_SITE).rstrip("/")
     login_url = f"{base}/login"
@@ -476,8 +537,7 @@ def keepalive_login(username: str, password: str, totp_secret: str,
                 "url": getattr(page, "url", "")}
 
     try:
-        outcome = PlaywrightHelper().action(url="about:blank", callback=callback,
-                                            headless=True, timeout=max(60, int(timeout)))
+        outcome = _run_browser_callback(callback, timeout=timeout)
     except Exception as error:
         return False, f"启动本机浏览器失败：{error}"
     if not outcome:

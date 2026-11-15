@@ -75,7 +75,7 @@ class MTeamAlive(_PluginBase):
     plugin_name = "馒头保活"
     plugin_desc = "定时用真实浏览器登录 M-Team（账号密码 + TOTP），避免长期不登录被删号；顺带读取分享率与魔力。"
     plugin_icon = "https://raw.githubusercontent.com/qingyukb/MoviePilot-Plugins/main/icons/mteamalive.png"
-    plugin_version = "1.3.7"
+    plugin_version = "1.3.8"
     plugin_author = "qingyukb"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "mteamalive_"
@@ -92,7 +92,7 @@ class MTeamAlive(_PluginBase):
     _totp_secret = ""
     _api_key = ""
     _api_base = DEFAULT_API_BASE
-    _ratio_warn = 1.0
+    _ratio_warn = 7
     _verify_minutes = 10
     _interval_days = 20
     _api_verify = True
@@ -105,16 +105,15 @@ class MTeamAlive(_PluginBase):
             self._notify = bool(config.get("notify", True))
             self._run_once = bool(config.get("run_once"))
             self._cron = str(config.get("cron") or "0 9 * * *").strip()
-            self._site_url = str(config.get("site_url") or DEFAULT_SITE).strip().rstrip("/")
             self._username = str(config.get("username") or "").strip()
             self._password = str(config.get("password") or "")
             self._totp_secret = str(config.get("totp_secret") or "").strip()
             self._api_key = str(config.get("api_key") or "").strip()
-            self._api_base = str(config.get("api_base") or DEFAULT_API_BASE).strip().rstrip("/")
             try:
-                self._ratio_warn = float(config.get("ratio_warn") or 1.0)
+                ratio_warn = float(config.get("ratio_warn") or 7)
+                self._ratio_warn = int(ratio_warn) if ratio_warn.is_integer() else ratio_warn
             except (TypeError, ValueError):
-                self._ratio_warn = 1.0
+                self._ratio_warn = 7
             try:
                 self._verify_minutes = int(config.get("verify_minutes") or 10)
             except (TypeError, ValueError):
@@ -146,33 +145,61 @@ class MTeamAlive(_PluginBase):
     def _save_config(self) -> None:
         self.update_config({
             "enabled": self._enabled, "notify": self._notify, "run_once": False,
-            "cron": self._cron, "site_url": self._site_url, "username": self._username,
+            "cron": self._cron, "username": self._username,
             "password": self._password, "totp_secret": self._totp_secret,
-            "api_key": self._api_key, "api_base": self._api_base,
+            "api_key": self._api_key,
             "ratio_warn": self._ratio_warn, "verify_minutes": self._verify_minutes,
  "api_verify": self._api_verify,
             "interval_days": self._interval_days,
         })
 
     @staticmethod
-    def site_apikey() -> str:
-        """从 MoviePilot 站点管理里找 M-Team 的 API Key（站点里填过就不用再单独配）。"""
+    def _site_oper() -> Any:
+        """返回 MoviePilot 站点操作对象；旧版本路径仅作兼容。"""
         try:
-            from app.db.site_oper import SiteOper
+            from app.db.oper.site import SiteOper
         except Exception:
             try:
-                from app.db.oper.site import SiteOper  # 兼容旧路径
+                from app.db.site_oper import SiteOper
             except Exception:
-                return ""
+                return None
         try:
-            sites = SiteOper().list_order_by_pri()
+            return SiteOper()
+        except Exception:
+            return None
+
+    def site_url(self) -> str:
+        """从 MoviePilot 站点管理读取 M-Team 站点地址。"""
+        oper = self._site_oper()
+        if oper is None:
+            return str(self._site_url or DEFAULT_SITE).rstrip("/")
+        try:
+            sites = oper.list_order_by_pri()
+        except Exception:
+            sites = []
+        for site in sites or []:
+            domain = str(getattr(site, "domain", "") or getattr(site, "url", "") or "").lower()
+            if "m-team" not in domain:
+                continue
+            value = str(getattr(site, "url", "") or "").strip().rstrip("/")
+            if value:
+                self._site_url = value
+                return value
+        return str(self._site_url or DEFAULT_SITE).rstrip("/")
+
+    def site_apikey(self) -> str:
+        """从 MoviePilot 站点管理读取 M-Team API Key。"""
+        oper = self._site_oper()
+        if oper is None:
+            return ""
+        try:
+            sites = oper.list_order_by_pri()
         except Exception:
             return ""
         for site in sites or []:
             domain = str(getattr(site, "domain", "") or getattr(site, "url", "") or "").lower()
             if "m-team" not in domain:
                 continue
-            # 只认「令牌（API Key）」；站点管理里的 Authorization 是网页 JWT，不能当 API Key 用
             for attr in ("apikey", "api_key"):
                 value = str(getattr(site, attr, "") or "").strip()
                 if value:
@@ -232,60 +259,53 @@ class MTeamAlive(_PluginBase):
                     "content": [{"component": kind,
                                  "props": {"model": model, "label": label, **props}}]}
 
-        def hint(kind: str, model: str, label: str, text: str, md: int = 6,
-                 **props: Any) -> Dict[str, Any]:
-            return field(kind, model, label, md, hint=text,
-                         **{"persistent-hint": True, **props})
-
         def row(*cols: Dict[str, Any]) -> Dict[str, Any]:
             return {"component": "VRow", "content": list(cols)}
 
+        def section(title: str, icon: str) -> Dict[str, Any]:
+            """紧凑分区标题。"""
+            return {"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12},
+                    "content": [{"component": "VChip",
+                                 "props": {"size": "small", "variant": "tonal", "color": "primary",
+                                           "prepend-icon": icon}, "text": title}]}]}
+
         return [{"component": "VForm", "content": [
-            # 总开关
             row(field("VSwitch", "enabled", "启用插件", 4),
-                hint("VSwitch", "notify", "发送通知", "每次结果都会推送，含分享率与魔力", 4),
-                hint("VSwitch", "run_once", "保存后立即执行一次",
-                     "保存后马上登录一次，验证账号密码与 TOTP", 4)),
-            # 账号与二次验证
-            row(hint("VTextField", "username", "M-Team 账号", "站点登录账号", 4),
-                hint("VTextField", "password", "密码", "站点登录密码", 4,
-                     type="password"),
-                hint("VTextField", "totp_secret", "TOTP 密钥",
-                     "二次验证的 32 位密钥，用于自动填 6 位码；没开 2FA 可留空", 4)),
-            # 站点地址
-            row(hint("VTextField", "site_url", "站点地址",
-                     "默认 https://kp.m-team.cc，也可填 m-team.io 镜像", 6,
-                     placeholder=DEFAULT_SITE),
-                hint("VTextField", "api_base", "API 地址",
-                     "读统计用，默认 https://api.m-team.cc", 6,
-                     placeholder=DEFAULT_API_BASE)),
-            # 执行策略
-            row(hint("VTextField", "interval_days", "执行间隔（天）",
-                     "每天检查一次，距上次成功不满这么多天就跳过，默认 20 天", 4,
-                     type="number", min=1, max=60),
-                hint("VCronField", "cron", "检查时间",
-                     "多久检查一次是否需要保活，默认每天 9 点", 4,
-                     placeholder="0 9 * * *"),
-                hint("VTextField", "ratio_warn", "分享率提醒阈值",
-                     "低于该值时通知里带提醒，默认 1.0", 4,
-                     type="number", min=0, step=0.1)),
-            # 校验
-            row(hint("VSwitch", "api_verify", "用「最近动向」校验登录",
-                     "关掉只按浏览器结果判定", 4),
-                hint("VTextField", "verify_minutes", "校验窗口（分钟）",
-                     "登录后站点「最近动向」必须在这个时间内刷新，默认 10 分钟", 4,
-                     type="number", min=1, max=180),
-                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": []}),
+                field("VSwitch", "notify", "发送通知", 4),
+                field("VSwitch", "run_once", "保存后立即执行一次", 4)),
+            section("账户", "mdi-account-key-outline"),
+            row(field("VTextField", "username", "M-Team 账号", 4),
+                field("VTextField", "password", "密码", 4, type="password"),
+                field("VTextField", "totp_secret", "TOTP 密钥", 4,
+                      hint="32 位；未开启 2FA 可留空",
+                      **{"persistent-hint": True})),
+            section("执行", "mdi-clock-outline"),
+            row(field("VTextField", "interval_days", "执行间隔（天）", 4,
+                      type="number", min=1, max=60, hint="默认 20 天",
+                      **{"persistent-hint": True}),
+                field("VCronField", "cron", "检查时间", 4,
+                      placeholder="0 9 * * *", hint="默认每天 9 点",
+                      **{"persistent-hint": True}),
+                field("VTextField", "ratio_warn", "分享率提醒阈值", 4,
+                      type="number", min=0, step=1, hint="默认 7",
+                      **{"persistent-hint": True})),
+            section("校验", "mdi-shield-check-outline"),
+            row(field("VSwitch", "api_verify", "用「最近动向」校验登录", 6,
+                      hint="关闭后仅按浏览器结果判定",
+                      **{"persistent-hint": True}),
+                field("VTextField", "verify_minutes", "校验窗口（分钟）", 6,
+                      type="number", min=1, max=180, hint="默认 10 分钟",
+                      **{"persistent-hint": True})),
             row({"component": "VCol", "props": {"cols": 12}, "content": [{
                 "component": "VAlert", "props": {"type": "warning", "variant": "tonal",
                                                  "density": "compact"},
-                "text": "M-Team 连续 40 天不登录会删号，且只有真实登录才重置计时（API 访问不算）。"
-                        "插件用 MoviePilot 自带浏览器登录，请确保容器里有 Playwright。"}]}),
+                "text": "M-Team 连续 40 天未登录会删号，只有真实网页登录才重置计时。"
+            }]}),
         ]}], {
             "enabled": self._enabled, "notify": self._notify, "run_once": False,
-            "cron": self._cron, "site_url": self._site_url, "username": self._username,
+            "cron": self._cron, "username": self._username,
             "password": self._password, "totp_secret": self._totp_secret,
-            "api_key": self._api_key, "api_base": self._api_base,
+            "api_key": self._api_key,
             "ratio_warn": self._ratio_warn, "verify_minutes": self._verify_minutes,
             "api_verify": self._api_verify, "interval_days": self._interval_days,
         }
@@ -310,13 +330,14 @@ class MTeamAlive(_PluginBase):
         """执行一次保活：浏览器登录 + 读统计 + 记历史 + 通知。"""
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         logger.info("M-Team 保活：开始浏览器登录（账号 %s，每次真实登录）", self._username)
+        site_url = self.site_url()
         api_key = self.site_apikey()
         before_profile: Dict[str, Any] = {}
         if api_key:
             before_profile, _ = fetch_profile(api_key, self._api_base)
         ok, message = keepalive_login(
             self._username, self._password, self._totp_secret,
-            site_url=self._site_url, logger=logger)
+            site_url=site_url, logger=logger)
         logger.info("M-Team 保活：浏览器登录结果 - %s", message)
         profile: Dict[str, Any] = {}
         if api_key:

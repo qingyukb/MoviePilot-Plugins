@@ -73,6 +73,16 @@ def _install_stubs() -> None:
     event_mod.Event = _Event
     event_mod.eventmanager = _EventManager()
     core.event = event_mod
+    sdk = types.ModuleType("app.sdk")
+    sdk_plugin = types.ModuleType("app.sdk.plugin")
+    sdk_plugin._PluginBase = _PluginBase
+    sdk_logging = types.ModuleType("app.sdk.logging")
+    sdk_logging.logger = _Logger()
+    sdk_events = types.ModuleType("app.sdk.events")
+    sdk_events.Event = _Event
+    sdk_events.eventmanager = _EventManager()
+    sdk_scheduler = types.ModuleType("app.sdk.scheduler")
+    sdk.scheduler = sdk_scheduler
     sched = types.ModuleType("apscheduler")
     sched_bg = types.ModuleType("apscheduler.schedulers")
     sched_bg_bg = types.ModuleType("apscheduler.schedulers.background")
@@ -101,6 +111,8 @@ def _install_stubs() -> None:
         "app": app, "app.plugins": plugins, "app.log": log, "app.schemas": schemas,
         "app.schemas.types": types_mod, "app.core": core, "app.core.config": config,
         "app.core.event": event_mod,
+        "app.sdk": sdk, "app.sdk.plugin": sdk_plugin, "app.sdk.logging": sdk_logging,
+        "app.sdk.events": sdk_events, "app.sdk.scheduler": sdk_scheduler,
         "apscheduler": sched, "apscheduler.schedulers": sched_bg,
         "apscheduler.schedulers.background": sched_bg_bg,
         "apscheduler.triggers": sched_tr, "apscheduler.triggers.cron": sched_tr_cron,
@@ -425,13 +437,153 @@ class FormTests(unittest.TestCase):
                 plugin = module.MTeamAlive.__new__(module.MTeamAlive)
                 form, defaults = plugin.get_form()
                 text = str(form)
-                for model in ("enabled", "notify", "run_once", "cron", "site_url",
+                for model in ("enabled", "notify", "run_once", "cron",
                               "username", "password", "totp_secret",
-                              "api_base", "ratio_warn", "verify_minutes", "interval_days"):
+                              "ratio_warn", "verify_minutes", "interval_days"):
                     self.assertIn(f"'model': '{model}'", text)
-                self.assertEqual(defaults["site_url"], module.DEFAULT_SITE)
+                self.assertNotIn("site_url", defaults)
+                self.assertNotIn("api_base", defaults)
                 self.assertEqual(defaults["cron"], "0 9 * * *")
+                self.assertEqual(defaults["ratio_warn"], 7)
 
+                def walk(node):
+                    if isinstance(node, dict):
+                        yield node
+                        for child in node.get("content") or []:
+                            yield from walk(child)
+                    elif isinstance(node, list):
+                        for child in node:
+                            yield from walk(child)
+
+                nodes = list(walk(form))
+                titles = [node.get("text") for node in nodes if node.get("component") == "VChip"]
+                self.assertEqual(titles, ["账户", "执行", "校验"])
+                hints = " ".join(str((node.get("props") or {}).get("hint") or "") for node in nodes)
+                self.assertIn("默认 20 天", hints)
+                self.assertIn("默认 7", hints)
+                self.assertIn("默认 10 分钟", hints)
+                self.assertNotIn("保存后马上登录一次", hints)
+
+
+class OfficialSdkTests(unittest.TestCase):
+    """V3 入口应遵循官方调度、API 和浏览器 SDK 约定。"""
+
+    def test_v3_api_requires_bearer_auth(self):
+        plugin = PLUGINS[1].MTeamAlive.__new__(PLUGINS[1].MTeamAlive)
+        api = plugin.get_api()[0]
+        self.assertEqual(api["auth"], "bear")
+
+    def test_v3_service_id_follows_instance_class(self):
+        module = PLUGINS[1]
+        plugin = module.MTeamAlive.__new__(module.MTeamAlive)
+        plugin._enabled = True
+        plugin._cron = "0 9 * * *"
+        service = plugin.get_service()[0]
+        self.assertEqual(service["id"], f"{module.MTeamAlive.__name__}.Keepalive")
+
+    def test_v3_run_once_falls_back_to_timer(self):
+        from unittest import mock
+        module = PLUGINS[1]
+
+        class FakeTimer:
+            instances = []
+
+            def __init__(self, delay, func):
+                self.delay = delay
+                self.func = func
+                self.daemon = False
+                self.started = False
+                self.__class__.instances.append(self)
+
+            def start(self):
+                self.started = True
+
+        plugin = module.MTeamAlive.__new__(module.MTeamAlive)
+        plugin.stop_service = lambda: None
+        plugin._save_config = lambda: None
+        with mock.patch.object(module, "scheduler_sdk", None), \
+                mock.patch.object(module, "Timer", FakeTimer):
+            plugin.init_plugin({"enabled": True, "run_once": True})
+        timer = FakeTimer.instances[-1]
+        self.assertEqual(timer.delay, 3)
+        self.assertTrue(timer.started)
+        self.assertIs(plugin._run_once_timer, timer)
+
+    def test_v3_stop_service_removes_host_job(self):
+        from unittest import mock
+        module = PLUGINS[1]
+
+        class FakeTimer:
+            def __init__(self):
+                self.cancelled = False
+
+            def cancel(self):
+                self.cancelled = True
+
+        plugin = module.MTeamAlive.__new__(module.MTeamAlive)
+        timer = FakeTimer()
+        plugin._enabled = True
+        plugin._run_once_timer = timer
+        removed = []
+        host = types.SimpleNamespace(
+            remove_plugin_once_job=lambda plugin_id, job_id:
+            removed.append((plugin_id, job_id)))
+        with mock.patch.object(module, "scheduler_sdk", host):
+            plugin.stop_service()
+        self.assertFalse(plugin._enabled)
+        self.assertTrue(timer.cancelled)
+        self.assertIsNone(plugin._run_once_timer)
+        self.assertEqual(removed, [(module.MTeamAlive.__name__, "mteam_alive_once")])
+
+    def test_v3_browser_uses_sdk_context_and_closes_it(self):
+        from unittest import mock
+        module = PLUGINS[1].MTeamAlive.__module__
+        browser = sys.modules[module + ".mteam"]
+
+        class Page:
+            def __init__(self):
+                self.closed = False
+
+            def close(self):
+                self.closed = True
+
+        class Context:
+            def __init__(self):
+                self.page = Page()
+                self.closed = False
+
+            def new_page(self):
+                return self.page
+
+            def close(self):
+                self.closed = True
+
+        context = Context()
+        with mock.patch.object(browser, "_load_browser_launcher",
+                               return_value=lambda **kwargs: context), \
+                mock.patch.object(browser, "_load_playwright_helper",
+                                  side_effect=AssertionError("不应走旧助手")):
+            result = browser._run_browser_callback(
+                lambda page: {"ok": page is context.page}, timeout=90)
+        self.assertEqual(result, {"ok": True})
+        self.assertTrue(context.page.closed)
+        self.assertTrue(context.closed)
+
+class SiteManagementTests(unittest.TestCase):
+    """M-Team 地址与 API Key 应从站点管理读取。"""
+
+    def test_site_url_and_api_key_come_from_site_management(self):
+        for module in PLUGINS:
+            with self.subTest(plugin=module.__name__):
+                site = types.SimpleNamespace(
+                    domain="kp.m-team.cc", url="https://kp.m-team.cc",
+                    apikey="managed-key")
+                oper = types.SimpleNamespace(list_order_by_pri=lambda: [site])
+                plugin = module.MTeamAlive.__new__(module.MTeamAlive)
+                plugin._site_url = module.DEFAULT_SITE
+                plugin._site_oper = staticmethod(lambda: oper)
+                self.assertEqual(plugin.site_url(), "https://kp.m-team.cc")
+                self.assertEqual(plugin.site_apikey(), "managed-key")
 
 if __name__ == "__main__":
     unittest.main()
