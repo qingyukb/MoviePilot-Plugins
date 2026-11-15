@@ -84,13 +84,13 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "captcha_selector": "#frmSignin img",
         "captcha_input_selector": "#imagestring",
         "submit_selector": "#ok",
-        "submit_method": "ajax",
+        "submit_method": "click",
         "success_json": {"field": "/state", "values": ["success"]},
         "success_keywords": ["查看簽到記錄", "簽到成功", "签到成功"],
         "already_keywords": ["查看簽到記錄", "已簽到", "已签到", "今日已签", "今日已簽"],
         # AJAX 返回后首页状态可能稍晚刷新；先等待再核验，仍未确认则立即重试一轮。
-        "verify_wait": 10000,
-        "browserless_retry": 1,
+        "verify_wait": 15000,
+        "browserless_retry": 2,
         "strict_status_keywords": True,
     },
     "p.t-baozi.cc": {
@@ -101,6 +101,7 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "captcha_input_selector": "input[name='imagestring']",
         "submit_selector": "input[type='submit']",
         "already_keywords": ["签到成功"],
+        "browserless_retry": 2,
     },
     "pt.muxuege.org": {
         "engine": "browserless",
@@ -117,7 +118,9 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "captcha_selector": "form:has(input[name='imagestring']) img[alt='CAPTCHA']",
         "captcha_input_selector": "form input[name='imagestring']",
         "submit_selector": "form input[type='submit'][value='立即签到']",
-        "submit_method": "ajax",
+        "submit_method": "click",
+        "wait": 8000,
+        "browserless_retry": 2,
     },
     "ptsbao.club": {
         # 烧包：attendance.php 的图片验证码签到（和 oshen.win 同款 NexusPHP 表单）
@@ -127,9 +130,11 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "captcha_selector": "form:has(input[name='imagestring']) img[alt='CAPTCHA']",
         "captcha_input_selector": "form input[name='imagestring']",
         "submit_selector": "form input[type='submit'][value='立即签到']",
-        "submit_method": "ajax",
+        "submit_method": "click",
+        "wait": 8000,
         "success_keywords": ["签到成功", "簽到成功", "本次获得", "本次獲得"],
         "already_keywords": ["已经签到", "已經簽到", "已签到", "已簽到", "今日已签到"],
+        "browserless_retry": 2,
     },
     "pt.luckpt.de": {
         # 只做日常签到：/attendance.php。之前走 /medal_collection.php 领「纪念套装」的
@@ -169,6 +174,7 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "submit_method": "dom_click",
         "submit_text": "Let's Go",
         "success_keywords": ["已签到"],
+        "browserless_retry": 2,
     },
     "dstudio.me": {"engine": "browserless", "mode": "cloudflare", "path": "/attendance.php"},
     # ---- AGSVPT（agsvpt.com）：NexusPHP 签到页，页面上是一个「立即签到」表单提交按钮 ----

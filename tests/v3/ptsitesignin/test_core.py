@@ -648,8 +648,9 @@ class CoreRegressionTests(unittest.TestCase):
                 opencd = core.resolve_rule(
                     {"url": "https://open.cd/", "cookie": "c=1"}, {})
                 self.assertEqual(opencd["verify_success_path"], "/")
-                self.assertEqual(opencd["verify_wait"], 10000)
-                self.assertEqual(opencd["browserless_retry"], 1)
+                self.assertEqual(opencd["submit_method"], "click")
+                self.assertEqual(opencd["verify_wait"], 15000)
+                self.assertEqual(opencd["browserless_retry"], 2)
 
                 kelu = core.resolve_rule(
                     {"url": "https://our.kelu.one/", "cookie": "c=1"}, {})
@@ -1572,6 +1573,21 @@ class ZeroTimeActivityTests(unittest.TestCase):
 
 
 
+class CaptchaSubmissionModeTests(unittest.TestCase):
+    def test_all_captcha_presets_use_native_click(self):
+        hosts = (
+            "playlet.cc", "our.kelu.one", "open.cd", "p.t-baozi.cc",
+            "oshen.win", "ptsbao.club", "hdsky.me",
+        )
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                for host in hosts:
+                    rule = core.resolve_rule(
+                        {"url": f"https://{host}/", "cookie": "c=1"}, {})
+                    self.assertIn(rule.get("submit_method", "click"),
+                                  {"click", "dom_click"}, host)
+
+
 class PtsBaoTests(unittest.TestCase):
     """烧包（ptsbao.club）：图片验证码签到预设 + JWT 形式 cookie 的 uid 解析。"""
 
@@ -1586,6 +1602,7 @@ class PtsBaoTests(unittest.TestCase):
                 self.assertEqual(rule["path"], "/attendance.php")
                 self.assertEqual(rule["mode"], "image")
                 self.assertEqual(rule["captcha_input_selector"], "form input[name='imagestring']")
+                self.assertEqual(rule["submit_method"], "click")
 
     def test_cookie_uid_from_jwt(self):
         for core in CORES:
