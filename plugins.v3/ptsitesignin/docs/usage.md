@@ -40,45 +40,21 @@ https://github.com/qingyukb/MoviePilot-Plugins
 - 失败通知按站点配置、Cookie/Token/登录状态、Cloudflare/WAF、验证码、网络、HTTP 和结果未确认等语义分类。
 - 手动「保存后立即执行一次」与 Cron 使用同一套失败重试规则；重试交给宿主调度器，登记失败时回退到本地 Timer。
 
-## 内置站点
+## 支持站点
 
-当前包含以下类型的预设或专用处理：
+当前已适配：
 
-- 观众：Turnstile
-- 不可躺（tangpt.top）：NexusPHP 页内 Turnstile，Browserless 完成验证后提交
-- PlayLet（playlet.cc）：NexusPHP 图片验证码签到，Browserless 自动识别并提交
-- 可鲁可撸（our.kelu.one）：NexusPHP 图片验证码签到，Browserless 自动识别，未确认时先预检并最多重试两次
-- 海胆之家（haidan.cc，旧域名 haidan.video）：`signin.php` 签到，按首页 `value="已经打卡"` 确认结果
-- HDWing（hdwing.org）：`plugin_sign-in.php` 签到，验证码/Turnstile 自动回退 Browserless
-- 好多油/HDU（pt.hdupt.com、pt.upxin.net）：`added.php?action=qiandao` 返回数字即签到成功，`yiqiandao` 标记表示今日已签
-- 高清视界（hdarea.club）：配置 API Key 时使用官方 `POST /api/v1/user/signin`；未配置 Key 时保留 `sign_in.php` Cookie 签到；API 失败不回退 Cookie。
-- YemaPT（yemapt.org）：API Key 仅用于 openApi 登录检测；签到仍需要 Cookie 完成 Altcha 验证。
-- ColaPT（colapt.com）：使用网页 Cookie 会话领取每日登录奖励，并执行每周一次的可乐签到；API Key 仅有上传/兼容 scope，不能代替用户签到。
-- 52PT：首页「做种会员签到处」Turnstile 签到（需站点入口可用）
-- U2：showup 四选一签到（提交后回读确认）
-- 瓷器：首页获取 CSRF，调用 `plugin_sign-in.php` 并刷新 Cookie
-- 好学：读取 `/api/v1/home` 状态，使用 `flux_csrf` 调用签到 API
-- RousiPro：在站点管理填写个人 API Key，调用 `/api/points/attendance`
-- 彩虹岛：答题签到
-- AGSVPT：表单签到
-- 学校：首页签到入口
-- 憨憨：日历签到
-- 红豆饭、PT时间、皇后等 NexusPHP 站点
-- SUNNYPT、TTG、HDKylin、LuckPT 等站点
+- 观众、不可躺（tangpt.top）、PlayLet（playlet.cc）、可鲁可撸（our.kelu.one）
+- 海胆之家（haidan.cc）、HDWing（hdwing.org）、好多油/HDU（pt.hdupt.com、pt.upxin.net）
+- 高清视界（hdarea.club）、YemaPT（yemapt.org）、ColaPT（colapt.com）
+- 52PT、U2、瓷器、好学（hxpt.org）、RousiPro（rousi.pro）、彩虹岛、AGSVPT
+- 学校、憨憨、红豆饭、PT时间、皇后（open.cd）、SUNNYPT、TTG、HDKylin、LuckPT 等
 
-未匹配到的站点会使用默认路径；如果默认路径不适用，请查看[自定义站点规则](site-rules.md)。
-纯 API Key 且没有专用签到模块的站点会使用通用 HTTP 签到（默认 `Authorization: Bearer <Key>`），不再提前跳过；特殊站点可用自定义规则覆盖 path、header 和前缀。
-API Key 通用签到遇到 Cloudflare / 验证码时，会使用 Browserless 在同一浏览器上下文内携带 API Key 重试。
+认证方式：Cookie、API Key。
 
-## 图标说明
+验证类型：普通签到、图片验证码、Cloudflare / Turnstile。
 
-如果插件图标不显示，把插件目录中的 `ptsignin.png` 放到 MoviePilot 的图标目录：
-
-```bash
-docker cp ptsignin.png moviepilot-v3:/public/plugin_icon/
-```
-
-使用完整 URL 作为图标时，由 MoviePilot 容器联网获取；容器无法访问外网时可能显示默认图标。
+未列出的站点可通过[自定义站点规则](site-rules.md)扩展。
 
 ---
 

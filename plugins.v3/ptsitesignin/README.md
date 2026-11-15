@@ -28,7 +28,7 @@ MoviePilot 的 PT 站点自动签到插件，支持 V2 / V3。
 
 | 文档 | 内容 |
 | --- | --- |
-| [使用与配置](docs/usage.md) | 安装、配置项、内置站点和图标说明 |
+| [使用与配置](docs/usage.md) | 安装、配置项和支持站点 |
 | [自定义站点规则](docs/site-rules.md) | 规则字段、示例、答题签到和站点模块 |
 | [Browserless](docs/browserless.md) | 地址、Token、私有部署和额度轮换 |
 | [常见问题](docs/faq.md) | 常见故障和排查方法 |

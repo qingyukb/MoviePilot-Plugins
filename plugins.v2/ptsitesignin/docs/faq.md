@@ -30,14 +30,6 @@
 
 打开「清理本日缓存」并保存一次配置，下一轮会重新执行。
 
-## 插件图标不显示
-
-把 `ptsignin.png` 放入 MoviePilot 的 `/public/plugin_icon/` 目录：
-
-```bash
-docker cp ptsignin.png moviepilot-v3:/public/plugin_icon/
-```
-
 ## 同时勾选签到站点和登录站点
 
 同一个站点同时被选中时，插件会在一轮中完成登录、签到和最近动向读取，不会重复执行两遍。
