@@ -48,8 +48,9 @@ https://github.com/qingyukb/MoviePilot-Plugins
 - 观众：Turnstile
 - 不可躺（tangpt.top）：NexusPHP 页内 Turnstile，Browserless 完成验证后提交
 - PlayLet（playlet.cc）：NexusPHP 图片验证码签到，Browserless 自动识别并提交
-- 可鲁可撸（our.kelu.one）：NexusPHP 图片验证码签到，Browserless 自动识别，未确认时先预检再重试一次
-- 海胆之家（haidan.video）：`signin.php` 签到，按首页 `value="已经打卡"` 确认结果
+- 可鲁可撸（our.kelu.one）：NexusPHP 图片验证码签到，Browserless 自动识别，未确认时先预检并最多重试两次
+- 海胆之家（haidan.cc，旧域名 haidan.video）：`signin.php` 签到，按首页 `value="已经打卡"` 确认结果
+- HDWing（hdwing.org）：`plugin_sign-in.php` 签到，验证码/Turnstile 自动回退 Browserless
 - 好多油/HDU（pt.hdupt.com、pt.upxin.net）：`added.php?action=qiandao` 返回数字即签到成功，`yiqiandao` 标记表示今日已签
 - 高清视界（hdarea.club）：配置 API Key 时使用官方 `POST /api/v1/user/signin`；未配置 Key 时保留 `sign_in.php` Cookie 签到；API 失败不回退 Cookie。
 - YemaPT（yemapt.org）：API Key 仅用于 openApi 登录检测；签到仍需要 Cookie 完成 Altcha 验证。
@@ -59,7 +60,6 @@ https://github.com/qingyukb/MoviePilot-Plugins
 - 瓷器：首页获取 CSRF，调用 `plugin_sign-in.php` 并刷新 Cookie
 - 好学：读取 `/api/v1/home` 状态，使用 `flux_csrf` 调用签到 API
 - RousiPro：在站点管理填写个人 API Key，调用 `/api/points/attendance`
-- Piggo：勾选猪猪后，在插件设置填写「猪猪账号 / 猪猪密码」；本机 Playwright 自动登录并打开 `/calendar` 签到。最近动向由本机 Playwright 打开 `/userdetails` 读取；云端 Browserless 会被提示异地登录，建议自建 Browserless
 - 彩虹岛：答题签到
 - AGSVPT：表单签到
 - 学校：首页签到入口

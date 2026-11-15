@@ -1,4 +1,4 @@
-"""NexusPHP「验证码签到」通用模块（可撸 our.kelu.one、自然 naturept.top 等）。
+"""NexusPHP「验证码签到」通用模块（自然 naturept.top 等）。
 
 这类站点的 /attendance.php：
 - 今天已签到：页面直接写「签到成功 … 本次签到获得 X 个魔力值」+ 日历，没有任何表单；
@@ -25,7 +25,7 @@ ATTR_RE = re.compile(r"""([a-zA-Z_:][-a-zA-Z0-9_:.]*)\s*=\s*(?:"([^"]*)"|'([^']*
 IMG_RE = re.compile(r"""<img\b[^>]*src\s*=\s*["']([^"']*image\.php[^"']*)["']""", re.IGNORECASE)
 CAPTCHA_NAME_RE = re.compile(r"(imagestring|code|captcha|verify|seccode)", re.IGNORECASE)
 BONUS_RE = re.compile(r"本次签到获得\s*([\d,]+)\s*个魔力值")
-HOSTS = ("kelu.one", "naturept.top")
+HOSTS = ("naturept.top",)
 
 
 def _decode(response: Any) -> str:
@@ -58,7 +58,7 @@ def _attrs(tag: str) -> dict[str, str]:
 class NexusCaptcha:
     """NexusPHP 图片验证码签到。"""
 
-    site_url = "kelu.one"
+    site_url = "naturept.top"
 
     @staticmethod
     def match(url: str) -> bool:
@@ -74,7 +74,7 @@ class NexusCaptcha:
         return _decode(response)
 
     def signin(self, site: Mapping[str, Any], ctx: Any) -> Tuple[bool, str]:
-        base = str(site.get("url") or "https://our.kelu.one").rstrip("/")
+        base = str(site.get("url") or "https://naturept.top").rstrip("/")
         target = urljoin(base + "/", "attendance.php")
         page = self._load(ctx, target)
         if not page:

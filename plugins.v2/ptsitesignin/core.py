@@ -388,6 +388,7 @@ def parse_rules(raw: Any) -> Dict[str, Dict[str, Any]]:
 DOMAIN_ALIASES = {
     "uhddolby.com": "hddolby.com",      # 高清杜比换域名
     "upxin.net": "hdupt.com",           # 好多油（HDU）备用域名
+    "haidan.video": "haidan.cc",        # 海胆之家旧域名
 }
 
 
@@ -5524,6 +5525,19 @@ class BrowserlessSigner:
                     "success",
                     _bonus_message("已重新打开签到页确认签到成功",
                                    page_text(verify_html), rule),
+                )
+            # 二次核验页可能晚于提交后的页面更新。只要 AJAX 返回或提交后页面已经给出
+            # 明确成功/已签到证据，就以更早但有效的结果为准，避免把已签到误报为失败。
+            if ajax_result and ajax_result.status in {"success", "already"}:
+                return SignResult(
+                    ajax_result.status,
+                    f"{ajax_result.message}（提交响应确认）",
+                )
+            after_result = classify(after_html, rule)
+            if after_result.status in {"success", "already"}:
+                return SignResult(
+                    after_result.status,
+                    f"{after_result.message}（提交后页面确认）",
                 )
             pending = first_keyword(page_text(verify_html), rule.get("pending_keywords"))
             if pending:

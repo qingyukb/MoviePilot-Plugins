@@ -46,7 +46,7 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "wait": 12000,
         "verify_success_path": "/attendance.php",
         "verify_wait": 15000,
-        "browserless_retry": 1,
+        "browserless_retry": 2,
         "success_keywords": ["签到成功", "簽到成功", "本次签到获得", "本次簽到獲得"],
         "already_keywords": ["今天已经签到", "今日已签到", "已经签到", "今天已签到",
                              "今日已簽到", "已經簽到"],
@@ -65,7 +65,7 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "wait": 12000,
         "verify_success_path": "/attendance.php",
         "verify_wait": 15000,
-        "browserless_retry": 1,
+        "browserless_retry": 2,
         "success_keywords": ["签到成功", "簽到成功", "本次签到获得", "本次簽到獲得"],
         "already_keywords": ["签到已得", "簽到已得", "今天已经签到", "今日已签到",
                              "已经签到", "今天已签到", "今日已簽到", "已經簽到"],
@@ -296,8 +296,8 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "success_keywords": ["\"status\":\"1\"", "签到已成功", "本次签到获得"],
         "already_keywords": ["您今天已经签到过了", "请勿重复刷新"],
     },
-    # ---- 海胆（haidan.video）：signin.php 触发签到，回首页看按钮是否变「已经打卡」 ----
-    "haidan.video": {
+    # ---- 海胆之家（haidan.cc，旧域名 haidan.video）：signin.php 触发签到，回首页看按钮是否变「已经打卡」 ----
+    "haidan.cc": {
         "engine": "http",
         "method": "GET",
         # 签到后首页按钮会变成「已经打卡」，所以先读首页判断，再去 signin.php，
@@ -313,6 +313,21 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         # 可见正文里，显式按 HTML 再匹配一次。
         "already_html": r'<input\b(?=[^>]*\bvalue=["\']已经打卡["\'])[^>]*>',
         "success_keywords": ["已经打卡", "已打卡", "打卡成功", "签到成功"],
+    },
+    # ---- HDWing（hdwing.org）：NexusPHP plugin_sign-in 插件 ----
+    # 未登录访问 plugin_sign-in.php 会先跳登录页；页面若有验证码/Turnstile，
+    # 交给 HTTP 引擎检测后自动回退 Browserless。
+    "hdwing.org": {
+        "engine": "http",
+        "method": "GET",
+        "path": "/plugin_sign-in.php",
+        "submit_selector": "input[type='submit'], button[type='submit'], button",
+        "success_keywords": ["签到成功", "簽到成功", "签到完成", "簽到完成",
+                             "打卡成功", "领取成功", "領取成功"],
+        "already_keywords": ["今日已签到", "今天已签到", "今日已簽到", "今天已簽到",
+                             "已经签到", "已經簽到", "已签到", "已簽到",
+                             "请不要重复签到", "請不要重複簽到"],
+        "already_html": r"plugin_sign-in\.php\?cmd=show-log",
     },
     # ---- HDChina（hdchina.org）：首页取 x-csrf，POST plugin_sign-in.php?cmd=signin ----
     "hdchina.org": {
@@ -526,49 +541,6 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "credential_check_path": "/api/v1/profile",
         "credential_check_method": "GET",
         "credential_check_success": r'"code"\s*:\s*0\b',
-    },
-    # ---- Piggo（piggo.me）：SPA 日历页本机 Playwright 签到 ----
-    # 签到入口固定为 /calendar。点击签到按钮后会进入 Cloudflare 人机验证，
-    # 验证通过后页面自行提交。使用 MoviePilot 所在网络的本机浏览器，避免
-    # 云端 Browserless 的机房 IP 触发异地登录验证；失败时不回退 Browserless。
-    "piggo.me": {
-        "engine": "playwright",
-        "cookie_mode": "browser",
-        "path": "/calendar",
-        "submit_method": "dom_click",
-        "submit_selector": ".cal-att-pill.act",
-        "submit_text": "签到",
-        "playwright_state_selector": ".cal-att-pill",
-        "playwright_already_texts": ["已签到", "今日已签到", "今天已签到", "已簽到"],
-        "playwright_skip_texts": ["补签", "補簽"],
-        "captcha_response_path": "/v1/web/calendar/attendance",
-        "playwright_captcha_token_selector": "input[name='cf-turnstile-response']",
-        "playwright_captcha_wait": 30000,
-        "playwright_wait_for_ready": True,
-        "playwright_ready_wait": 45000,
-        "playwright_calendar_selector": ".cal-wrap",
-        "playwright_calendar_loading_selector": ".cal-wrap[aria-busy='true']",
-        "playwright_page_ready_selector": (
-            ".cal-att-pill, .cal-wrap:not([aria-busy='true']), "
-            "input[name='username'], form.step-up input[name='password'], "
-            ".denied-page, #idle-lock-title"
-        ),
-        "browser_auth_mode": "login_and_unlock",
-        "browser_login_url": "/login?redirect=/calendar",
-        "browser_login_username_selector": "input[name='username']",
-        "browser_login_password_selector": "input[name='password']",
-        "browser_login_submit_selector": "button.btn",
-        "browser_unlock_password_selector": "form.step-up input[name='password']",
-        "browser_unlock_submit_selector": "form.step-up button[type='submit']",
-        "cloudflare_wait": 60,
-        "wait": 8000,
-        "auto_wait": 30000,
-        # Piggo 的个人页由 SPA 提供，直接 HTTP 访问会被 Cloudflare/风控拦成 403。
-        # 用户资料页的 /userdetails 会自动跳转到 /userdetails/<自己的 uid>，
-        # 因此这里只需要给出稳定入口，再由本机 Playwright 登录后读取「最近动向」。
-        "activity_path": "/userdetails",
-        "activity_engine": "playwright",
-        "activity_wait": 8000,
     },
     # ---- 观众（Audiences）：签到页内嵌 Turnstile，验证通过后由站点自行提交 ----
     # 该站 Turnstile 渲染在 closed shadow DOM 里（本地 Edge 复现），页面 JS 读不到

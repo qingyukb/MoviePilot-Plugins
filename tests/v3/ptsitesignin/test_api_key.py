@@ -262,22 +262,6 @@ class ApiKeyCoreTests(unittest.TestCase):
                 self.assertEqual(session.calls[0]["headers"]["api-token"], SECRET)
                 self.assertEqual(session.calls[0]["json"], {"mode": "fixed"})
 
-    def test_piggo_uses_calendar_playwright_preset(self):
-        for core in CORES:
-            with self.subTest(core=core.__name__):
-                site = {"id": 10, "name": "Piggo", "url": "https://piggo.me/",
-                        "cookie": "c=1", "ua": ""}
-                rule = core.resolve_rule(site, {})
-                self.assertNotEqual(rule.get("auth"), "api_key")
-                self.assertEqual(rule["engine"], "playwright")
-                self.assertEqual(rule["path"], "/calendar")
-                self.assertEqual(rule["submit_selector"], ".cal-att-pill.act")
-                self.assertEqual(rule["playwright_state_selector"], ".cal-att-pill")
-                self.assertEqual(rule["captcha_response_path"],
-                                 "/v1/web/calendar/attendance")
-                self.assertEqual(rule["cloudflare_wait"], 60)
-                self.assertFalse(rule.get("browserless_fallback", False))
-
     def test_playwright_api_key_fetches_api_in_same_browser(self):
         for core in CORES:
             with self.subTest(core=core.__name__):

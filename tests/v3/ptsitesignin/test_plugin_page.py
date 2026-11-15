@@ -613,44 +613,10 @@ class PagePluginTests(unittest.TestCase):
         self.assertEqual(parse("all"), ([], True))
 
     def test_config_round_trip_keeps_all_sentinel(self):
-        plugin = self._make({}, _all_sites=True, _all_login_sites=False,
-                            _piggo_username="pig-user", _piggo_password="pig-pass")
+        plugin = self._make({}, _all_sites=True, _all_login_sites=False)
         config = plugin._config()
         self.assertEqual(config["site_ids"], [1, 2, "all"])
         self.assertEqual(config["login_site_ids"], [2, 3])
-        self.assertEqual(config["piggo_username"], "pig-user")
-        self.assertEqual(config["piggo_password"], "pig-pass")
-
-    def test_piggo_credentials_are_merged_only_for_piggo(self):
-        plugin = self._make({}, _piggo_username="pig-user", _piggo_password="pig-pass")
-        piggo = plugin._with_plugin_account({"url": "https://piggo.me/", "name": "猪猪"})
-        self.assertEqual(piggo["username"], "pig-user")
-        self.assertEqual(piggo["password"], "pig-pass")
-        other = plugin._with_plugin_account({"url": "https://example.com/", "name": "其它"})
-        self.assertNotIn("username", other)
-        self.assertNotIn("password", other)
-
-    def test_piggo_plugin_credentials_reach_playwright(self):
-        plugin = self._make({}, _piggo_username="pig-user", _piggo_password="pig-pass")
-        plugin._run_id = 1
-        plugin._timeout = 30
-        plugin._read_activity = False
-        plugin._proxies_for = lambda info: None
-        module = self.plugin_module
-        captured = {}
-
-        def fake_playwright(info, rule, **kwargs):
-            captured.update(info)
-            return module.SignResult("success", "签到成功")
-
-        info = {"id": 99, "name": "猪猪", "url": "https://piggo.me/", "cookie": "c=1"}
-        with mock.patch.object(module, "run_site_module", return_value=None), \
-                mock.patch.object(module, "playwright_sign", side_effect=fake_playwright):
-            row = plugin._sign_one(info, {}, None, run_id=1)
-        self.assertEqual(row["status"], "success", row.get("message"))
-        self.assertEqual(captured.get("username"), "pig-user")
-        self.assertEqual(captured.get("password"), "pig-pass")
-        self.assertNotIn("pig-pass", str(row))
 
     def test_hdarea_key_only_site_uses_module_and_never_falls_back(self):
         plugin = self._make({})
@@ -675,7 +641,7 @@ class PagePluginTests(unittest.TestCase):
         self.assertIn("API Key", row["message"])
         fallback.assert_not_called()
 
-    def test_piggo_activity_uses_playwright_even_without_cookie(self):
+    def test_playwright_activity_uses_site_credentials(self):
         plugin = self._make({})
         plugin._timeout = 30
         plugin._proxies_for = lambda info: None
@@ -685,7 +651,7 @@ class PagePluginTests(unittest.TestCase):
             status = "success"
             last_seen = "2026-11-12 19:14:46"
             snippet = ""
-            source = "https://piggo.me/userdetails/25674"
+            source = "https://signin.example.test/userdetails/25674"
             message = ""
 
         def fake_activity(info, rule, **kwargs):
@@ -693,38 +659,16 @@ class PagePluginTests(unittest.TestCase):
             captured["rule"] = rule
             return Outcome()
 
-        info = {"id": 99, "name": "猪猪", "url": "https://piggo.me/",
-                "username": "pig-user", "password": "pig-pass"}
+        info = {"id": 99, "name": "示例站点", "url": "https://signin.example.test/",
+                "username": "demo-user", "password": "demo-pass"}
         rule = {"activity_engine": "playwright", "activity_path": "/userdetails"}
         with mock.patch.object(self.plugin_module, "playwright_read_activity",
                                side_effect=fake_activity):
             activity, source = plugin._read_site_activity(info, rule)
         self.assertEqual(activity, "2026-11-12 19:14:46")
         self.assertIn("/userdetails/25674", source)
-        self.assertEqual(captured.get("username"), "pig-user")
-        self.assertEqual(captured.get("password"), "pig-pass")
-
-    def test_piggo_credentials_fields_are_conditional(self):
-        piggo = _Site(99, "猪猪")
-        piggo.url = "https://piggo.me/"
-        piggo.domain = "piggo.me"
-        original = list(SITES)
-        try:
-            SITES.append(piggo)
-            form, config = self.plugin.get_form()
-        finally:
-            SITES[:] = original
-        fields = {node.get("props", {}).get("model") for node in nodes(form, "VTextField")}
-        self.assertIn("piggo_username", fields)
-        self.assertIn("piggo_password", fields)
-        piggo_row = next(node for node in nodes(form, "VRow")
-                         if "piggo_username" in str(node))
-        show = str((piggo_row.get("props") or {}).get("show") or "")
-        self.assertIn("site_ids", show)
-        self.assertIn("login_site_ids", show)
-        self.assertIn("99", show)
-        self.assertIn("piggo_username", config)
-        self.assertIn("piggo_password", config)
+        self.assertEqual(captured.get("username"), "demo-user")
+        self.assertEqual(captured.get("password"), "demo-pass")
 
     def test_get_form_layout_and_all_option(self):
         plugin = self._make({})

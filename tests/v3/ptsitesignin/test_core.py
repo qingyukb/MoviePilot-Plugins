@@ -622,23 +622,6 @@ class CoreRegressionTests(unittest.TestCase):
             {"url": "https://signin.example.test/", "cookie": "c=1"},
             {"engine": "playwright", "path": "/index.php"}))
 
-    def test_piggo_calendar_playwright_preset(self):
-        for core in CORES:
-            with self.subTest(core=core.__name__):
-                rule = core.resolve_rule(
-                    {"url": "https://piggo.me/", "cookie": "c=1"}, {})
-                self.assertNotEqual(rule.get("auth"), "api_key")
-                self.assertEqual(rule["engine"], "playwright")
-                self.assertEqual(rule["path"], "/calendar")
-                self.assertEqual(rule["submit_selector"], ".cal-att-pill.act")
-                self.assertEqual(rule["playwright_state_selector"], ".cal-att-pill")
-                self.assertEqual(rule["captcha_response_path"],
-                                 "/v1/web/calendar/attendance")
-                self.assertEqual(rule["activity_engine"], "playwright")
-                self.assertEqual(rule["activity_path"], "/userdetails")
-                self.assertEqual(rule["playwright_ready_wait"], 45000)
-                self.assertFalse(rule.get("browserless_fallback", False))
-
     def test_tangpt_turnstile_and_playlet_image_rules(self):
         for core in CORES:
             with self.subTest(core=core.__name__):
@@ -660,7 +643,7 @@ class CoreRegressionTests(unittest.TestCase):
                 self.assertEqual(playlet["submit_method"], "click")
                 self.assertEqual(playlet["verify_success_path"], "/attendance.php")
                 self.assertEqual(playlet["verify_wait"], 15000)
-                self.assertEqual(playlet["browserless_retry"], 1)
+                self.assertEqual(playlet["browserless_retry"], 2)
 
                 opencd = core.resolve_rule(
                     {"url": "https://open.cd/", "cookie": "c=1"}, {})
@@ -675,7 +658,7 @@ class CoreRegressionTests(unittest.TestCase):
                 self.assertEqual(kelu["path"], "/attendance.php")
                 self.assertIn("imagestring", kelu["captcha_input_selector"])
                 self.assertEqual(kelu["verify_wait"], 15000)
-                self.assertEqual(kelu["browserless_retry"], 1)
+                self.assertEqual(kelu["browserless_retry"], 2)
                 signed = (
                     "<html><head><title>Kelu :: 签到 - Powered by NexusPHP</title></head>"
                     "<body>[签到已得145, 补签卡: 0]<h2>签到成功</h2>"
@@ -1414,6 +1397,37 @@ class BrowserlessImageRetryTests(unittest.TestCase):
                                  ["CheckInPreflight", "CheckIn", "CheckInPreflight"])
                 # 第二轮只读预检已经看到签到成功，不应再次提交。
                 self.assertEqual(sum(call[0] == "CheckIn" for call in signer.calls), 1)
+
+
+class BrowserlessVerifyFallbackTests(unittest.TestCase):
+    def test_after_page_success_wins_when_verify_page_is_stale(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                site = {"url": "https://playlet.cc/", "cookie": "c=1", "ua": ""}
+                rule = dict(core.resolve_rule(site, {}))
+                pending = (
+                    "<html><head><title>PlayLet :: 签到</title></head><body>"
+                    "<form action='attendance.php' method='post'>"
+                    "<input name='imagestring'><input type='submit' value='立即签到'>"
+                    "</form></body></html>"
+                )
+                signed = (
+                    "<html><head><title>PlayLet :: 签到</title></head><body>"
+                    "<h2>签到成功</h2><p>本次签到获得 90 个魔力值</p></body></html>"
+                )
+                signer = make_stub_signer(core, [
+                    {"goto": {"status": 200}, "before": {"html": pending}},
+                    {"goto": {"status": 200},
+                     "solve": {"found": True, "solved": True},
+                     "submit": {"value": True}, "response": {},
+                     "before": {"html": pending}, "after": {"html": signed},
+                     "verify": {"status": 200}, "verifyPage": {"html": pending}},
+                ])
+                result = signer.sign(site, rule)
+                self.assertEqual(result.status, "success")
+                self.assertIn("提交后页面确认", result.message)
+                self.assertEqual([call[0] for call in signer.calls],
+                                 ["CheckInPreflight", "CheckIn"])
 
 
 class BrowserlessRequestTests(unittest.TestCase):
@@ -2202,6 +2216,23 @@ class PlaywrightPathsTests(unittest.TestCase):
                                  [core.DEFAULT_HTTP_PATH, "/x"])
                 self.assertEqual(core.playwright_paths({}), [core.DEFAULT_HTTP_PATH])
 
+class HdwingRuleTests(unittest.TestCase):
+    def test_hdwing_uses_plugin_signin(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                rule = core.resolve_rule(
+                    {"url": "https://hdwing.org/", "cookie": "c=1"}, {})
+                self.assertEqual(rule["engine"], "http")
+                self.assertEqual(rule["path"], "/plugin_sign-in.php")
+                success = core.judge_http(
+                    "<html><body>签到成功，获得 10 魔力值</body></html>", rule)
+                self.assertEqual(success.status, "success")
+                already = core.judge_http(
+                    '<html><body><a href="plugin_sign-in.php?cmd=show-log">签到日志</a>'
+                    "</body></html>", rule)
+                self.assertEqual(already.status, "already")
+
+
 class HaidanHduptRecognitionTests(unittest.TestCase):
     """海胆之家和好多油（HDU）签到成功后的真实标记。"""
 
@@ -2209,7 +2240,11 @@ class HaidanHduptRecognitionTests(unittest.TestCase):
         for core in CORES:
             with self.subTest(core=core.__name__):
                 rule = core.resolve_rule(
+                    {"url": "https://www.haidan.cc/", "cookie": "c=1"}, {})
+                legacy = core.resolve_rule(
                     {"url": "https://www.haidan.video/", "cookie": "c=1"}, {})
+                self.assertEqual(legacy["path"], rule["path"])
+                self.assertEqual(legacy["signin_path"], rule["signin_path"])
                 result = core.judge_http(
                     '<html><body><input type="submit" disabled value="已经打卡" />'
                     "</body></html>", rule)
@@ -2546,7 +2581,7 @@ class NexusCaptchaModuleTests(unittest.TestCase):
 
     def test_match(self):
         module = self._module()
-        self.assertTrue(module.NexusCaptcha.match("https://our.kelu.one/"))
+        self.assertFalse(module.NexusCaptcha.match("https://our.kelu.one/"))
         self.assertTrue(module.NexusCaptcha.match("https://naturept.top/attendance.php"))
         self.assertFalse(module.NexusCaptcha.match("https://other.example/"))
 
