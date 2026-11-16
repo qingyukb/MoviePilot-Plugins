@@ -44,7 +44,7 @@ https://github.com/qingyukb/MoviePilot-Plugins
 
 当前已适配：
 
-- 观众、不可躺（tangpt.top）、PlayLet（playlet.cc）、可鲁可撸（our.kelu.one）
+- 观众、不可躺（tangpt.top）、PlayLet（playlet.cc）、可鲁可撸（our.kelu.one）、自然（naturept.top）
 - 海胆之家（haidan.cc）、HDWing（hdwing.org）、好多油/HDU（pt.hdupt.com、pt.upxin.net）
 - 高清视界（hdarea.club）、YemaPT（yemapt.org）、ColaPT（colapt.com）
 - 52PT、U2、瓷器、好学（hxpt.org）、RousiPro（rousi.pro）、彩虹岛、AGSVPT

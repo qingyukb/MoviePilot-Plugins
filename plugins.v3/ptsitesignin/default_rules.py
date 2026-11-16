@@ -32,6 +32,28 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
                              "今日已簽到", "已經簽到"],
         "pending_keywords": ["验证图片", "驗證圖片", "立即签到", "立即簽到"],
     },
+    "naturept.top": {
+        # 自然：NexusPHP 图片验证码签到。站点模块优先；模块 OCR 不可用时回退 Browserless。
+        "engine": "browserless",
+        "mode": "image",
+        "path": "/attendance.php",
+        "preflight_path": "/attendance.php",
+        "captcha_selector": "form:has(input[name='imagestring']) img[alt='CAPTCHA']",
+        "captcha_input_selector": "form input[name='imagestring']",
+        "submit_selector": "form input[type='submit'][value='立即签到']",
+        "submit_method": "click",
+        "wait": 12000,
+        "verify_success_path": "/attendance.php",
+        "verify_wait": 15000,
+        "browserless_retry": 2,
+        "success_keywords": ["签到成功", "簽到成功", "本次签到获得", "本次簽到獲得"],
+        "already_keywords": ["今天已经签到", "今日已签到", "已经签到", "今天已签到",
+                             "今日已簽到", "已經簽到"],
+        "absent_keywords": ["立即签到"],
+        "absent_status": "success",
+        "require_absent_for_success": True,
+        "strict_status_keywords": True,
+    },
     "playlet.cc": {
         "engine": "browserless",
         "mode": "image",
@@ -50,6 +72,11 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "success_keywords": ["签到成功", "簽到成功", "本次签到获得", "本次簽到獲得"],
         "already_keywords": ["今天已经签到", "今日已签到", "已经签到", "今天已签到",
                              "今日已簽到", "已經簽到"],
+        # 成功提示可能来自旧页面或提示条，必须同时确认验证码签到入口已经消失。
+        "absent_keywords": ["立即签到"],
+        "absent_status": "success",
+        "require_absent_for_success": True,
+        "strict_status_keywords": True,
     },
     "our.kelu.one": {
         # Kelu（可鲁可撸）：NexusPHP 图片验证码签到。实测 Browserless 可自动识别并提交；

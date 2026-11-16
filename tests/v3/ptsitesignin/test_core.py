@@ -653,6 +653,16 @@ class CoreRegressionTests(unittest.TestCase):
                 self.assertEqual(opencd["verify_wait"], 15000)
                 self.assertEqual(opencd["browserless_retry"], 2)
 
+                nature = core.resolve_rule(
+                    {"url": "https://naturept.top/", "cookie": "c=1"}, {})
+                self.assertEqual(nature["engine"], "browserless")
+                self.assertEqual(nature["mode"], "image")
+                self.assertEqual(nature["path"], "/attendance.php")
+                self.assertIn("imagestring", nature["captcha_input_selector"])
+                self.assertEqual(nature["submit_method"], "click")
+                self.assertTrue(nature["require_absent_for_success"])
+                self.assertEqual(nature["absent_keywords"], ["立即签到"])
+
                 kelu = core.resolve_rule(
                     {"url": "https://our.kelu.one/", "cookie": "c=1"}, {})
                 self.assertEqual(kelu["engine"], "browserless")
@@ -1431,6 +1441,38 @@ class BrowserlessVerifyFallbackTests(unittest.TestCase):
                 self.assertEqual([call[0] for call in signer.calls],
                                  ["CheckInPreflight", "CheckIn"])
 
+
+class PlayletSuccessConfirmationTests(unittest.TestCase):
+    """PlayLet 必须确认签到入口消失，不能只凭页面成功文字判定。"""
+
+    def test_success_text_with_form_still_present_is_not_success(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                rule = core.resolve_rule(
+                    {"url": "https://playlet.cc/", "cookie": "c=1"}, {})
+                html = (
+                    "<html><body>"
+                    "<div>签到成功</div>"
+                    "<form id='frmSignin' action='attendance.php' method='post'>"
+                    "<input name='imagestring'>"
+                    "<input type='submit' value='立即签到'>"
+                    "</form></body></html>"
+                )
+                result = core.classify(html, rule)
+                self.assertEqual(result.status, "failed")
+                self.assertIn("签到入口仍然存在", result.message)
+
+    def test_success_requires_form_to_disappear(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                rule = core.resolve_rule(
+                    {"url": "https://playlet.cc/", "cookie": "c=1"}, {})
+                html = (
+                    "<html><body><h2>签到成功</h2>"
+                    "<p>本次签到获得 90 个魔力值</p></body></html>"
+                )
+                result = core.classify(html, rule)
+                self.assertEqual(result.status, "success")
 
 class BrowserlessRequestTests(unittest.TestCase):
     """_request 的响应解析：单步失败不能当整轮失败。"""

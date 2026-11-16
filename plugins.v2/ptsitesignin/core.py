@@ -4681,6 +4681,11 @@ def classify(html: str, rule: Mapping[str, Any]) -> SignResult:
                           "或换一份完整的 Cookie（含 cf_clearance / 会话）再试")
     if any(word.lower() in lower for word in LOGIN_WORDS) and "logout" not in lower:
         return SignResult("failed", "Cookie 无效或已过期")
+    absent = [str(item).strip() for item in (rule.get("absent_keywords") or [])
+              if str(item).strip()]
+    entry_present = bool(absent and any(word in control_text(html) for word in absent))
+    if rule.get("require_absent_for_success") and entry_present:
+        return SignResult("failed", "签到入口仍然存在，未确认本次签到提交成功")
     success_pattern = str(rule.get("success") or "")
     if success_pattern and re.search(success_pattern, full_text, re.IGNORECASE):
         return SignResult("success", _bonus_message("签到成功", full_text, rule))
@@ -4692,8 +4697,6 @@ def classify(html: str, rule: Mapping[str, Any]) -> SignResult:
     if already_html and re.search(already_html, html, re.IGNORECASE | re.DOTALL):
         return SignResult("already", _bonus_message("今日已经签到", full_text, rule))
     # 静默成功的站点（学校这种）：入口消失即视为完成，浏览器引擎也要认
-    absent = [str(item).strip() for item in (rule.get("absent_keywords") or [])
-              if str(item).strip()]
     # 按钮文字常写在 value="..." 里，正文看不到；但脚本 / 隐藏模板里的字样不能算数，
     # 所以用「可见文字 + 控件文字」判断入口还在不在
     if absent and not any(word in full_text or word in control_text(html) for word in absent):
