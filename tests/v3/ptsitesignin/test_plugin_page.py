@@ -574,6 +574,38 @@ class PagePluginTests(unittest.TestCase):
         self.assertEqual(captured["rule"]["path"], "/signin.php")
         self.assertEqual(outcome.status, "success")
 
+    def test_hddolby_uses_local_browser_before_browserless(self):
+        # 高清杜比 HTTP 拿不到明确结果时，先用同 IP 的本机 Playwright 点签到按钮。
+        plugin = self._make({})
+        plugin._timeout = 5
+        plugin._proxies_for = lambda info: None  # type: ignore[method-assign]
+        rule = self.plugin_module.resolve_rule(
+            {"url": "https://www.uhddolby.com/", "cookie": "c=1"}, {})
+
+        class _Signer:
+            def __init__(self):
+                self.calls = 0
+
+            def sign(self, info, fallback_rule):
+                self.calls += 1
+                return self.plugin_module.SignResult("success", "Browserless 不应执行")
+
+        signer = _Signer()
+        with mock.patch.object(
+                self.plugin_module, "playwright_sign",
+                return_value=self.plugin_module.SignResult("success", "本机点击签到成功")):
+            outcome, engine = plugin._maybe_fallback(
+                {"name": "高清杜比", "url": "https://www.uhddolby.com/", "cookie": "c=1"},
+                rule,
+                self.plugin_module.SignResult(
+                    "failed", "未匹配到签到成功标志；标题「UHDDolby :: 签到」",
+                    missing_path=False),
+                signer)
+        self.assertEqual(outcome.status, "success")
+        self.assertEqual(engine, "playwright")
+        self.assertIn("本机 Playwright", outcome.message)
+        self.assertEqual(signer.calls, 0)
+
     def test_activity_entities_decoded_on_display(self):
         # 修复前存进历史的记录里是 `&lt;`，显示时要解码（不用等下一轮重抓）
         latest = [{"site": "观众", "status": "already", "ran_at": self._today("03:52:21"),

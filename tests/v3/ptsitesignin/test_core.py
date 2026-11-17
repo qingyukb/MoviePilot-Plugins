@@ -557,6 +557,9 @@ class CoreRegressionTests(unittest.TestCase):
         rule = self.core.resolve_rule({"url": "https://www.hddolby.com/", "cookie": "c=1"}, {})
         self.assertEqual(rule["engine"], "http")
         self.assertEqual(rule["path"], "/attendance.php")
+        self.assertTrue(rule["local_browser_fallback"])
+        self.assertEqual(rule["submit_text"], "立即签到")
+        self.assertIn("签到", rule["submit_selector"])
         signed = ('<html><body>HDDolby<br>鲸币 [ 使用 ]: 131,943.3 (签到已得64)'
                   '<br>分享率： 3.080 上传量： 101.83 GB</body></html>')
         self.assertEqual(self.core.classify(signed, rule).status, "already")

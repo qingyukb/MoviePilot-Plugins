@@ -466,9 +466,16 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
     # ---- 高清杜比（hddolby.com，2026-10 起换到 uhddolby.com）：NexusPHP 签到页，
     # 已签到时首页显示「鲸币 (签到已得N)」。新域名通过 DOMAIN_ALIASES 指到这条规则。 ----
     "hddolby.com": {
+        # 新版 attendance.php 需要点击「立即签到」才会提交。HTTP 先走快速路径；
+        # 页面没有明确结果时，再用同 IP 的本机浏览器点击，避免把正常签到误报为失败。
         "engine": "http",
         "method": "GET",
         "path": "/attendance.php",
+        "submit_selector": "input[type='submit'][value*='签到'], button[type='submit'], button",
+        "submit_method": "dom_click",
+        "submit_text": "立即签到",
+        "wait": 5000,
+        "local_browser_fallback": True,
         "success_keywords": ["签到成功", "签到完成", "领取成功"],
         "already_keywords": ["签到已得", "今日已签到", "已经签到", "请不要重复签到"],
     },

@@ -204,7 +204,7 @@ class PTSiteSignIn(_PluginBase):
     plugin_name = "PT站点签到"
     plugin_desc = ("PT 站点自动签到，支持 Cookie 登录并读取最近动向；验证码或 Cloudflare 可按规则改用浏览器。")
     plugin_icon = "signin.png"
-    plugin_version = "3.1.8"
+    plugin_version = "3.1.9"
     plugin_author = "qingyukb"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "ptsignin_"
@@ -1351,9 +1351,10 @@ class PTSiteSignIn(_PluginBase):
 
     def _maybe_fallback(self, info: Dict[str, Any], rule: Dict[str, Any], outcome: SignResult,
                         signer: Optional[BrowserlessSigner]) -> Tuple[SignResult, str]:
-        """HTTP 直连撞上 Cloudflare / 验证码时，自动改用 Browserless 重试一次。
+        """HTTP 失败后按需改用浏览器重试。
 
-        只对未显式声明引擎的站点生效（rule 的 auto_fallback），并可在配置里整体关闭。
+        默认回退到 Browserless；高清杜比这类站点可声明 ``local_browser_fallback``，
+        优先用 MoviePilot 所在网络的本机 Playwright 点击，失败后再尝试 Browserless。
         返回（结果, 实际使用的引擎）。
         """
         # 自动回退恒为开启（设置页不再提供开关）；用户在规则里显式写了 engine 的站点不参与
@@ -1366,9 +1367,32 @@ class PTSiteSignIn(_PluginBase):
         label = ("Cloudflare 验证" if outcome.challenge == "cloudflare"
                  else "验证码" if outcome.challenge
                  else "未匹配到签到结果")
-        if signer is None:
-            return SignResult("failed", f"{outcome.message}；检测到{label}，但未配置 Browserless 地址或 Token"), "http"
         site_name = str(info.get("name") or info.get("url") or "未知站点")
+
+        local_note = ""
+        local_engine = "http"
+        if rule.get("local_browser_fallback"):
+            logger.info(f"PT站点签到：{site_name} 检测到{label}，先改用本机 Playwright 重试")
+            local_engine = "playwright"
+            local_result = playwright_sign(
+                info, rule, timeout=max(90, self._timeout * 2),
+                proxies=self._proxies_for(info))
+            if local_result is not None and local_result.status in {"success", "already"}:
+                return SignResult(
+                    local_result.status,
+                    f"{local_result.message}（HTTP 未确认，已改用本机 Playwright）",
+                ), "playwright"
+            if local_result is None:
+                local_note = "本机未提供 Playwright"
+            else:
+                local_note = f"本机 Playwright 重试未通过：{local_result.message}"
+
+        if signer is None:
+            suffix = f"；{local_note}" if local_note else ""
+            return SignResult(
+                "failed",
+                f"{outcome.message}；检测到{label}{suffix}；未配置 Browserless 地址或 Token",
+            ), local_engine
         logger.info(f"PT站点签到：{site_name} 检测到{label}，自动改用 Browserless 重试")
         try:
             # 验证码站点要按页面推导选择器交给 Browserless 的 solveImageCaptcha
@@ -1380,7 +1404,8 @@ class PTSiteSignIn(_PluginBase):
                                        self._proxies_for(info), str(info.get("ua") or ""))
             fallback = fallback_rule(rule, outcome.challenge, page_html)
         except ValueError as error:
-            return SignResult("failed", f"{outcome.message}；回退规则无效：{error}"), "http"
+            prefix = f"{outcome.message}；{local_note}；" if local_note else f"{outcome.message}；"
+            return SignResult("failed", f"{prefix}回退规则无效：{error}"), local_engine
         # 撞盾时未必知道该站真正的签到入口（首页挂「每日签到」表单的站点没有独立签到页）：
         # 顺手从首页找一次，找到就把它交给浏览器，别让浏览器去开一个 404 的地址
         base_url = str(info.get("url") or "").rstrip("/")
@@ -1392,9 +1417,16 @@ class PTSiteSignIn(_PluginBase):
             fallback = dict(fallback, path=str(discovered["path"]))
             logger.info(f"PT站点签到：{site_name} 的签到入口改为 {discovered['path']}")
         retry = signer.sign(info, fallback)
+        prefix = f"{outcome.message}；{local_note}；" if local_note else ""
         if retry.status in {"success", "already"}:
-            return SignResult(retry.status, f"{retry.message}（已自动改用浏览器引擎通过{label}）"), "browserless"
-        return SignResult("failed", f"{outcome.message}；浏览器引擎重试未通过：{retry.message}"), "browserless"
+            return SignResult(
+                retry.status,
+                f"{prefix}{retry.message}（已自动改用 Browserless 通过{label}）",
+            ), "browserless"
+        return SignResult(
+            "failed",
+            f"{prefix}Browserless 重试未通过：{retry.message}",
+        ), "browserless"
 
     def _proxies_for(self, info: Optional[Mapping[str, Any]] = None
                      ) -> Optional[Dict[str, str]]:
