@@ -1181,7 +1181,7 @@ def http_two_step(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: int
         probe["absent_status"] = rule["signin_absent_status"]
     judged = judge_http(response.text or "", probe)
     if judged.status in {"success", "already"}:
-        return SignResult(judged.status, f"{judged.message}（{signin_path}）")
+        return SignResult(judged.status, f"{judged.message}；签到入口 {signin_path}")
     # 答题式签到（52PT / CHDBits / U2）：答错不算签到成功，换一个选项再来，最多试 3 次
     if picks and str(rule.get("signin_pick") or "").lower() == "random":
         for _ in range(2):
@@ -1204,7 +1204,7 @@ def http_two_step(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: int
                 break
             judged = judge_http(retry.text or "", probe)
             if judged.status in {"success", "already"}:
-                return SignResult(judged.status, f"{judged.message}（{signin_path}）")
+                return SignResult(judged.status, f"{judged.message}；签到入口 {signin_path}")
     return None
 
 
@@ -2687,19 +2687,57 @@ def extract_bonus(content: str, rule: Mapping[str, Any]) -> str:
     return ""
 
 
-def message_bonus(message: Any) -> str:
-    """从结果文案里取出奖励部分：「签到成功（获得 20 粒爆米花）」→「获得 20 粒爆米花」。
+_PAREN_BONUS_RE = re.compile(r"[（(]([^（()）]{1,80})[)）]")
+_BONUS_NOTE_PATTERN = re.compile(
+    r"(?:已自动改用|browserless|playwright|回读签到页|按页面表单|提交响应确认|"
+    r"提交后页面确认|签到入口|cloudflare|waf|未确认|未匹配|cookie)",
+    re.IGNORECASE,
+)
 
-    详情页「结果」列用它显示实际到手的东西（魔力值 / 爆米花 / 奖励），比整句文案清爽。
+
+def _bonus_candidate(value: Any, *, require_start: bool = False) -> str:
+    """把括号内容规范成收益文案；执行说明、路径等返回空字符串。"""
+    text = re.sub(r"\s+", " ", str(value or "")).strip().strip(",，、;；:：")
+    if not text or _BONUS_NOTE_PATTERN.search(text):
+        return ""
+    compact = re.sub(r"\s+", "", text)
+    if ".php" in compact.lower() or (compact.startswith("/") and "?" in compact):
+        return ""
+    if require_start and not re.match(
+            rf"^(?:本次)?(?:签到)?(?:{BONUS_VERBS}|签到已得|簽到已得)|"
+            rf"^{BONUS_AMOUNT}\s*(?:{BONUS_COUNTERS})?\s*(?:{BONUS_UNITS})|"
+            rf"^(?:{BONUS_UNITS})\s*[:：]?\s*\+?\s*{BONUS_AMOUNT}|"
+            rf"^[+＋]\s*{BONUS_AMOUNT}|^{BONUS_AMOUNT}",
+            text, re.IGNORECASE):
+        return ""
+    number = re.fullmatch(r"([\d,]+(?:\.\d+)?)", text)
+    if number:
+        return "获得 " + number.group(1)
+    signed = re.fullmatch(r"[+＋]\s*([\d,]+(?:\.\d+)?)", text)
+    if signed:
+        return "获得 " + signed.group(1)
+    if re.search(rf"(?:{BONUS_UNITS})", text, re.IGNORECASE) \
+            or re.search(rf"(?:{BONUS_VERBS}|签到已得|簽到已得)", text, re.IGNORECASE):
+        return text
+    if re.search(BONUS_AMOUNT, text) and re.search(
+            rf"[+＋]|(?:{BONUS_COUNTERS})", text, re.IGNORECASE):
+        return text
+    return ""
+
+
+def message_bonus(message: Any) -> str:
+    """从结果文案里取出奖励部分，跳过末尾的执行说明或签到路径。
+
+    「签到成功（获得 20 粒爆米花）（已自动改用 Browserless）」→「获得 20 粒爆米花」；
+    「签到成功（获得 20 粒爆米花）（/index.php?action=addbonus）」同样取收益。
     """
     text = re.sub(r"\s+", " ", str(message or "")).strip()
-    match = re.search(r"[（(]([^（()）]{1,80})[)）]\s*$", text)
-    if not match:
-        return ""
-    bonus = match.group(1).strip().strip(",，、;；:：")
-    if re.fullmatch(r"[\d,]+(?:\.\d+)?", bonus):
-        return "获得 " + bonus
-    return bonus
+    for value in reversed(_PAREN_BONUS_RE.findall(text)):
+        bonus = _bonus_candidate(value)
+        if bonus:
+            return bonus
+    # 兼容已经规范化过、但没有括号的 bonus 字段。
+    return _bonus_candidate(text, require_start=True)
 
 
 def snippet_around(text: str, keyword: str, width: int = 60) -> str:

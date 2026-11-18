@@ -283,6 +283,30 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertIn("22", self.core.extract_bonus("签到成功，获得 22 粒爆米花", {}))
         self.assertIn("30", self.core.extract_bonus("签到已得 30 魔力值", {}))
 
+    def test_message_bonus_skips_trailing_operational_notes(self):
+        cases = (
+            ("签到成功（获得 65 魔力值）（已自动改用 Browserless 通过未匹配到签到结果）",
+             "获得 65 魔力值"),
+            ("签到成功（获得 20 粒爆米花）（/index.php?action=addbonus）",
+             "获得 20 粒爆米花"),
+            ("签到成功（65,）（回读签到页确认）", "获得 65"),
+            ("签到成功（+10）（签到入口 /signin.php）", "获得 10"),
+            ("签到成功（获得 65 魔力值）；已自动改用 Browserless 通过验证",
+             "获得 65 魔力值"),
+            ("签到成功（获得 20 粒爆米花）；签到入口 /index.php?action=addbonus",
+             "获得 20 粒爆米花"),
+        )
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                for message, expected in cases:
+                    self.assertEqual(core.message_bonus(message), expected)
+
+    def test_message_bonus_accepts_normalized_stored_value(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                self.assertEqual(core.message_bonus("获得 65 魔力值"), "获得 65 魔力值")
+                self.assertEqual(core.message_bonus("已自动改用 Browserless"), "")
+
     def test_classify_browserless_keywords(self):
         rule = {"success_keywords": ["签到成功"], "already_keywords": ["已签到"]}
         success = self.core.classify("<html><body>签到成功，获得 5 魔力值</body></html>", rule)

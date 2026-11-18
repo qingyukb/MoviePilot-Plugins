@@ -204,7 +204,7 @@ class PTSiteSignIn(_PluginBase):
     plugin_name = "PT站点签到"
     plugin_desc = ("PT 站点自动签到，支持 Cookie 登录并读取最近动向；验证码或 Cloudflare 可按规则改用浏览器。")
     plugin_icon = "signin.png"
-    plugin_version = "3.1.9"
+    plugin_version = "3.1.10"
     plugin_author = "qingyukb"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "ptsignin_"
@@ -694,11 +694,13 @@ class PTSiteSignIn(_PluginBase):
             if str(self._login_view(row).get("status") or "") == "login_failed":
                 return str(row.get("login") or row.get("message") or "").strip() or "登录失败"
             return self._activity_hint(str(row.get("activity_source") or ""))
-        bonus = decode_entities(row.get("bonus")).strip()
+        # message 是收益原文：优先重算可兼容历史记录里已写错的 bonus。
+        bonus = decode_entities(message_bonus(row.get("message"))).strip()
+        if not bonus:
+            bonus = decode_entities(message_bonus(row.get("bonus"))).strip()
         if bonus:
             return bonus
-        return decode_entities(message_bonus(row.get("message"))
-                               or str(row.get("message") or "-")).strip()
+        return decode_entities(str(row.get("message") or "-")).strip()
 
     @staticmethod
     def _login_view(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -1421,7 +1423,7 @@ class PTSiteSignIn(_PluginBase):
         if retry.status in {"success", "already"}:
             return SignResult(
                 retry.status,
-                f"{prefix}{retry.message}（已自动改用 Browserless 通过{label}）",
+                f"{prefix}{retry.message}；已自动改用 Browserless 通过{label}",
             ), "browserless"
         return SignResult(
             "failed",

@@ -3,7 +3,7 @@
     "name": "PT站点签到",
     "description": "PT 站点自动签到，支持 Cookie 登录并读取最近动向；验证码或 Cloudflare 可按规则改用浏览器。",
     "labels": "站点,签到",
-    "version": "2.1.9",
+    "version": "2.1.10",
     "icon": "https://raw.githubusercontent.com/qingyukb/MoviePilot-Plugins/main/icons/ptsignin.png",
     "author": "qingyukb",
     "level": 2,
@@ -12,6 +12,7 @@
     "v2": true,
     "system_version": ">=2.0.0,<3.0.0",
     "history": {
+      "v2.1.10": "修复我堡、听听歌、学校等站点收益被末尾说明文字顶掉的问题：详情页会从完整消息中重新识别实际奖励，并兼容历史记录。",
       "v2.1.9": "修复高清杜比（uhddolby.com）新版签到页：HTTP 未确认时自动改用同 IP 本机 Playwright 点击「立即签到」，避免正常签到误报失败。",
       "v2.1.8": "修复 PlayLet 页面出现成功文字但签到表单仍在时误报成功；新增自然（naturept.top）图片验证码签到规则，模块 OCR 不可用时回退 Browserless。",
       "v2.1.7": "修复皇后（OpenCD）签到提交并完成实测；失败重试在手动执行和宿主调度下可靠运行；最近动向改为默认读取，重做签到状态与设置页布局并按官方稳定 SDK 优化任务和浏览器生命周期。",

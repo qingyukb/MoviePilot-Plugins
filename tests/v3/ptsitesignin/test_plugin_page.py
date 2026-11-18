@@ -479,6 +479,30 @@ class PagePluginTests(unittest.TestCase):
         page, _ = self._page(latest, history=latest)
         self.assertIn(("观众", "签到成功", "获得 65"), row_pairs(page))
 
+    def test_signin_result_uses_stored_bonus_when_message_has_no_bonus(self):
+        latest = [{"site": "观众", "status": "success", "message": "签到成功",
+                   "bonus": "获得 65 魔力值", "ran_at": self._today("03:20:02"),
+                   "engine": "http"}]
+        page, _ = self._page(latest, history=latest)
+        self.assertIn(("观众", "签到成功", "获得 65 魔力值"), row_pairs(page))
+
+    def test_signin_result_repairs_legacy_bonus_with_trailing_note(self):
+        # 历史记录里 bonus 被错误解析成第二个括号，展示时从完整 message 重新计算。
+        latest = [
+            {"site": "观众", "status": "success",
+             "message": "签到成功（获得 65 魔力值）（已自动改用 Browserless 通过Cloudflare 验证）",
+             "bonus": "已自动改用 Browserless 通过Cloudflare 验证",
+             "ran_at": self._today("03:20:02"), "engine": "browserless"},
+            {"site": "学校", "status": "success",
+             "message": "签到成功（获得 20 粒爆米花）（/index.php?action=addbonus）",
+             "bonus": "/index.php?action=addbonus",
+             "ran_at": self._today("03:20:03"), "engine": "http"},
+        ]
+        page, _ = self._page(latest, history=latest)
+        pairs = row_pairs(page)
+        self.assertIn(("观众", "签到成功", "获得 65 魔力值"), pairs)
+        self.assertIn(("学校", "签到成功", "获得 20 粒爆米花"), pairs)
+
     def test_dual_site_shows_in_both_tables(self):
         latest = [{"site": "观众", "status": "already", "ran_at": self._today("03:11:49"),
                    "message": "今日已经签到（获得 20 粒爆米花）", "bonus": "获得 20 粒爆米花",
