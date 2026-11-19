@@ -2505,6 +2505,29 @@ class BrowserSdkLauncherTests(unittest.TestCase):
                 })
 
 
+class PlaywrightDiagnosticTests(unittest.TestCase):
+    def test_page_diagnostic_reports_u2_state(self):
+        state = {
+            "title": "U2分享園@動漫花園 :: 每日签到",
+            "hasLogout": True,
+            "hasLoginForm": False,
+            "hasReqForm": False,
+            "answerButtons": 0,
+            "signedText": "已签到",
+            "hasChallenge": False,
+            "text": "不应输出的用户正文",
+        }
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                text = core.playwright_page_diagnostic(state)
+                self.assertIn("U2分享園", text)
+                self.assertIn("登录态=已登录", text)
+                self.assertIn("req表单=无", text)
+                self.assertIn("答题按钮=0", text)
+                self.assertIn("已签到入口=有", text)
+                self.assertNotIn("不应输出", text)
+
+
 class PlaywrightCaptchaTests(unittest.TestCase):
     """签到接口要求 Turnstile 时，必须诚实失败且最多提交两次。"""
 

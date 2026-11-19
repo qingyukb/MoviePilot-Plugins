@@ -1597,6 +1597,32 @@ _PLAYWRIGHT_PAGE_READY_JS = r"""
 """
 
 
+_PLAYWRIGHT_DIAGNOSTIC_JS = r"""
+() => {
+  const html = document.documentElement ? document.documentElement.innerHTML : "";
+  const answerForm = document.querySelector("form:has(input[name='req'])");
+  const answerButtons = document.querySelectorAll(
+    "form:has(input[name='req']) input[type='submit']").length;
+  const signedLink = [...document.querySelectorAll("a")].find((node) => {
+    const text = (node.innerText || node.textContent || "").trim();
+    return /已签到|已簽到|Show Up|Показать/i.test(text)
+      && String(node.href || "").includes("showup.php");
+  });
+  return {
+    title: document.title || "",
+    url: location.href || "",
+    readyState: document.readyState || "",
+    hasLoginForm: !!document.querySelector("input[type='password']"),
+    hasLogout: /logout\.php/i.test(html),
+    hasReqForm: !!answerForm,
+    answerButtons: answerButtons,
+    signedText: signedLink ? (signedLink.innerText || signedLink.textContent || "").trim() : "",
+    hasChallenge: /just a moment|cf-chl|cloudflare|challenge-platform/i.test(html),
+  };
+}
+"""
+
+
 _CHALLENGE_PATTERN = re.compile(r"(just a moment|cf-chl|_cf_chl_opt|chl_page|"
                                 r"正在进行安全检测|安全检测能力由|雷池\s*WAF|SafeLine|"
                                 r"正在验证您是否是真人|verify you are human|checking your browser)",
@@ -1847,6 +1873,22 @@ def _wait_playwright_page_ready(page: Any, rule: Mapping[str, Any],
             _time.sleep(0.5)
         state = _playwright_page_ready_state(page, rule)
     return state
+
+
+def playwright_page_diagnostic(state: Any) -> str:
+    """把本机浏览器失败时的页面状态压成单行诊断，不输出 Cookie 或正文。"""
+    if not isinstance(state, Mapping):
+        return "页面诊断不可用"
+    title = re.sub(r"\s+", " ", str(state.get("title") or "")).strip()[:50] or "无标题"
+    logged_in = bool(state.get("hasLogout")) and not bool(state.get("hasLoginForm"))
+    return (
+        f"页面「{title}」；登录态={'已登录' if logged_in else '未登录'}；"
+        f"req表单={'有' if state.get('hasReqForm') else '无'}；"
+        f"答题按钮={int(state.get('answerButtons') or 0)}；"
+        f"已签到入口={'有' if state.get('signedText') else '无'}；"
+        f"登录表单={'有' if state.get('hasLoginForm') else '无'}；"
+        f"安全验证页={'有' if state.get('hasChallenge') else '无'}"
+    )
 
 
 def _page_ready_timeout_message(state: Mapping[str, Any]) -> str:
@@ -2440,6 +2482,14 @@ def playwright_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: i
             if clicked or (last.get("result") and last["result"].status in {"success", "already"}):
                 break
             # 这一页既没点成也不像已签到：换下一个备用页面
+        if not clicked and not (last.get("result")
+                                 and last["result"].status in {"success", "already"}):
+            try:
+                diagnostic = page.evaluate(_PLAYWRIGHT_DIAGNOSTIC_JS)
+            except Exception:
+                diagnostic = None
+            if isinstance(diagnostic, Mapping):
+                last["diagnostic"] = dict(diagnostic)
         last["tried"] = tried
         last["paths"] = paths
         return last
@@ -2486,9 +2536,10 @@ def playwright_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: i
             return SignResult("failed",
                               f"本地浏览器仍卡在安全验证页面（已试：{tried or '默认页面'}）："
                               f"检查 Cookie 里是否带 cf_clearance / sl-*，或把 cloudflare_wait 调大")
+        diagnostic = playwright_page_diagnostic(outcome.get("diagnostic"))
         return SignResult("failed",
-                          f"本地浏览器没找到可点的签到按钮（已试：{tried or '默认页面'}；"
-                          f"可在这条规则的 retry_paths 里补页面）")
+                          f"本地浏览器没找到可点的签到按钮；{diagnostic}"
+                          f"；已试：{tried or '默认页面'}；可在该条规则的 retry_paths 里补页面")
     if outcome.get("stuck") == "captcha":
         return SignResult("failed", str(outcome.get("message") or judged.message),
                           challenge="captcha")

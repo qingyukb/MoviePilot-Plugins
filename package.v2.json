@@ -12,7 +12,7 @@
     "v2": true,
     "system_version": ">=2.0.0,<3.0.0",
     "history": {
-      "v2.1.12": "整合 U2 本机 Playwright 修复：使用浏览器 Cookie 存储注入登录态，按 input[name=req] 定位答题表单，打开页面后等待 10 秒再检测、提交后等待 8 秒核验；修复代理 proxy.server 参数和 Browserless 回退 mode 异常；U2 禁用跨 IP Browserless 回退，并保留完整执行与成功日志。",
+      "v2.1.12": "整合 U2 本机 Playwright 修复：使用浏览器 Cookie 存储注入登录态，按 input[name=req] 定位答题表单，打开页面后等待 10 秒再检测、提交后等待 8 秒核验；找不到按钮时输出登录态、req 表单、答题按钮、已签到入口和安全验证页诊断；修复代理 proxy.server 参数和 Browserless 回退 mode 异常；U2 禁用跨 IP Browserless 回退，并保留完整执行与成功日志。",
       "v2.1.11": "U2 签到改走本机 Playwright，规避 HTTP 请求被 DNS/TLS 链路拦截；随机点四选一选项，并正确识别已签到状态。运行日志新增开始处理站点、成功站点、已签到及登录成功汇总，便于定位卡住位置。",
       "v2.1.10": "修复我堡、听听歌、学校等站点收益被末尾说明文字顶掉的问题：详情页会从完整消息中重新识别实际奖励，并兼容历史记录。",
       "v2.1.9": "修复高清杜比（uhddolby.com）新版签到页：HTTP 未确认时自动改用同 IP 本机 Playwright 点击「立即签到」，避免正常签到误报失败。",
