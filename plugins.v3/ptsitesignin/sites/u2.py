@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import random
 import re
+import time
+from html import unescape
 from typing import Any, Dict, List, Mapping, Tuple
 
 
@@ -23,13 +25,14 @@ _SIGNED_LINK_RE = re.compile(
     r"(?:\?[^\"']*)?[\"'])[^>]*>\s*(?:已签到|已簽到|Show Up|Показать)\s*</a>",
     re.IGNORECASE | re.DOTALL,
 )
-_SHOWUP_FORM_RE = re.compile(
-    r"<form\b(?=[^>]*\baction\s*=\s*[\"'][^\"']*showup\.php[^\"']*[\"'])[^>]*>"
-    r"(.*?)</form>",
-    re.IGNORECASE | re.DOTALL,
-)
+_FORM_RE = re.compile(r"<form\b([^>]*)>(.*?)</form>", re.IGNORECASE | re.DOTALL)
 _INPUT_RE = re.compile(r"<input\b[^>]*>", re.IGNORECASE)
 _ATTR_RE = re.compile(r"([\w:-]+)\s*=\s*([\"'])(.*?)\2", re.DOTALL)
+_SIGNED_STATUS_RE = re.compile(
+    r"(?:感谢|感謝)[，,]?\s*(?:今天|今日)\s*已(?:签到|簽到)|"
+    r"(?:今天|今日)\s*已(?:签到|簽到)",
+    re.IGNORECASE,
+)
 _LOGIN_FORM_RE = re.compile(
     r"<form\b(?=[^>]*\baction\s*=\s*[\"'][^\"']*(?:takelogin|login)\.php[^\"']*[\"'])"
     r"[^>]*>.*?<input\b[^>]*\btype\s*=\s*[\"']password[\"']",
@@ -41,18 +44,29 @@ def _attrs(tag: str) -> Dict[str, str]:
     return {name.lower(): value for name, _, value in _ATTR_RE.findall(tag or "")}
 
 
+def _answer_form_inner(page: str) -> str:
+    """只返回带 req 隐藏字段的真实答题表单，忽略历史查询等其他 showup 表单。"""
+    for _attrs_text, inner in _FORM_RE.findall(page or ""):
+        if re.search(r"<input\b[^>]*\bname\s*=\s*[\"']req[\"']",
+                     inner, re.IGNORECASE):
+            return inner
+    return ""
+
+
 def _has_signin_form(page: str) -> bool:
-    return bool(_SHOWUP_FORM_RE.search(page or "")
-                or re.search(r"<input\b[^>]*\bname\s*=\s*[\"']req[\"']",
-                             page or "", re.IGNORECASE))
+    return bool(_answer_form_inner(page))
 
 
 def _is_signed(page: str) -> bool:
-    """已签到页必须同时有已登录痕迹、签到状态链接，且不能再有答题表单。"""
+    """已签到页必须明确写“今天/今日已签到”，且不能残留答题表单。"""
     page = page or ""
-    return ("logout.php" in page.casefold()
-            and not _has_signin_form(page)
-            and bool(_SIGNED_LINK_RE.search(page)))
+    if "logout.php" not in page.casefold() or _has_signin_form(page):
+        return False
+    visible = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", page,
+                     flags=re.IGNORECASE | re.DOTALL)
+    visible = unescape(re.sub(r"<[^>]+>", " ", visible))
+    visible = re.sub(r"\s+", "", visible)
+    return bool(_SIGNED_STATUS_RE.search(visible))
 
 
 def _is_login_page(page: str) -> bool:
@@ -61,12 +75,12 @@ def _is_login_page(page: str) -> bool:
 
 def _showup_fields(page: str) -> Tuple[Dict[str, str], List[Tuple[str, str]]]:
     """返回 showup 表单的 hidden 字段和 submit 选项。"""
-    match = _SHOWUP_FORM_RE.search(page or "")
-    if not match:
+    inner = _answer_form_inner(page)
+    if not inner:
         return {}, []
     hidden: Dict[str, str] = {}
     options: List[Tuple[str, str]] = []
-    for tag in _INPUT_RE.findall(match.group(1)):
+    for tag in _INPUT_RE.findall(inner):
         attrs = _attrs(tag)
         name = str(attrs.get("name") or "").strip()
         if not name:
@@ -82,7 +96,6 @@ def _showup_fields(page: str) -> Tuple[Dict[str, str], List[Tuple[str, str]]]:
 
 class U2:
     site_url = "u2.dmhy.org"
-    prefer_playwright = True
 
     def signin(self, site: Mapping[str, Any], ctx: Any) -> Tuple[bool, str]:
         page = ctx.page(SHOWUP_URL)
@@ -110,12 +123,17 @@ class U2:
         if response is None or response.status_code != 200:
             return False, "签到失败：签到接口请求失败"
 
-        # 官方实现也会重新读取 showup.php。提交响应可能只是 JS 跳转，不能据此报成功。
-        checked = ctx.page(SHOWUP_URL)
-        if _is_signed(checked):
-            return True, "签到成功"
-        if _is_login_page(checked):
-            return False, "签到失败：Cookie 已失效"
+        # 不依赖提交响应的跳转脚本是否可识别，始终回读 showup.php。
+        # 若站点写库较慢，只重复读取，不重复提交答题。
+        checked = ""
+        for attempt in range(3):
+            checked = ctx.page(SHOWUP_URL)
+            if _is_signed(checked):
+                return True, "签到成功"
+            if _is_login_page(checked):
+                return False, "签到失败：Cookie 已失效"
+            if attempt < 2:
+                time.sleep(2)
         if _has_signin_form(checked):
             return False, "签到失败：随机答案未通过，站点仍显示签到表单"
-        return False, "签到失败：已提交，但未回读到已签到状态"
+        return False, "签到失败：已提交，但多次回读仍未确认当天签到状态"

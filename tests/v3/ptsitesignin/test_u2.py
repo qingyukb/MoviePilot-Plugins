@@ -31,6 +31,7 @@ SIGNED_PAGE = """
 <html><body>
   <a href="logout.php">退出</a>
   <a href="showup.php">已签到</a>
+  <div>感谢，今天已签到</div>
 </body></html>
 """
 
@@ -58,8 +59,10 @@ class _Context:
         self.pages = list(pages)
         self.response = response
         self.posts = []
+        self.pages_read = []
 
     def page(self, url, **kwargs):
+        self.pages_read.append(url)
         return self.pages.pop(0) if self.pages else ""
 
     def post(self, url, data=None, headers=None, **kwargs):
@@ -100,74 +103,50 @@ class U2ModuleTests(unittest.TestCase):
             self.assertIsNotNone(module)
             self.assertEqual(module.site_url, "u2.dmhy.org")
 
-    def test_playwright_rule_skips_raw_http_module(self):
+    def test_http_rule_and_module_restored(self):
         for core in CORES:
             with self.subTest(core=core.__name__):
                 rule = core.resolve_rule(
                     {"url": "https://u2.dmhy.org/", "cookie": "u2=1"}, {})
-                self.assertEqual(rule["engine"], "playwright")
-                self.assertTrue(rule["playwright_random_target"])
-                self.assertEqual(rule["cookie_mode"], "browser")
-                self.assertIn("input[name='req']", rule["submit_selector"])
-                self.assertEqual(rule["playwright_initial_wait"], 10000)
-                self.assertTrue(rule["playwright_detailed_diagnostic"])
-                self.assertFalse(rule["browserless_fallback"])
-                self.assertIsNone(core.run_site_module(
-                    {"url": "https://u2.dmhy.org/", "cookie": "u2=1"}, rule=rule))
+                self.assertEqual(rule["engine"], "http")
+                self.assertEqual(rule["path"], "/showup.php")
+                self.assertEqual(rule["signin_path"], "/showup.php?action=show")
+                self.assertEqual(rule["signin_method"], "POST")
+                self.assertEqual(rule["signin_pick"], "random")
+                module = core.site_module_for("https://u2.dmhy.org/showup.php")
+                self.assertIsNotNone(module)
+                self.assertFalse(getattr(module, "prefer_playwright", False))
 
-    def test_playwright_random_answer_flow(self):
-        class _Context:
-            def __init__(self):
-                self.cookies = []
+    def test_history_form_is_ignored(self):
+        history_form = ('<html><body><a href="logout.php">退出</a>'
+                        '<form action="showup.php" method="get">'
+                        '<input type="date" name="date"><input type="submit" value="提交">'
+                        '</form>' + UNSIGNED_PAGE.split("<body>", 1)[1]
+                        .replace("</body></html>", "") + '</body></html>')
+        for module in self.modules:
+            hidden, options = module._showup_fields(history_form)
+            self.assertEqual(hidden.get("req"), "req-token")
+            self.assertEqual(len(options), 4)
 
-            def add_cookies(self, cookies):
-                self.cookies.extend(cookies)
+    def test_link_only_is_not_treated_as_signed(self):
+        link_only = ('<html><body><a href="logout.php">退出</a>'
+                     '<a href="showup.php">已签到</a></body></html>')
+        for module in self.modules:
+            self.assertFalse(module._is_signed(link_only))
 
-        class _Page:
-            def __init__(self, core):
-                self.core = core
-                self.clicked = False
-                self.mark_args = None
-                self.context = _Context()
-                self.timeouts = []
-
-            def goto(self, *args, **kwargs):
-                return None
-
-            def wait_for_load_state(self, *args, **kwargs):
-                return None
-
-            def content(self):
-                return SIGNED_PAGE if self.clicked else UNSIGNED_PAGE
-
-            def evaluate(self, script, args=None):
-                if script == self.core._MARK_CLICK_JS:
-                    self.mark_args = list(args or [])
-                    return True
-                return False
-
-            def click(self, selector, timeout=0):
-                self.clicked = True
-
-            def wait_for_timeout(self, timeout):
-                self.timeouts.append(timeout)
-
-        for core in CORES:
-            with self.subTest(core=core.__name__):
-                rule = core.resolve_rule(
-                    {"url": "https://u2.dmhy.org/", "cookie": "u2=1"}, {})
-                page = _Page(core)
-                with mock.patch.object(core, "playwright_available", return_value=True),                         mock.patch.object(core, "_run_browser_callback",
-                                          side_effect=lambda callback, **kwargs: callback(page)):
-                    result = core.playwright_sign(
-                        {"url": "https://u2.dmhy.org/", "cookie": "u2=1"},
-                        rule, timeout=1)
-                self.assertIsNotNone(result)
-                self.assertEqual(result.status, "already", result.message)
-                self.assertTrue(page.clicked)
-                self.assertEqual(page.mark_args[3], True)
-                self.assertIn(10000, page.timeouts)
-                self.assertTrue(any(cookie["name"] == "u2" for cookie in page.context.cookies))
+    def test_readback_retries_without_resubmitting(self):
+        response = _Response(200, "<script>location.href='showup.php';</script>")
+        for module in self.modules:
+            ctx = _Context([UNSIGNED_PAGE, UNSIGNED_PAGE, UNSIGNED_PAGE, SIGNED_PAGE], response)
+            with mock.patch.object(module.random, "choice", return_value=("answer1", "1")), \
+                    mock.patch.object(module.time, "sleep") as sleep:
+                ok, message = module.U2().signin(
+                    {"url": "https://u2.dmhy.org", "cookie": "u2=1"}, ctx)
+            self.assertTrue(ok)
+            self.assertEqual(message, "签到成功")
+            self.assertEqual(len(ctx.posts), 1)
+            self.assertEqual(len(ctx.pages_read), 4)
+            self.assertEqual(sleep.call_count, 2)
 
     def test_parse_hidden_fields_and_answers(self):
         for module in self.modules:
@@ -206,8 +185,10 @@ class U2ModuleTests(unittest.TestCase):
     def test_redirect_without_signed_state_is_failure(self):
         response = _Response(200, "<script>window.location.href='showup.php';</script>")
         for module in self.modules:
-            ctx = _Context([UNSIGNED_PAGE, UNSIGNED_PAGE], response)
-            with mock.patch.object(module.random, "choice", return_value=("answer0", "0")):
+            ctx = _Context([UNSIGNED_PAGE, UNSIGNED_PAGE, UNSIGNED_PAGE, UNSIGNED_PAGE],
+                           response)
+            with mock.patch.object(module.random, "choice", return_value=("answer0", "0")), \
+                    mock.patch.object(module.time, "sleep"):
                 ok, message = module.U2().signin(
                     {"url": "https://u2.dmhy.org", "cookie": "u2=1"}, ctx)
             self.assertFalse(ok)
