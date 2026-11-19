@@ -442,7 +442,7 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "engine": "playwright",
         "method": "GET",
         "path": "/showup.php",
-        "submit_selector": "form[action*='showup.php?action=show'] input[type='submit']",
+        "submit_selector": "form:has(input[name='req']) input[type='submit']",
         "submit_method": "dom_click",
         "playwright_random_target": True,
         "playwright_already_texts": ["已签到", "已簽到", "今日已签到", "今日已簽到"],

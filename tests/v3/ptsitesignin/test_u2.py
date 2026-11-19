@@ -107,7 +107,7 @@ class U2ModuleTests(unittest.TestCase):
                     {"url": "https://u2.dmhy.org/", "cookie": "u2=1"}, {})
                 self.assertEqual(rule["engine"], "playwright")
                 self.assertTrue(rule["playwright_random_target"])
-                self.assertIn("showup.php?action=show", rule["submit_selector"])
+                self.assertIn("input[name='req']", rule["submit_selector"])
                 self.assertIsNone(core.run_site_module(
                     {"url": "https://u2.dmhy.org/", "cookie": "u2=1"}, rule=rule))
 

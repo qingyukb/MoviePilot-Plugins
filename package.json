@@ -3,7 +3,7 @@
     "name": "PT站点签到",
     "description": "PT 站点自动签到，支持 Cookie 登录并读取最近动向；验证码或 Cloudflare 可按规则改用浏览器。",
     "labels": "站点,签到",
-    "version": "2.1.12",
+    "version": "2.1.13",
     "icon": "https://raw.githubusercontent.com/qingyukb/MoviePilot-Plugins/main/icons/ptsignin.png",
     "author": "qingyukb",
     "level": 2,
@@ -11,6 +11,7 @@
     "v2": true,
     "system_version": ">=2.0.0",
     "history": {
+      "v2.1.13": "参考站点自动签到 v3.0.14 的 U2 规则，签到按钮改为按 input[name='req'] 定位，兼容 showup.php 的 action 地址变化，避免本机 Playwright 找不到四选一按钮。",
       "v2.1.12": "修复本机 Playwright 使用站点代理时的 proxy.server 参数错误；修复 Playwright 失败后改用 Browserless 时因缺少 mode 触发 KeyError，并保留签到路径与状态规则。",
       "v2.1.11": "U2 签到改走本机 Playwright，规避 HTTP 请求被 DNS/TLS 链路拦截；随机点四选一选项，并正确识别已签到状态。运行日志新增开始处理站点、成功站点、已签到及登录成功汇总，便于定位卡住位置。",
       "v2.1.10": "修复我堡、听听歌、学校等站点收益被末尾说明文字顶掉的问题：详情页会从完整消息中重新识别实际奖励，并兼容历史记录。",
