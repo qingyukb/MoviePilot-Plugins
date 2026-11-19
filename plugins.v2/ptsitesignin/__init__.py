@@ -219,7 +219,7 @@ class PTSiteSignIn(_PluginBase):
     plugin_name = "PT站点签到"
     plugin_desc = ("PT 站点自动签到，支持 Cookie 登录并读取最近动向；验证码或 Cloudflare 可按规则改用浏览器。")
     plugin_icon = "signin.png"
-    plugin_version = "2.1.11"
+    plugin_version = "2.1.12"
     plugin_author = "qingyukb"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "ptsignin_"
@@ -880,7 +880,9 @@ class PTSiteSignIn(_PluginBase):
                     reason = ("本机未提供 Playwright" if outcome is None
                               else f"本机 Playwright 失败：{outcome.message}")
                     logger.info(f"PT站点签到：{site_name} {reason}，改用 Browserless")
-                    fallback = signer.sign(info, rule)
+                    browser_rule = fallback_rule(
+                        rule, outcome.challenge if outcome is not None else "", "")
+                    fallback = signer.sign(info, browser_rule)
                     if fallback.status in {"success", "already"}:
                         return SignResult(fallback.status,
                                           f"{reason}；Browserless：{fallback.message}")

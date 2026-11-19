@@ -634,7 +634,8 @@ def fallback_rule(rule: Mapping[str, Any], challenge: str,
         "mode": FALLBACK_MODES.get(str(challenge), "open_page"),
         "path": str(rule.get("path") or DEFAULT_HTTP_PATH),
         "submit_selector": "input[type='submit']",
-        "already_keywords": [],
+        "success_keywords": list(rule.get("success_keywords") or []),
+        "already_keywords": list(rule.get("already_keywords") or []),
     }
     # 验证码站点：能从页面推导出验证码表单参数时，走 Browserless 自带的 solveImageCaptcha，
     # 这样 OCR 认不出的验证码也有第二次机会（否则只是重新打开页面，照样卡在验证码）
@@ -647,7 +648,9 @@ def fallback_rule(rule: Mapping[str, Any], challenge: str,
     # 让用户在 HTTP 规则里写的等待参数（如 cloudflare_wait）与点击目标（submit_selector /
     # submit_text，例如 AGSVPT 的「立即签到」）对自动回退同样生效
     for name in ("cloudflare_wait", "wait", "preflight_wait", "submit_selector", "submit_text",
-                 "pre_click_selector", "pre_click_text"):
+                 "pre_click_selector", "pre_click_text", "success", "already",
+                 "strict_status_keywords", "absent_keywords", "absent_status",
+                 "require_absent_for_success", "browserless_retry", "retry_paths"):
         if rule.get(name) is not None:
             fallback[name] = rule[name]
     return validate_rule(fallback)
@@ -1922,6 +1925,31 @@ def _load_browser_launcher():
         return None
 
 
+def browser_proxy_config(proxies: Optional[Mapping[str, str]]) -> Optional[Dict[str, Any]]:
+    """把 requests 的 http/https 代理字典转换成 Playwright 的 proxy 配置。"""
+    if not proxies:
+        return None
+    raw = str(proxies.get("https") or proxies.get("http") or "").strip()
+    if not raw:
+        return None
+    candidate = raw if "://" in raw else "http://" + raw
+    try:
+        parsed = urllib.parse.urlsplit(candidate)
+    except ValueError:
+        return {"server": raw}
+    if not parsed.hostname:
+        return {"server": raw}
+    server = f"{parsed.scheme or 'http'}://{parsed.hostname}"
+    if parsed.port:
+        server += f":{parsed.port}"
+    config: Dict[str, Any] = {"server": server}
+    if parsed.username:
+        config["username"] = urllib.parse.unquote(parsed.username)
+    if parsed.password:
+        config["password"] = urllib.parse.unquote(parsed.password)
+    return config
+
+
 def _load_playwright_helper():
     """旧版 V2 宿主的浏览器助手兼容入口。"""
     try:
@@ -1947,7 +1975,9 @@ def _run_browser_callback(callback, cookies: str = "", ua: str = "",
         if ua:
             launch_kwargs["user_agent"] = ua
         if proxies:
-            launch_kwargs["proxy"] = dict(proxies)
+            proxy_config = browser_proxy_config(proxies)
+            if proxy_config:
+                launch_kwargs["proxy"] = proxy_config
         try:
             context = launcher(**launch_kwargs)
             if cookies:

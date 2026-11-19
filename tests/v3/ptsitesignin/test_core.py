@@ -1971,12 +1971,15 @@ class ModuleFallbackTests(unittest.TestCase):
         plugin._timeout = 30
         plugin._proxies_for = lambda info: None  # type: ignore[method-assign]
 
+        captured = {}
+
         class _Signer:
             def __init__(self):
                 self.calls = 0
 
             def sign(self, info, rule):
                 self.calls += 1
+                captured.update(rule)
                 return module.SignResult("success", "Browserless 签到成功")
 
         signer = _Signer()
@@ -1984,12 +1987,16 @@ class ModuleFallbackTests(unittest.TestCase):
                                return_value=module.SignResult("failed", "本机未取得 token")):
             outcome = plugin._sign_with_engine(
                 {"url": "https://signin.example.test", "username": "u", "password": "p"},
-                {"engine": "playwright", "path": "/calendar", "browserless_fallback": True},
+                {"engine": "playwright", "path": "/calendar", "browserless_fallback": True,
+                 "retry_paths": ["/"]},
                 "playwright", signer, "示例站点")
         self.assertEqual(outcome.status, "success")
         self.assertIn("本机 Playwright 失败", outcome.message)
         self.assertIn("Browserless", outcome.message)
         self.assertEqual(signer.calls, 1)
+        self.assertEqual(captured["engine"], "browserless")
+        self.assertEqual(captured["mode"], "open_page")
+        self.assertEqual(captured["retry_paths"], ["/"])
 
     def test_missing_local_playwright_then_uses_browserless(self):
         from unittest import mock
@@ -2456,10 +2463,22 @@ class BrowserSdkLauncherTests(unittest.TestCase):
                 self.assertEqual(launch_kwargs["headless"], True)
                 self.assertEqual(launch_kwargs["user_agent"], "Test UA")
                 self.assertEqual(launch_kwargs["proxy"],
-                                 {"https": "http://proxy.example:8080"})
+                                 {"server": "http://proxy.example:8080"})
                 self.assertEqual(context.headers, {"Cookie": "a=1; b=2"})
                 self.assertTrue(context.page.closed)
                 self.assertTrue(context.closed)
+
+    def test_browser_proxy_config_strips_credentials(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                config = core.browser_proxy_config(
+                    {"https": "http://user:p%40ss@proxy.example:8080"})
+                self.assertEqual(config, {
+                    "server": "http://proxy.example:8080",
+                    "username": "user",
+                    "password": "p@ss",
+                })
+
 
 class PlaywrightCaptchaTests(unittest.TestCase):
     """签到接口要求 Turnstile 时，必须诚实失败且最多提交两次。"""
