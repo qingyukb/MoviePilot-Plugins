@@ -107,16 +107,25 @@ class U2ModuleTests(unittest.TestCase):
                     {"url": "https://u2.dmhy.org/", "cookie": "u2=1"}, {})
                 self.assertEqual(rule["engine"], "playwright")
                 self.assertTrue(rule["playwright_random_target"])
+                self.assertEqual(rule["cookie_mode"], "browser")
                 self.assertIn("input[name='req']", rule["submit_selector"])
                 self.assertIsNone(core.run_site_module(
                     {"url": "https://u2.dmhy.org/", "cookie": "u2=1"}, rule=rule))
 
     def test_playwright_random_answer_flow(self):
+        class _Context:
+            def __init__(self):
+                self.cookies = []
+
+            def add_cookies(self, cookies):
+                self.cookies.extend(cookies)
+
         class _Page:
             def __init__(self, core):
                 self.core = core
                 self.clicked = False
                 self.mark_args = None
+                self.context = _Context()
 
             def goto(self, *args, **kwargs):
                 return None
@@ -153,6 +162,7 @@ class U2ModuleTests(unittest.TestCase):
                 self.assertEqual(result.status, "already", result.message)
                 self.assertTrue(page.clicked)
                 self.assertEqual(page.mark_args[3], True)
+                self.assertTrue(any(cookie["name"] == "u2" for cookie in page.context.cookies))
 
     def test_parse_hidden_fields_and_answers(self):
         for module in self.modules:

@@ -442,6 +442,9 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "engine": "playwright",
         "method": "GET",
         "path": "/showup.php",
+        # Cookie 必须写入浏览器 Cookie 存储；只用 extra_http_headers 时 Chromium
+        # 可能不发送 Cookie，页面会变成未登录状态，从而找不到答题表单。
+        "cookie_mode": "browser",
         "submit_selector": "form:has(input[name='req']) input[type='submit']",
         "submit_method": "dom_click",
         "playwright_random_target": True,
