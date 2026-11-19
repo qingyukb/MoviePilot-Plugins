@@ -100,6 +100,60 @@ class U2ModuleTests(unittest.TestCase):
             self.assertIsNotNone(module)
             self.assertEqual(module.site_url, "u2.dmhy.org")
 
+    def test_playwright_rule_skips_raw_http_module(self):
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                rule = core.resolve_rule(
+                    {"url": "https://u2.dmhy.org/", "cookie": "u2=1"}, {})
+                self.assertEqual(rule["engine"], "playwright")
+                self.assertTrue(rule["playwright_random_target"])
+                self.assertIn("showup.php?action=show", rule["submit_selector"])
+                self.assertIsNone(core.run_site_module(
+                    {"url": "https://u2.dmhy.org/", "cookie": "u2=1"}, rule=rule))
+
+    def test_playwright_random_answer_flow(self):
+        class _Page:
+            def __init__(self, core):
+                self.core = core
+                self.clicked = False
+                self.mark_args = None
+
+            def goto(self, *args, **kwargs):
+                return None
+
+            def wait_for_load_state(self, *args, **kwargs):
+                return None
+
+            def content(self):
+                return SIGNED_PAGE if self.clicked else UNSIGNED_PAGE
+
+            def evaluate(self, script, args=None):
+                if script == self.core._MARK_CLICK_JS:
+                    self.mark_args = list(args or [])
+                    return True
+                return False
+
+            def click(self, selector, timeout=0):
+                self.clicked = True
+
+            def wait_for_timeout(self, timeout):
+                return None
+
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                rule = core.resolve_rule(
+                    {"url": "https://u2.dmhy.org/", "cookie": "u2=1"}, {})
+                page = _Page(core)
+                with mock.patch.object(core, "playwright_available", return_value=True),                         mock.patch.object(core, "_run_browser_callback",
+                                          side_effect=lambda callback, **kwargs: callback(page)):
+                    result = core.playwright_sign(
+                        {"url": "https://u2.dmhy.org/", "cookie": "u2=1"},
+                        rule, timeout=1)
+                self.assertIsNotNone(result)
+                self.assertEqual(result.status, "already", result.message)
+                self.assertTrue(page.clicked)
+                self.assertEqual(page.mark_args[3], True)
+
     def test_parse_hidden_fields_and_answers(self):
         for module in self.modules:
             hidden, options = module._showup_fields(UNSIGNED_PAGE)

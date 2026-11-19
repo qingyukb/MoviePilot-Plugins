@@ -204,7 +204,7 @@ class PTSiteSignIn(_PluginBase):
     plugin_name = "PT站点签到"
     plugin_desc = ("PT 站点自动签到，支持 Cookie 登录并读取最近动向；验证码或 Cloudflare 可按规则改用浏览器。")
     plugin_icon = "signin.png"
-    plugin_version = "3.1.10"
+    plugin_version = "3.1.11"
     plugin_author = "qingyukb"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "ptsignin_"
@@ -827,6 +827,16 @@ class PTSiteSignIn(_PluginBase):
         """
         logger.warning(f"PT站点签到：{site_name} 失败：{compact_text(message)}")
 
+    @staticmethod
+    def _log_success(site_name: str, status: str, message: str, engine: str = "-") -> None:
+        """输出成功或已签到日志，便于在运行日志里确认每个站点的最终结果。"""
+        labels = {"success": "签到成功", "already": "今日已签到", "login": "登录成功"}
+        label = labels.get(str(status or ""))
+        if not label:
+            return
+        detail = compact_text(message) if str(message or "").strip() else label
+        logger.info(f"PT站点签到：{site_name} {label}（{engine or '-'}）：{detail}")
+
     def _skip_result(self, info: Dict[str, Any], reason: str) -> Dict[str, Any]:
         return self._site_result(info, engine="-", status="failed", message=reason,
                                  dual=bool(info.get("dual")),
@@ -938,6 +948,7 @@ class PTSiteSignIn(_PluginBase):
             return self._skip_result(info, guard)
         dual = bool(info.get("dual"))
         engine = str(rule.get("engine") or "http").strip().lower()
+        logger.info(f"PT站点签到：开始处理 {site_name}（API Key / {engine}）")
         try:
             if engine == "playwright":
                 outcome = playwright_sign(info, rule, timeout=max(90, self._timeout * 2),
@@ -975,6 +986,7 @@ class PTSiteSignIn(_PluginBase):
                     transient=fallback.transient,
                 )
                 engine = "browserless"
+        self._log_success(site_name, outcome.status, outcome.message, engine)
         if outcome.status not in {"success", "already"}:
             self._log_failure(site_name, outcome.message)
         activity_text, activity_source = (
@@ -1031,6 +1043,7 @@ class PTSiteSignIn(_PluginBase):
             return self._sign_api_key_one(info, generic_rule, run_id, allowed_site_ids, signer=signer)
 
         engine = "http"
+        logger.info(f"PT站点签到：开始处理 {site_name}（{str(rule.get('engine') or 'http')}）")
         login_text = ""
         login_broken = False
         dual = bool(info.get("dual"))
@@ -1122,6 +1135,7 @@ class PTSiteSignIn(_PluginBase):
             logger.error(f"PT站点签到：{site_name} 异常：{compact_text(error)}")
             outcome = SignResult("failed", "签到执行出现未预期错误")
 
+        self._log_success(site_name, outcome.status, outcome.message, engine)
         if outcome.status not in {"success", "already"}:
             self._log_failure(site_name, outcome.message)
         if browser_auth and dual:
@@ -1163,6 +1177,7 @@ class PTSiteSignIn(_PluginBase):
         if guard:
             logger.debug(f"PT站点签到：{site_name} 跳过（{guard}）")
             return self._skip_result(info, guard)
+        logger.info(f"PT站点签到：开始登录 {site_name}")
 
         try:
             login_rule = resolve_rule(info, parse_rules(self._site_rules))
@@ -1182,6 +1197,8 @@ class PTSiteSignIn(_PluginBase):
                 info = dict(info, cookie=module_login.cookie)
             if not login_ok:
                 self._log_failure(site_name, login_text)
+            else:
+                self._log_success(site_name, "login", login_text, "module")
             guard = self._site_guard(info, run_id, allowed_site_ids, "仅登录")
             if guard:
                 return self._skip_result(info, guard)
@@ -1204,6 +1221,8 @@ class PTSiteSignIn(_PluginBase):
             login_ok = check.status == "success"
             if not login_ok:
                 self._log_failure(site_name, check.message)
+            else:
+                self._log_success(site_name, "login", check.message, "http")
             guard = self._site_guard(info, run_id, allowed_site_ids, "仅登录")
             if guard:
                 return self._skip_result(info, guard)
@@ -1243,6 +1262,8 @@ class PTSiteSignIn(_PluginBase):
             login_text = "未配置账号密码或 Cookie"
         if not login_ok:
             self._log_failure(site_name, login_text)
+        else:
+            self._log_success(site_name, "login", login_text, "http")
 
         guard = self._site_guard(info, run_id, allowed_site_ids, "仅登录")
         if guard:
@@ -1585,6 +1606,12 @@ class PTSiteSignIn(_PluginBase):
         if missing_ids:
             logger.warning(f"PT站点签到：配置中的站点 ID 已不存在，已忽略：{missing_ids}")
         logger.info(f"PT站点签到：开始，签到 {len(selected)} 个，仅登录 {len(login_selected)} 个")
+        if selected:
+            logger.info("PT站点签到：签到站点：" + "、".join(
+                str(getattr(site, "name", "") or getattr(site, "url", "")) for site in selected))
+        if login_selected:
+            logger.info("PT站点签到：仅登录站点：" + "、".join(
+                str(getattr(site, "name", "") or getattr(site, "url", "")) for site in login_selected))
         if not selected and not login_selected:
             message = (f"未选择可用的 MoviePilot 站点（签到 IDs={sorted(signin_ids)}，"
                        f"仅登录 IDs={sorted(login_only_ids)}）")
@@ -1749,6 +1776,12 @@ class PTSiteSignIn(_PluginBase):
         login_ok = sum(item.get("status") == "login" for item in results)
         failed = len(results) - signed - already - login_ok
         logger.info(f"PT站点签到：完成，新签到 {signed}，今日已签到 {already}，仅登录 {login_ok}，失败 {failed}")
+        for label, status in (("签到成功", "success"), ("今日已签到", "already"),
+                              ("登录成功", "login")):
+            names = [str(item.get("site") or "未知站点") for item in results
+                     if str(item.get("status") or "") == status]
+            if names:
+                logger.info(f"PT站点签到：{label}站点：" + "、".join(names))
         self._notify(results)
 
     def _save_results(self, results: List[Dict[str, str]]) -> List[Dict[str, str]]:

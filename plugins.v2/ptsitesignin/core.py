@@ -1332,7 +1332,7 @@ def discover_signin_target(html: str, base_url: str) -> Dict[str, Any]:
 # IP 就是运营商/家里的 IP，站点不会判「异地登录」，也不消耗 Browserless 额度。
 _PAGE_CLICK_JS = """
 (args) => {
-  const [selector, text, excludeTexts] = args;
+  const [selector, text, excludeTexts, randomize] = args;
   const nodes = Array.from(document.querySelectorAll(
     selector || "button, a, [role='button'], [role='menuitem'], input[type='submit'], li, span"));
   const excluded = (excludeTexts || []).filter(Boolean);
@@ -1349,7 +1349,9 @@ _PAGE_CLICK_JS = """
       return a - b;
     });
   if (!hits.length) return false;
-  const target = hits[0];
+  const target = randomize
+    ? hits[Math.floor(Math.random() * hits.length)]
+    : hits[0];
   target.scrollIntoView({block: "center"});
   target.click();
   return true;
@@ -1362,7 +1364,7 @@ _PAGE_CLICK_JS = """
 # （tmzg 的 captchasignin 也是用 page.click 才在猪猪上点成功的）。
 _MARK_CLICK_JS = """
 (args) => {
-  const [selector, text, excludeTexts] = args;
+  const [selector, text, excludeTexts, randomize] = args;
   const nodes = Array.from(document.querySelectorAll(
     selector || "input[type='submit'], button, a, [role='button']"));
   const wanted = (text || "").trim();
@@ -1376,6 +1378,12 @@ _MARK_CLICK_JS = """
       && !excluded.some((word) => label.includes(word));
   });
   if (!hits.length) return false;
+  if (randomize) {
+    const target = hits[Math.floor(Math.random() * hits.length)];
+    target.setAttribute("data-ptsignin-target", "1");
+    target.scrollIntoView({block: "center"});
+    return true;
+  }
   hits.sort((left, right) => {
     const a = (left.value || left.textContent || "").trim();
     const b = (right.value || right.textContent || "").trim();
@@ -2065,6 +2073,7 @@ def playwright_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: i
     state_selector = str(rule.get("playwright_state_selector") or "").strip()
     already_texts = [str(item) for item in (rule.get("playwright_already_texts") or [])
                      if str(item).strip()]
+    random_target = bool(rule.get("playwright_random_target"))
     skip_texts = [str(item) for item in (rule.get("playwright_skip_texts") or [])
                   if str(item).strip()]
     excluded_texts = list(dict.fromkeys(skip_texts + already_texts))
@@ -2249,7 +2258,7 @@ def playwright_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: i
                 for _attempt in range(2):
                     try:
                         marked = bool(page.evaluate(
-                            _MARK_CLICK_JS, [selector, submit_text, excluded_texts]))
+                            _MARK_CLICK_JS, [selector, submit_text, excluded_texts, random_target]))
                     except Exception:
                         marked = False
                     if not marked:
@@ -2280,7 +2289,7 @@ def playwright_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: i
                             # 真实点击失败（遮罩/动画挡住）时退回 JS 点击
                             try:
                                 clicked = bool(page.evaluate(
-                                    _PAGE_CLICK_JS, [selector, submit_text, excluded_texts]))
+                                    _PAGE_CLICK_JS, [selector, submit_text, excluded_texts, random_target]))
                             except Exception:
                                 clicked = False
                         try:
@@ -2534,6 +2543,10 @@ def run_site_module(site: Mapping[str, Any], timeout: int = 30,
         return None
     module = site_module_for(str(site.get("url") or ""))
     if module is None or not hasattr(module, "signin"):
+        return None
+    if (rule is not None and str(rule.get("engine") or "").lower() == "playwright"
+            and getattr(module, "prefer_playwright", False)):
+        # 部分站点（如 U2）的 HTTP 请求会被 DNS / TLS 链路拦截，但本机浏览器可正常访问。
         return None
     if not str(site.get("cookie") or "").strip() and not str(site.get("token") or "").strip():
         return SignResult("failed", "站点没有 Cookie，无法签到")

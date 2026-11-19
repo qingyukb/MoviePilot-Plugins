@@ -370,6 +370,46 @@ class PagePluginTests(unittest.TestCase):
                 self.assertEqual(call_map[(1, 2, 3, 4, 5)], 5)
                 self.assertEqual(call_map[(6, 7, 8)], 2)
 
+    def test_signin_logs_start_and_success(self):
+        site = {"id": 1, "name": "日志站", "url": "https://logging.example/",
+                "cookie": "c=1"}
+        for module in PLUGINS:
+            with self.subTest(plugin=module.__name__):
+                plugin = module.PTSiteSignIn.__new__(module.PTSiteSignIn)
+                plugin._timeout = 5
+                plugin._read_activity = False
+                messages = []
+                with mock.patch.object(module.logger, "info", side_effect=messages.append), \
+                        mock.patch.object(module, "run_site_module", return_value=None), \
+                        mock.patch.object(module, "http_sign_auto",
+                                          return_value=module.SignResult(
+                                              "success", "签到成功（获得 20 魔力值）")), \
+                        mock.patch.object(plugin, "_proxies_for", return_value=None):
+                    row = plugin._sign_one(site, {}, None, run_id=None,
+                                           allowed_site_ids=None)
+                self.assertEqual(row["status"], "success")
+                self.assertTrue(any("开始处理 日志站（http）" in item for item in messages))
+                self.assertTrue(any("日志站 签到成功（http）" in item for item in messages))
+
+    def test_finish_logs_successful_site_names(self):
+        for module in PLUGINS:
+            with self.subTest(plugin=module.__name__):
+                plugin = module.PTSiteSignIn.__new__(module.PTSiteSignIn)
+                messages = []
+                results = [
+                    {"site": "站点A", "status": "success", "message": "签到成功"},
+                    {"site": "站点B", "status": "already", "message": "今日已签到"},
+                    {"site": "站点C", "status": "login", "message": "登录成功"},
+                    {"site": "站点D", "status": "failed", "message": "失败"},
+                ]
+                with mock.patch.object(module.logger, "info", side_effect=messages.append), \
+                        mock.patch.object(plugin, "_save_results", side_effect=lambda value: value), \
+                        mock.patch.object(plugin, "_notify", return_value=None):
+                    plugin._finish(results)
+                self.assertTrue(any("签到成功站点：站点A" in item for item in messages))
+                self.assertTrue(any("今日已签到站点：站点B" in item for item in messages))
+                self.assertTrue(any("登录成功站点：站点C" in item for item in messages))
+
     def test_failed_non_dual_site_does_not_read_activity(self):
         info = {"id": 1, "name": "失败站点", "url": "https://failure.example",
                 "cookie": "c=1"}

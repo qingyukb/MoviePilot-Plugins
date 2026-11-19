@@ -82,6 +82,7 @@ def _showup_fields(page: str) -> Tuple[Dict[str, str], List[Tuple[str, str]]]:
 
 class U2:
     site_url = "u2.dmhy.org"
+    prefer_playwright = True
 
     def signin(self, site: Mapping[str, Any], ctx: Any) -> Tuple[bool, str]:
         page = ctx.page(SHOWUP_URL)

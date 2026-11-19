@@ -435,20 +435,26 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "quiz_fields": {"usercomment": "太难了！", "wantskip": "不会"},
     },
     # ---- U2（u2.dmhy.org）：showup 四选一，提交后必须回读确认 ----
-    # 独立模块负责精确解析 req/hash/form/_csrf 和四个答案按钮；这里保留 HTTP
-    # 兜底规则，但不把 JS 跳转当作成功，避免答错或未真正签到时误报。
+    # 模块仍保留 HTTP 解析；默认规则改走本机 Playwright，随机点四选一后回读确认。
     "u2.dmhy.org": {
-        "engine": "http",
+        # U2 的 HTTP 入口在部分网络会被 TLS / DNS 拦截；系统浏览器可以正常访问。
+        # 改用本机 Playwright：随机点击四选一中的一项，再从完整页面确认签到状态。
+        "engine": "playwright",
         "method": "GET",
         "path": "/showup.php",
-        "already": r"(?:已签到|已簽到|今日已签到|今日已簽到)",
-        "signin_path": "/showup.php?action=show",
-        "signin_method": "POST",
-        "signin_pick": "random",
-        "signin_data": {"message": "一切随缘~"},
-        "already_keywords": ["已签到", "已簽到"],
+        "submit_selector": "form[action*='showup.php?action=show'] input[type='submit']",
+        "submit_method": "dom_click",
+        "playwright_random_target": True,
+        "playwright_already_texts": ["已签到", "已簽到", "今日已签到", "今日已簽到"],
+        "playwright_skip_texts": ["补签", "補簽"],
+        "wait": 6000,
+        "already": r"(?:已签到|已簽到|今日已签到|今日已簽到|感谢，今天已签到|感謝，今天已簽到)",
+        "success_keywords": ["签到成功", "簽到成功", "感谢，今天已签到", "感謝，今天已簽到"],
+        "already_keywords": ["已签到", "已簽到", "今日已签到", "今日已簽到",
+                             "感谢，今天已签到", "感謝，今天已簽到"],
         "strict_status_keywords": True,
         "verify_success_path": "/showup.php",
+        "browserless_fallback": True,
     },
     # ---- 朱雀（zhuque.in）：首页取 x-csrf-token，POST JSON 释放技能（就是它的签到）----
     "zhuque.in": {
