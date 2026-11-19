@@ -1618,6 +1618,8 @@ _PLAYWRIGHT_DIAGNOSTIC_JS = r"""
     answerButtons: answerButtons,
     signedText: signedLink ? (signedLink.innerText || signedLink.textContent || "").trim() : "",
     hasChallenge: /just a moment|cf-chl|cloudflare|challenge-platform/i.test(html),
+    bodyText: ((document.body && document.body.innerText) || "")
+      .replace(/\s+/g, " ").trim().slice(0, 160),
   };
 }
 """
@@ -1875,20 +1877,37 @@ def _wait_playwright_page_ready(page: Any, rule: Mapping[str, Any],
     return state
 
 
-def playwright_page_diagnostic(state: Any) -> str:
-    """把本机浏览器失败时的页面状态压成单行诊断，不输出 Cookie 或正文。"""
+def playwright_page_diagnostic(state: Any, navigation_error: Any = "",
+                               detailed: bool = False) -> str:
+    """把本机浏览器失败时的页面状态压成单行诊断，不输出 Cookie。"""
     if not isinstance(state, Mapping):
         return "页面诊断不可用"
     title = re.sub(r"\s+", " ", str(state.get("title") or "")).strip()[:50] or "无标题"
+    url = re.sub(r"\s+", " ", str(state.get("url") or "")).strip()[:100]
     logged_in = bool(state.get("hasLogout")) and not bool(state.get("hasLoginForm"))
-    return (
-        f"页面「{title}」；登录态={'已登录' if logged_in else '未登录'}；"
-        f"req表单={'有' if state.get('hasReqForm') else '无'}；"
-        f"答题按钮={int(state.get('answerButtons') or 0)}；"
-        f"已签到入口={'有' if state.get('signedText') else '无'}；"
-        f"登录表单={'有' if state.get('hasLoginForm') else '无'}；"
-        f"安全验证页={'有' if state.get('hasChallenge') else '无'}"
-    )
+    req_form = bool(state.get("hasReqForm"))
+    answer_buttons = int(state.get("answerButtons") or 0)
+    signed = bool(state.get("signedText"))
+    parts = [
+        f"页面「{title}」",
+        f"登录态={'已登录' if logged_in else '未登录'}",
+        f"req表单={'有' if req_form else '无'}",
+        f"答题按钮={answer_buttons}",
+        f"已签到入口={'有' if signed else '无'}",
+        f"登录表单={'有' if state.get('hasLoginForm') else '无'}",
+        f"安全验证页={'有' if state.get('hasChallenge') else '无'}",
+    ]
+    if detailed:
+        parts.append(f"地址「{url or '-'}」")
+        note = re.sub(r"\s+", " ", str(navigation_error or "")).strip()[:120]
+        if note:
+            parts.append(f"导航异常「{note}」")
+        # 详细诊断只给显式开启的站点（当前为 U2），且只显示疑似错误页正文。
+        if not logged_in and not req_form and not signed:
+            body = re.sub(r"\s+", " ", str(state.get("bodyText") or "")).strip()[:100]
+            if body:
+                parts.append(f"正文「{body}」")
+    return "；".join(parts)
 
 
 def _page_ready_timeout_message(state: Mapping[str, Any]) -> str:
@@ -2223,11 +2242,12 @@ def playwright_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: i
             url = target_url(base_url, path)
             tried.append(path)
             page_ready: Dict[str, Any] = {}
+            navigation_error = ""
             try:
                 page.goto(url, wait_until="domcontentloaded",
                           timeout=max(15000, int(timeout * 1000)))
-            except Exception:
-                pass
+            except Exception as error:
+                navigation_error = str(error)
             try:
                 page.wait_for_load_state("domcontentloaded")
             except Exception:
@@ -2490,6 +2510,8 @@ def playwright_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: i
                 diagnostic = None
             if isinstance(diagnostic, Mapping):
                 last["diagnostic"] = dict(diagnostic)
+        if navigation_error:
+            last["navigation_error"] = navigation_error
         last["tried"] = tried
         last["paths"] = paths
         return last
@@ -2536,7 +2558,9 @@ def playwright_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: i
             return SignResult("failed",
                               f"本地浏览器仍卡在安全验证页面（已试：{tried or '默认页面'}）："
                               f"检查 Cookie 里是否带 cf_clearance / sl-*，或把 cloudflare_wait 调大")
-        diagnostic = playwright_page_diagnostic(outcome.get("diagnostic"))
+        diagnostic = playwright_page_diagnostic(
+            outcome.get("diagnostic"), outcome.get("navigation_error"),
+            detailed=bool(rule.get("playwright_detailed_diagnostic")))
         return SignResult("failed",
                           f"本地浏览器没找到可点的签到按钮；{diagnostic}"
                           f"；已试：{tried or '默认页面'}；可在该条规则的 retry_paths 里补页面")

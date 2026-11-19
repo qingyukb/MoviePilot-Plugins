@@ -451,6 +451,7 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "playwright_already_texts": ["已签到", "已簽到", "今日已签到", "今日已簽到"],
         "playwright_skip_texts": ["补签", "補簽"],
         "playwright_initial_wait": 10000,
+        "playwright_detailed_diagnostic": True,
         "wait": 8000,
         "already": r"(?:已签到|已簽到|今日已签到|今日已簽到|感谢，今天已签到|感謝，今天已簽到)",
         "success_keywords": ["签到成功", "簽到成功", "感谢，今天已签到", "感謝，今天已簽到"],

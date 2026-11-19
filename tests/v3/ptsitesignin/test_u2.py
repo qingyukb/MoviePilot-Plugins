@@ -110,6 +110,7 @@ class U2ModuleTests(unittest.TestCase):
                 self.assertEqual(rule["cookie_mode"], "browser")
                 self.assertIn("input[name='req']", rule["submit_selector"])
                 self.assertEqual(rule["playwright_initial_wait"], 10000)
+                self.assertTrue(rule["playwright_detailed_diagnostic"])
                 self.assertFalse(rule["browserless_fallback"])
                 self.assertIsNone(core.run_site_module(
                     {"url": "https://u2.dmhy.org/", "cookie": "u2=1"}, rule=rule))

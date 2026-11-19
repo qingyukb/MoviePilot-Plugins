@@ -2515,17 +2515,48 @@ class PlaywrightDiagnosticTests(unittest.TestCase):
             "answerButtons": 0,
             "signedText": "已签到",
             "hasChallenge": False,
-            "text": "不应输出的用户正文",
+            "url": "https://u2.dmhy.org/showup.php",
+            "bodyText": "不应输出的用户正文",
         }
         for core in CORES:
             with self.subTest(core=core.__name__):
-                text = core.playwright_page_diagnostic(state)
+                text = core.playwright_page_diagnostic(state, detailed=True)
                 self.assertIn("U2分享園", text)
                 self.assertIn("登录态=已登录", text)
                 self.assertIn("req表单=无", text)
                 self.assertIn("答题按钮=0", text)
                 self.assertIn("已签到入口=有", text)
                 self.assertNotIn("不应输出", text)
+
+    def test_page_diagnostic_is_concise_by_default(self):
+        state = {
+            "title": "普通站点", "url": "https://example.test/showup.php",
+            "hasLogout": True, "hasLoginForm": False, "hasReqForm": True,
+            "answerButtons": 4, "signedText": "", "hasChallenge": False,
+            "bodyText": "普通站点正文",
+        }
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                text = core.playwright_page_diagnostic(
+                    state, "net::ERR_TEST", detailed=False)
+                self.assertNotIn("地址", text)
+                self.assertNotIn("导航异常", text)
+                self.assertNotIn("正文", text)
+
+    def test_page_diagnostic_includes_navigation_error_page(self):
+        state = {
+            "title": "u2.dmhy.org", "url": "https://u2.dmhy.org/showup.php",
+            "hasLogout": False, "hasLoginForm": False, "hasReqForm": False,
+            "answerButtons": 0, "signedText": "", "hasChallenge": False,
+            "bodyText": "This site can’t be reached ERR_TUNNEL_CONNECTION_FAILED",
+        }
+        for core in CORES:
+            with self.subTest(core=core.__name__):
+                text = core.playwright_page_diagnostic(
+                    state, "net::ERR_TUNNEL_CONNECTION_FAILED", detailed=True)
+                self.assertIn("导航异常", text)
+                self.assertIn("ERR_TUNNEL_CONNECTION_FAILED", text)
+                self.assertIn("正文", text)
 
 
 class PlaywrightCaptchaTests(unittest.TestCase):
