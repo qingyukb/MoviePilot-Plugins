@@ -2108,6 +2108,10 @@ def playwright_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: i
                   if str(item).strip()]
     excluded_texts = list(dict.fromkeys(skip_texts + already_texts))
     wait_ms = int(rule.get("wait") or 4000)
+    try:
+        initial_wait_ms = max(0, min(int(rule.get("playwright_initial_wait") or 0), 30000))
+    except (TypeError, ValueError):
+        initial_wait_ms = 0
 
     # CF / 雷池 都靠页面自己的 JS 跑完才放行：勾选式还要点一下 iframe 里的勾选框。
     # 预算取规则里的 cloudflare_wait（秒），没写就按 20 秒。
@@ -2186,6 +2190,11 @@ def playwright_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: i
                 page.wait_for_load_state("domcontentloaded")
             except Exception:
                 pass
+            if initial_wait_ms:
+                try:
+                    page.wait_for_timeout(initial_wait_ms)
+                except Exception:
+                    pass
             before = _wait_challenge_clear(page, challenge_budget)
 
             # 猪猪的鉴权在页面 JS + localStorage 中完成。登录页、锁定页和日历容器都

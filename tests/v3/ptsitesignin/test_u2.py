@@ -109,6 +109,8 @@ class U2ModuleTests(unittest.TestCase):
                 self.assertTrue(rule["playwright_random_target"])
                 self.assertEqual(rule["cookie_mode"], "browser")
                 self.assertIn("input[name='req']", rule["submit_selector"])
+                self.assertEqual(rule["playwright_initial_wait"], 10000)
+                self.assertFalse(rule["browserless_fallback"])
                 self.assertIsNone(core.run_site_module(
                     {"url": "https://u2.dmhy.org/", "cookie": "u2=1"}, rule=rule))
 
@@ -126,6 +128,7 @@ class U2ModuleTests(unittest.TestCase):
                 self.clicked = False
                 self.mark_args = None
                 self.context = _Context()
+                self.timeouts = []
 
             def goto(self, *args, **kwargs):
                 return None
@@ -146,7 +149,7 @@ class U2ModuleTests(unittest.TestCase):
                 self.clicked = True
 
             def wait_for_timeout(self, timeout):
-                return None
+                self.timeouts.append(timeout)
 
         for core in CORES:
             with self.subTest(core=core.__name__):
@@ -162,6 +165,7 @@ class U2ModuleTests(unittest.TestCase):
                 self.assertEqual(result.status, "already", result.message)
                 self.assertTrue(page.clicked)
                 self.assertEqual(page.mark_args[3], True)
+                self.assertIn(10000, page.timeouts)
                 self.assertTrue(any(cookie["name"] == "u2" for cookie in page.context.cookies))
 
     def test_parse_hidden_fields_and_answers(self):

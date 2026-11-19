@@ -860,7 +860,9 @@ class PTSiteSignIn(_PluginBase):
                     return outcome
                 # 本机成功时绝不消耗 Browserless 额度；只有浏览器助手缺失或本机流程失败，
                 # 且规则允许时才回退。
-                allow_fallback = bool(rule.get("browserless_fallback")) or outcome is None
+                fallback_setting = rule.get("browserless_fallback")
+                allow_fallback = (bool(fallback_setting) if fallback_setting is not None
+                                  else outcome is None)
                 if allow_fallback and signer is not None:
                     reason = ("本机未提供 Playwright" if outcome is None
                               else f"本机 Playwright 失败：{outcome.message}")

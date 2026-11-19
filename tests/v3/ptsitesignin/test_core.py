@@ -2018,6 +2018,31 @@ class ModuleFallbackTests(unittest.TestCase):
         self.assertEqual(outcome.status, "success")
         self.assertIn("本机未提供 Playwright", outcome.message)
 
+    def test_disabled_browserless_fallback_is_honoured(self):
+        module = self._plugin()
+        plugin = module.PTSiteSignIn.__new__(module.PTSiteSignIn)
+        plugin._timeout = 30
+        plugin._proxies_for = lambda info: None  # type: ignore[method-assign]
+
+        class _Signer:
+            def __init__(self):
+                self.calls = 0
+
+            def sign(self, info, rule):
+                self.calls += 1
+                return module.SignResult("success", "不应执行")
+
+        signer = _Signer()
+        with mock.patch.object(module, "playwright_sign", return_value=None):
+            outcome = plugin._sign_with_engine(
+                {"url": "https://u2.dmhy.org", "cookie": "u2=1"},
+                {"engine": "playwright", "path": "/showup.php",
+                 "browserless_fallback": False},
+                "playwright", signer, "动漫花园")
+        self.assertEqual(outcome.status, "failed")
+        self.assertIn("未配置 Browserless", outcome.message)
+        self.assertEqual(signer.calls, 0)
+
     def test_browserless_fallback_record_keeps_playwright_engine(self):
         from unittest import mock
 
